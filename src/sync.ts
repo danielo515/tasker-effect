@@ -1,525 +1,490 @@
 /**
  * @module sync
- * @description Module for syncing profiles from GitHub CI artifacts
+ * @description Pull compiled JavaScript profiles from GitHub CI.
+ *
+ * Two sources are supported:
+ *
+ * - **Releases** (default): downloads the `.js` assets of the latest GitHub
+ *   release. Public repos need no token and downloads are plain text, so
+ *   this path works both under Node/Bun and inside Tasker's JavaScript
+ *   environment (fetch + Tasker's writeFile via {@link TaskerFileStore}).
+ * - **Actions artifacts**: downloads the newest CI artifact zip via the
+ *   GitHub API (token required) and extracts it. Intended for Node/CI use.
  */
 
-import { Effect, Context, Layer, Data, Option } from "effect";
+import { Effect, Layer, Schema } from "effect";
+import { Tasker } from "./tasker-api.js";
 
 // =============================================================================
-// Types
+// Errors
 // =============================================================================
 
-/** Configuration for the sync module */
-export interface SyncConfig {
-  readonly owner: string;
-  readonly repo: string;
-  readonly token?: string;
-  readonly artifactPattern?: string;
-  readonly targetDir?: string;
-  readonly workflow?: string;
-  readonly branch?: string;
-}
+/** The GitHub API answered with an error or unparseable payload */
+export class GitHubApiError extends Schema.TaggedError<GitHubApiError>()(
+  "GitHubApiError",
+  {
+    message: Schema.String,
+    url: Schema.String,
+    status: Schema.optional(Schema.Number),
+  }
+) {}
 
-/** Sync errors */
-export class SyncError extends Data.TaggedError("SyncError")<{
-  readonly message: string;
-  readonly cause?: string;
-}> {}
+/** A file download failed */
+export class DownloadError extends Schema.TaggedError<DownloadError>()(
+  "DownloadError",
+  {
+    message: Schema.String,
+    url: Schema.String,
+  }
+) {}
 
-export class NetworkError extends Data.TaggedError("NetworkError")<{
-  readonly message: string;
-  readonly statusCode?: number;
-}> {}
+/** No matching release asset or CI artifact was found */
+export class NothingToSyncError extends Schema.TaggedError<NothingToSyncError>()(
+  "NothingToSyncError",
+  {
+    message: Schema.String,
+  }
+) {}
 
-export class FileSystemError extends Data.TaggedError("FileSystemError")<{
-  readonly message: string;
-  readonly path: string;
-}> {}
+/** Writing a synced file to storage failed */
+export class StorageWriteError extends Schema.TaggedError<StorageWriteError>()(
+  "StorageWriteError",
+  {
+    message: Schema.String,
+    path: Schema.String,
+  }
+) {}
 
-/** Artifact metadata */
-export interface Artifact {
-  readonly id: number;
-  readonly name: string;
-  readonly sizeInBytes: number;
-  readonly createdAt: string;
-  readonly expiresAt: string;
-  readonly downloadUrl: string;
-  readonly workflowRun?: {
-    readonly id: number;
-    readonly headBranch: string;
-    readonly headSha: string;
-  };
-}
-
-/** Sync result */
-export interface SyncResult {
-  readonly artifact: Artifact;
-  readonly files: readonly string[];
-  readonly timestamp: string;
-}
+/** Extracting a downloaded artifact zip failed */
+export class ZipExtractError extends Schema.TaggedError<ZipExtractError>()(
+  "ZipExtractError",
+  {
+    message: Schema.String,
+    path: Schema.String,
+  }
+) {}
 
 // =============================================================================
-// GitHub API Types
+// GitHub API payload schemas
 // =============================================================================
 
-interface GitHubArtifact {
-  id: number;
-  name: string;
-  size_in_bytes: number;
-  created_at: string;
-  expires_at: string;
-  archive_download_url: string;
-  workflow_run?: {
-    id: number;
-    head_branch: string;
-    head_sha: string;
-  };
-}
-
-interface GitHubArtifactsResponse {
-  total_count: number;
-  artifacts: GitHubArtifact[];
-}
-
-// =============================================================================
-// HTTP Client
-// =============================================================================
-
-export interface HttpClientService {
-  readonly get: (
-    url: string,
-    headers?: Record<string, string>
-  ) => Effect.Effect<{ status: number; body: string }, NetworkError>;
-
-  readonly download: (
-    url: string,
-    targetPath: string,
-    headers?: Record<string, string>
-  ) => Effect.Effect<void, NetworkError | FileSystemError>;
-}
-
-export class HttpClient extends Context.Tag("HttpClient")<
-  HttpClient,
-  HttpClientService
->() {}
-
-/** Node.js HTTP client implementation */
-export const NodeHttpClient = Layer.succeed(HttpClient, {
-  get: (url, headers = {}) =>
-    Effect.tryPromise({
-      try: async () => {
-        const response = await fetch(url, {
-          method: "GET",
-          headers: {
-            Accept: "application/vnd.github+json",
-            "User-Agent": "tasker-effect",
-            ...headers,
-          },
-        });
-        const body = await response.text();
-        return { status: response.status, body };
-      },
-      catch: (e) =>
-        new NetworkError({
-          message: `HTTP request failed: ${e}`,
-        }),
-    }),
-
-  download: (url, targetPath, headers = {}) =>
-    Effect.tryPromise({
-      try: async () => {
-        const response = await fetch(url, {
-          method: "GET",
-          headers: {
-            Accept: "application/octet-stream",
-            "User-Agent": "tasker-effect",
-            ...headers,
-          },
-        });
-
-        if (!response.ok) {
-          throw new Error(`Download failed: ${response.status}`);
-        }
-
-        const buffer = await response.arrayBuffer();
-
-        const { writeFileSync, mkdirSync } = await import("node:fs");
-        const { dirname } = await import("node:path");
-
-        mkdirSync(dirname(targetPath), { recursive: true });
-        writeFileSync(targetPath, Buffer.from(buffer));
-      },
-      catch: (e) =>
-        new NetworkError({
-          message: `Download failed: ${e}`,
-        }),
-    }),
+const ReleaseAsset = Schema.Struct({
+  name: Schema.String,
+  browser_download_url: Schema.String,
+  size: Schema.Number,
 });
 
-// =============================================================================
-// File System
-// =============================================================================
+const Release = Schema.Struct({
+  tag_name: Schema.String,
+  assets: Schema.Array(ReleaseAsset),
+});
 
-export interface FileSystemService {
-  readonly writeFile: (
-    path: string,
-    content: string
-  ) => Effect.Effect<void, FileSystemError>;
-  readonly readFile: (path: string) => Effect.Effect<string, FileSystemError>;
-  readonly mkdir: (path: string) => Effect.Effect<void, FileSystemError>;
-  readonly exists: (path: string) => Effect.Effect<boolean, never>;
-  readonly listDir: (path: string) => Effect.Effect<string[], FileSystemError>;
-  readonly unzip: (
-    zipPath: string,
-    targetDir: string
-  ) => Effect.Effect<string[], FileSystemError>;
-}
+const Artifact = Schema.Struct({
+  id: Schema.Number,
+  name: Schema.String,
+  size_in_bytes: Schema.Number,
+  created_at: Schema.String,
+  expired: Schema.Boolean,
+  archive_download_url: Schema.String,
+  workflow_run: Schema.optional(
+    Schema.Struct({
+      head_branch: Schema.optional(Schema.String),
+    })
+  ),
+});
 
-export class FileSystem extends Context.Tag("FileSystem")<
-  FileSystem,
-  FileSystemService
->() {}
+const ArtifactsResponse = Schema.Struct({
+  artifacts: Schema.Array(Artifact),
+});
 
-/** Node.js file system implementation */
-export const NodeFileSystem = Layer.effect(
-  FileSystem,
-  Effect.gen(function* () {
-    const fs = yield* Effect.tryPromise({
-      try: () => import("node:fs/promises"),
-      catch: () =>
-        new FileSystemError({ message: "Failed to import fs", path: "" }),
-    });
-
-    const path = yield* Effect.tryPromise({
-      try: () => import("node:path"),
-      catch: () =>
-        new FileSystemError({ message: "Failed to import path", path: "" }),
-    });
-
-    return {
-      writeFile: (filePath: string, content: string) =>
-        Effect.tryPromise({
-          try: async () => {
-            await fs.mkdir(path.dirname(filePath), { recursive: true });
-            await fs.writeFile(filePath, content, "utf-8");
-          },
-          catch: (e) =>
-            new FileSystemError({
-              message: `Failed to write file: ${e}`,
-              path: filePath,
-            }),
-        }),
-
-      readFile: (filePath: string) =>
-        Effect.tryPromise({
-          try: () => fs.readFile(filePath, "utf-8"),
-          catch: (e) =>
-            new FileSystemError({
-              message: `Failed to read file: ${e}`,
-              path: filePath,
-            }),
-        }),
-
-      mkdir: (dirPath: string) =>
-        Effect.tryPromise({
-          try: () => fs.mkdir(dirPath, { recursive: true }).then(() => undefined),
-          catch: (e) =>
-            new FileSystemError({
-              message: `Failed to create directory: ${e}`,
-              path: dirPath,
-            }),
-        }),
-
-      exists: (filePath: string) =>
-        Effect.tryPromise({
-          try: async () => {
-            try {
-              await fs.access(filePath);
-              return true;
-            } catch {
-              return false;
-            }
-          },
-          catch: () => false,
-        }).pipe(Effect.orElseSucceed(() => false)),
-
-      listDir: (dirPath: string) =>
-        Effect.tryPromise({
-          try: () => fs.readdir(dirPath),
-          catch: (e) =>
-            new FileSystemError({
-              message: `Failed to list directory: ${e}`,
-              path: dirPath,
-            }),
-        }),
-
-      unzip: (zipPath: string, targetDir: string) =>
-        Effect.tryPromise({
-          try: async () => {
-            const { execSync } = await import("node:child_process");
-            await fs.mkdir(targetDir, { recursive: true });
-            execSync(`unzip -o "${zipPath}" -d "${targetDir}"`, {
-              stdio: "pipe",
-            });
-            return fs.readdir(targetDir);
-          },
-          catch: (e) =>
-            new FileSystemError({
-              message: `Failed to unzip: ${e}`,
-              path: zipPath,
-            }),
-        }),
-    };
-  })
-);
+/** Metadata of a CI artifact */
+export type ArtifactInfo = typeof Artifact.Type;
 
 // =============================================================================
-// Sync Service
+// HTTP client service (fetch-based; works in Node, Bun and modern WebViews)
 // =============================================================================
 
-export interface SyncServiceInterface {
-  readonly listArtifacts: () => Effect.Effect<
-    Artifact[],
-    SyncError | NetworkError
-  >;
-  readonly getLatestArtifact: () => Effect.Effect<
-    Option.Option<Artifact>,
-    SyncError | NetworkError
-  >;
-  readonly downloadArtifact: (
-    artifact: Artifact
-  ) => Effect.Effect<string[], SyncError | NetworkError | FileSystemError>;
-  readonly pullLatestProfiles: () => Effect.Effect<
-    SyncResult,
-    SyncError | NetworkError | FileSystemError
-  >;
-}
+const fetchResponse = (
+  url: string,
+  headers: Record<string, string>
+): Effect.Effect<Response, DownloadError> =>
+  Effect.tryPromise({
+    try: () => fetch(url, { headers }),
+    catch: (cause) => new DownloadError({ message: String(cause), url }),
+  });
 
-export class SyncService extends Context.Tag("SyncService")<
-  SyncService,
-  SyncServiceInterface
->() {}
-
-/** Create sync service from config */
-export const makeSyncService = (config: SyncConfig) =>
-  Layer.effect(
-    SyncService,
-    Effect.gen(function* () {
-      const http = yield* HttpClient;
-      const fs = yield* FileSystem;
-
-      const apiUrl = `https://api.github.com/repos/${config.owner}/${config.repo}`;
-
-      const headers: Record<string, string> = {
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      };
-
-      if (config.token) {
-        headers.Authorization = `Bearer ${config.token}`;
-      }
-
-      const parseArtifact = (ghArtifact: GitHubArtifact): Artifact => ({
-        id: ghArtifact.id,
-        name: ghArtifact.name,
-        sizeInBytes: ghArtifact.size_in_bytes,
-        createdAt: ghArtifact.created_at,
-        expiresAt: ghArtifact.expires_at,
-        downloadUrl: ghArtifact.archive_download_url,
-        workflowRun: ghArtifact.workflow_run
-          ? {
-              id: ghArtifact.workflow_run.id,
-              headBranch: ghArtifact.workflow_run.head_branch,
-              headSha: ghArtifact.workflow_run.head_sha,
-            }
-          : undefined,
+export class SyncHttpClient extends Effect.Service<SyncHttpClient>()(
+  "SyncHttpClient",
+  {
+    sync: () => {
+      const getJson = Effect.fn("SyncHttpClient.getJson")(function* (
+        url: string,
+        headers: Record<string, string>
+      ) {
+        const response = yield* fetchResponse(url, headers).pipe(
+          Effect.catchTag("DownloadError", (error) =>
+            Effect.fail(
+              new GitHubApiError({ message: error.message, url })
+            )
+          )
+        );
+        if (!response.ok) {
+          return yield* Effect.fail(
+            new GitHubApiError({
+              message: `GitHub API returned ${response.status}`,
+              url,
+              status: response.status,
+            })
+          );
+        }
+        return yield* Effect.tryPromise({
+          try: (): Promise<unknown> => response.json(),
+          catch: (cause) =>
+            new GitHubApiError({ message: `Invalid JSON: ${String(cause)}`, url }),
+        });
       });
 
-      return {
-        listArtifacts: () =>
-          Effect.gen(function* () {
-            const response = yield* http.get(
-              `${apiUrl}/actions/artifacts`,
-              headers
-            );
+      const getText = Effect.fn("SyncHttpClient.getText")(function* (
+        url: string,
+        headers: Record<string, string>
+      ) {
+        const response = yield* fetchResponse(url, headers);
+        if (!response.ok) {
+          return yield* Effect.fail(
+            new DownloadError({
+              message: `Download returned ${response.status}`,
+              url,
+            })
+          );
+        }
+        return yield* Effect.tryPromise({
+          try: () => response.text(),
+          catch: (cause) => new DownloadError({ message: String(cause), url }),
+        });
+      });
 
-            if (response.status !== 200) {
-              return yield* new NetworkError({
-                message: `GitHub API returned ${response.status}`,
-                statusCode: response.status,
-              });
-            }
+      const getBytes = Effect.fn("SyncHttpClient.getBytes")(function* (
+        url: string,
+        headers: Record<string, string>
+      ) {
+        const response = yield* fetchResponse(url, headers);
+        if (!response.ok) {
+          return yield* Effect.fail(
+            new DownloadError({
+              message: `Download returned ${response.status}`,
+              url,
+            })
+          );
+        }
+        const buffer = yield* Effect.tryPromise({
+          try: () => response.arrayBuffer(),
+          catch: (cause) => new DownloadError({ message: String(cause), url }),
+        });
+        return new Uint8Array(buffer);
+      });
 
-            const data = JSON.parse(response.body) as GitHubArtifactsResponse;
-
-            let artifacts = data.artifacts.filter((a) =>
-              a.name.includes(config.artifactPattern ?? "tasker-profiles")
-            );
-
-            if (config.branch) {
-              artifacts = artifacts.filter(
-                (a) => a.workflow_run?.head_branch === config.branch
-              );
-            }
-
-            return artifacts.map(parseArtifact);
-          }),
-
-        getLatestArtifact: () =>
-          Effect.gen(function* () {
-            const response = yield* http.get(
-              `${apiUrl}/actions/artifacts`,
-              headers
-            );
-
-            if (response.status !== 200) {
-              return yield* new NetworkError({
-                message: `GitHub API returned ${response.status}`,
-                statusCode: response.status,
-              });
-            }
-
-            const data = JSON.parse(response.body) as GitHubArtifactsResponse;
-
-            let artifacts = data.artifacts.filter((a) =>
-              a.name.includes(config.artifactPattern ?? "tasker-profiles")
-            );
-
-            if (config.branch) {
-              artifacts = artifacts.filter(
-                (a) => a.workflow_run?.head_branch === config.branch
-              );
-            }
-
-            if (artifacts.length === 0) {
-              return Option.none<Artifact>();
-            }
-
-            const sorted = [...artifacts].sort(
-              (a, b) =>
-                new Date(b.created_at).getTime() -
-                new Date(a.created_at).getTime()
-            );
-
-            const first = sorted[0];
-            if (!first) {
-              return Option.none<Artifact>();
-            }
-            return Option.some(parseArtifact(first));
-          }),
-
-        downloadArtifact: (artifact: Artifact) =>
-          Effect.gen(function* () {
-            const targetDir = config.targetDir ?? "/sdcard/Tasker/profiles";
-            const zipPath = `${targetDir}/_artifact_${artifact.id}.zip`;
-
-            yield* http.download(artifact.downloadUrl, zipPath, headers);
-            const files = yield* fs.unzip(zipPath, targetDir);
-
-            return files;
-          }),
-
-        pullLatestProfiles: () =>
-          Effect.gen(function* () {
-            // Get latest artifact inline instead of through service
-            const response = yield* http.get(
-              `${apiUrl}/actions/artifacts`,
-              headers
-            );
-
-            if (response.status !== 200) {
-              return yield* new NetworkError({
-                message: `GitHub API returned ${response.status}`,
-                statusCode: response.status,
-              });
-            }
-
-            const data = JSON.parse(response.body) as GitHubArtifactsResponse;
-
-            let artifacts = data.artifacts.filter((a) =>
-              a.name.includes(config.artifactPattern ?? "tasker-profiles")
-            );
-
-            if (config.branch) {
-              artifacts = artifacts.filter(
-                (a) => a.workflow_run?.head_branch === config.branch
-              );
-            }
-
-            if (artifacts.length === 0) {
-              return yield* new SyncError({
-                message: "No artifacts found matching criteria",
-              });
-            }
-
-            const sorted = [...artifacts].sort(
-              (a, b) =>
-                new Date(b.created_at).getTime() -
-                new Date(a.created_at).getTime()
-            );
-
-            const first = sorted[0];
-            if (!first) {
-              return yield* new SyncError({
-                message: "No artifacts found matching criteria",
-              });
-            }
-
-            const artifact = parseArtifact(first);
-
-            // Download artifact inline
-            const targetDir = config.targetDir ?? "/sdcard/Tasker/profiles";
-            const zipPath = `${targetDir}/_artifact_${artifact.id}.zip`;
-
-            yield* http.download(artifact.downloadUrl, zipPath, headers);
-            const files = yield* fs.unzip(zipPath, targetDir);
-
-            return {
-              artifact,
-              files,
-              timestamp: new Date().toISOString(),
-            };
-          }),
-      };
-    })
-  );
+      return { getJson, getText, getBytes };
+    },
+  }
+) {}
 
 // =============================================================================
-// Pre-configured Layers
+// File store service
 // =============================================================================
 
-export const NodeSyncLive = (config: SyncConfig) =>
-  makeSyncService(config).pipe(
-    Layer.provide(NodeHttpClient),
-    Layer.provide(NodeFileSystem)
-  );
-
-// =============================================================================
-// Main Function
-// =============================================================================
+export class FileStore extends Effect.Service<FileStore>()("FileStore", {
+  sync: () => ({
+    /** Write a text file, creating parent directories (Node/Bun) */
+    writeText: (path: string, content: string): Effect.Effect<void, StorageWriteError> =>
+      Effect.tryPromise({
+        try: async () => {
+          const fs = await import("node:fs/promises");
+          const { dirname } = await import("node:path");
+          await fs.mkdir(dirname(path), { recursive: true });
+          await fs.writeFile(path, content, "utf-8");
+        },
+        catch: (cause) =>
+          new StorageWriteError({ message: String(cause), path }),
+      }),
+    /** Write a binary file, creating parent directories (Node/Bun) */
+    writeBytes: (path: string, content: Uint8Array): Effect.Effect<void, StorageWriteError> =>
+      Effect.tryPromise({
+        try: async () => {
+          const fs = await import("node:fs/promises");
+          const { dirname } = await import("node:path");
+          await fs.mkdir(dirname(path), { recursive: true });
+          await fs.writeFile(path, content);
+        },
+        catch: (cause) =>
+          new StorageWriteError({ message: String(cause), path }),
+      }),
+  }),
+}) {}
 
 /**
- * Pull latest profiles from GitHub CI
+ * FileStore backed by Tasker's writeFile builtin, for running the sync from
+ * inside Tasker itself. Binary writes are not supported there.
  */
-export const pullLatestProfiles = (options: {
-  owner: string;
-  repo: string;
-  token?: string;
-  artifactPattern?: string;
-  targetDir?: string;
-  branch?: string;
-}): Effect.Effect<SyncResult, SyncError | NetworkError | FileSystemError> => {
-  const config: SyncConfig = {
-    owner: options.owner,
-    repo: options.repo,
-    token: options.token,
-    artifactPattern: options.artifactPattern,
-    targetDir: options.targetDir,
-    branch: options.branch ?? "main",
-  };
+export const TaskerFileStore: Layer.Layer<FileStore> = Layer.effect(
+  FileStore,
+  Effect.gen(function* () {
+    const tasker = yield* Tasker;
+    return new FileStore({
+      writeText: (path: string, content: string) =>
+        tasker.writeFile(path, content, false).pipe(
+          Effect.asVoid,
+          Effect.catchTags({
+            TaskerCallError: (error) =>
+              Effect.fail(new StorageWriteError({ message: error.message, path })),
+            TaskerNotAvailableError: (error) =>
+              Effect.fail(new StorageWriteError({ message: error.message, path })),
+          })
+        ),
+      writeBytes: (path: string) =>
+        Effect.fail(
+          new StorageWriteError({
+            message: "Binary writes are not supported in the Tasker environment",
+            path,
+          })
+        ),
+    });
+  })
+).pipe(Layer.provide(Tasker.Default));
 
-  return Effect.gen(function* () {
-    const service = yield* SyncService;
-    return yield* service.pullLatestProfiles();
-  }).pipe(Effect.provide(NodeSyncLive(config)));
-};
+// =============================================================================
+// Zip extractor service
+// =============================================================================
+
+export class ZipExtractor extends Effect.Service<ZipExtractor>()(
+  "ZipExtractor",
+  {
+    sync: () => ({
+      /** Extract a zip into a directory, returning the extracted file names */
+      extract: (
+        zipPath: string,
+        targetDir: string
+      ): Effect.Effect<ReadonlyArray<string>, ZipExtractError> =>
+        Effect.tryPromise({
+          try: async () => {
+            const { execFileSync } = await import("node:child_process");
+            const fs = await import("node:fs/promises");
+            await fs.mkdir(targetDir, { recursive: true });
+            execFileSync("unzip", ["-o", zipPath, "-d", targetDir], {
+              stdio: "pipe",
+            });
+            return await fs.readdir(targetDir);
+          },
+          catch: (cause) =>
+            new ZipExtractError({ message: String(cause), path: zipPath }),
+        }),
+    }),
+  }
+) {}
+
+/** ZipExtractor backed by Tasker's unzip builtin (extracts in place) */
+export const TaskerZipExtractor: Layer.Layer<ZipExtractor> = Layer.effect(
+  ZipExtractor,
+  Effect.gen(function* () {
+    const tasker = yield* Tasker;
+    return new ZipExtractor({
+      extract: (zipPath: string, _targetDir: string) =>
+        tasker.unzip(zipPath, true).pipe(
+          Effect.as([] as ReadonlyArray<string>),
+          Effect.catchTags({
+            TaskerCallError: (error) =>
+              Effect.fail(new ZipExtractError({ message: error.message, path: zipPath })),
+            TaskerNotAvailableError: (error) =>
+              Effect.fail(new ZipExtractError({ message: error.message, path: zipPath })),
+          })
+        ),
+    });
+  })
+).pipe(Layer.provide(Tasker.Default));
+
+// =============================================================================
+// Profile sync service
+// =============================================================================
+
+/** Options for a sync run */
+export interface SyncOptions {
+  readonly owner: string;
+  readonly repo: string;
+  /** Where to store the downloaded files. Default: /sdcard/Tasker/js */
+  readonly targetDir?: string;
+  /** GitHub token; required for artifact downloads and private repos */
+  readonly token?: string;
+  /** File suffixes to download from release assets. Default: [".js"] */
+  readonly assetSuffixes?: ReadonlyArray<string>;
+  /** CI artifact name to look for. Default: "tasker-js" */
+  readonly artifactName?: string;
+}
+
+/** Result of a sync run */
+export interface SyncResult {
+  readonly source: "release" | "artifact";
+  /** Release tag or artifact created_at that was synced */
+  readonly version: string;
+  readonly files: ReadonlyArray<string>;
+  readonly targetDir: string;
+}
+
+const DEFAULT_TARGET_DIR = "/sdcard/Tasker/js";
+
+const apiHeaders = (token: string | undefined): Record<string, string> => ({
+  Accept: "application/vnd.github+json",
+  "X-GitHub-Api-Version": "2022-11-28",
+  "User-Agent": "tasker-effect",
+  ...(token !== undefined ? { Authorization: `Bearer ${token}` } : {}),
+});
+
+const decodeAs = <A, I>(schema: Schema.Schema<A, I>, url: string) =>
+  (input: unknown): Effect.Effect<A, GitHubApiError> =>
+    Schema.decodeUnknown(schema)(input).pipe(
+      Effect.catchTag("ParseError", (error) =>
+        Effect.fail(
+          new GitHubApiError({
+            message: `Unexpected GitHub API payload: ${error.message}`,
+            url,
+          })
+        )
+      )
+    );
+
+export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
+  dependencies: [
+    SyncHttpClient.Default,
+    FileStore.Default,
+    ZipExtractor.Default,
+  ],
+  effect: Effect.gen(function* () {
+    const http = yield* SyncHttpClient;
+    const files = yield* FileStore;
+    const extractor = yield* ZipExtractor;
+
+    /** Pull the .js assets of the latest release. Works on-device. */
+    const pullLatestProfiles = Effect.fn("ProfileSync.pullLatestProfiles")(
+      function* (options: SyncOptions) {
+        const targetDir = options.targetDir ?? DEFAULT_TARGET_DIR;
+        const suffixes = options.assetSuffixes ?? [".js"];
+        const url = `https://api.github.com/repos/${options.owner}/${options.repo}/releases/latest`;
+
+        const payload = yield* http.getJson(url, apiHeaders(options.token));
+        const release = yield* decodeAs(Release, url)(payload);
+
+        const assets = release.assets.filter((asset) =>
+          suffixes.some((suffix) => asset.name.endsWith(suffix))
+        );
+        if (assets.length === 0) {
+          return yield* Effect.fail(
+            new NothingToSyncError({
+              message: `Release ${release.tag_name} has no assets matching ${suffixes.join(", ")}`,
+            })
+          );
+        }
+
+        const written: Array<string> = [];
+        for (const asset of assets) {
+          const content = yield* http.getText(
+            asset.browser_download_url,
+            apiHeaders(options.token)
+          );
+          const path = `${targetDir}/${asset.name}`;
+          yield* files.writeText(path, content);
+          written.push(asset.name);
+          yield* Effect.log("Synced release asset", { asset: asset.name, path });
+        }
+
+        return {
+          source: "release",
+          version: release.tag_name,
+          files: written,
+          targetDir,
+        } satisfies SyncResult;
+      }
+    );
+
+    /** Newest non-expired CI artifact matching the configured name */
+    const latestArtifact = Effect.fn("ProfileSync.latestArtifact")(function* (
+      options: SyncOptions
+    ) {
+      const name = options.artifactName ?? "tasker-js";
+      const url = `https://api.github.com/repos/${options.owner}/${options.repo}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=10`;
+
+      const payload = yield* http.getJson(url, apiHeaders(options.token));
+      const response = yield* decodeAs(ArtifactsResponse, url)(payload);
+
+      const candidates = response.artifacts
+        .filter((artifact) => !artifact.expired)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+
+      const newest = candidates[0];
+      if (newest === undefined) {
+        return yield* Effect.fail(
+          new NothingToSyncError({
+            message: `No CI artifact named "${name}" found`,
+          })
+        );
+      }
+      return newest;
+    });
+
+    /** Download and extract the newest CI artifact zip. Node/CI only. */
+    const pullFromArtifacts = Effect.fn("ProfileSync.pullFromArtifacts")(
+      function* (options: SyncOptions) {
+        if (options.token === undefined) {
+          return yield* Effect.fail(
+            new GitHubApiError({
+              message: "A GitHub token is required to download CI artifacts",
+              url: "https://api.github.com/actions/artifacts",
+            })
+          );
+        }
+        const targetDir = options.targetDir ?? DEFAULT_TARGET_DIR;
+        const artifact = yield* latestArtifact(options);
+
+        const bytes = yield* http.getBytes(
+          artifact.archive_download_url,
+          apiHeaders(options.token)
+        );
+        const zipPath = `${targetDir}/${artifact.name}.zip`;
+        yield* files.writeBytes(zipPath, bytes);
+        const extracted = yield* extractor.extract(zipPath, targetDir);
+
+        return {
+          source: "artifact",
+          version: artifact.created_at,
+          files: extracted,
+          targetDir,
+        } satisfies SyncResult;
+      }
+    );
+
+    return { pullLatestProfiles, latestArtifact, pullFromArtifacts };
+  }),
+}) {}
+
+/**
+ * Layer for running the sync from inside Tasker: fetch-based HTTP plus
+ * Tasker-backed file writes and zip extraction.
+ */
+export const TaskerProfileSyncLive: Layer.Layer<ProfileSync> =
+  ProfileSync.DefaultWithoutDependencies.pipe(
+    Layer.provide(SyncHttpClient.Default),
+    Layer.provide(TaskerFileStore),
+    Layer.provide(TaskerZipExtractor)
+  );
+
+/**
+ * One-shot convenience: pull the latest release assets using the default
+ * (Node/Bun) services.
+ */
+export const pullLatestProfiles = (
+  options: SyncOptions
+): Effect.Effect<
+  SyncResult,
+  GitHubApiError | DownloadError | NothingToSyncError | StorageWriteError
+> =>
+  Effect.gen(function* () {
+    const sync = yield* ProfileSync;
+    return yield* sync.pullLatestProfiles(options);
+  }).pipe(Effect.provide(ProfileSync.Default));
