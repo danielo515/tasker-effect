@@ -1,260 +1,141 @@
 import { describe, expect, test } from "bun:test";
+import { Either, Schema } from "effect";
 import {
-  type Task,
-  type Profile,
-  type Project,
-  type TimeTrigger,
-  type TimeSpec,
-  type WifiTrigger,
-  type BatteryStateTrigger,
-  type FlashAction,
-  type SetVariableAction,
-  type JavaScriptletAction,
-  time,
-  wifi,
-  battery,
-  flash,
-  setVar,
-  performTask,
-  javascriptlet,
-  task,
-  profile,
-  project,
+  Action,
+  Trigger,
+  Task,
+  Profile,
+  Project,
+  TimeOfDay,
+  cond,
+  decodeTask,
+  isGlobalVariable,
+  variableName,
+  If,
 } from "../src/profile.js";
+import { Effect } from "effect";
 
-describe("time trigger", () => {
-  test("creates basic time trigger", () => {
-    const trigger = time({ hour: 9, minute: 0 });
-    expect(trigger._tag).toBe("TimeTrigger");
-    expect(trigger.from.hour).toBe(9);
-    expect(trigger.from.minute).toBe(0);
-  });
-
-  test("creates time trigger with range", () => {
-    const trigger = time({ hour: 9, minute: 0 }, { to: { hour: 17, minute: 0 } });
-    expect(trigger.to?.hour).toBe(17);
-    expect(trigger.to?.minute).toBe(0);
-  });
-
-  test("supports day filtering", () => {
-    const trigger = time({ hour: 9, minute: 0 }, {
-      days: ["monday", "wednesday", "friday"],
-    });
-    expect(trigger.days).toHaveLength(3);
-    expect(trigger.days).toContain("monday");
-  });
-
-  test("supports repeat minutes", () => {
-    const trigger = time({ hour: 9, minute: 0 }, { repeatMinutes: 30 });
-    expect(trigger.repeatMinutes).toBe(30);
-  });
-});
-
-describe("wifi trigger", () => {
-  test("creates wifi trigger with SSID", () => {
-    const trigger = wifi({ ssid: "MyNetwork" });
-    expect(trigger._tag).toBe("WifiTrigger");
-    expect(trigger.ssid).toBe("MyNetwork");
-    expect(trigger.connected).toBe(true);
-  });
-
-  test("supports disconnected state", () => {
-    const trigger = wifi({
-      ssid: "MyNetwork",
-      connected: false,
-    });
-    expect(trigger.connected).toBe(false);
-  });
-
-  test("defaults to connected", () => {
-    const trigger = wifi();
-    expect(trigger.connected).toBe(true);
-  });
-});
-
-describe("battery trigger", () => {
-  test("creates battery trigger", () => {
-    const trigger = battery(0, 20);
-    expect(trigger._tag).toBe("BatteryStateTrigger");
-    expect(trigger.from).toBe(0);
-    expect(trigger.to).toBe(20);
-  });
-
-  test("supports invert", () => {
-    const trigger = battery(0, 20, true);
-    expect(trigger.invert).toBe(true);
-  });
-});
-
-describe("flash action", () => {
-  test("creates flash action", () => {
-    const action = flash("Hello!");
-    expect(action._tag).toBe("FlashAction");
-    expect(action.message).toBe("Hello!");
+describe("Action builders", () => {
+  test("flash creates a tagged action with defaults", () => {
+    const action = Action.flash("Hello");
+    expect(action._tag).toBe("Flash");
+    expect(action.text).toBe("Hello");
     expect(action.long).toBe(false);
   });
 
-  test("supports long flash", () => {
-    const action = flash("Hello!", true);
-    expect(action.long).toBe(true);
+  test("setGlobal strips the % prefix", () => {
+    const action = Action.setGlobal("%MODE", "night");
+    expect(action.name).toBe("MODE");
+  });
+
+  test("http defaults headers to an empty record", () => {
+    const action = Action.http("GET", "https://example.com");
+    expect(action.headers).toEqual({});
+    expect(action.outputGlobal).toBeUndefined();
+  });
+
+  test("when nests actions recursively", () => {
+    const action = Action.when(
+      cond("%BATT", "lt", "20"),
+      [Action.flash("Low battery"), Action.setWifi(false)],
+      [Action.flash("Battery fine")]
+    );
+    expect(action._tag).toBe("If");
+    expect(action.then).toHaveLength(2);
+    expect(action.orElse).toHaveLength(1);
+    expect(action.condition.variable).toBe("BATT");
+  });
+
+  test("validation rejects invalid values at construction", () => {
+    expect(() => Action.vibrate(-5)).toThrow();
+    expect(() => Action.flash("")).toThrow();
+    expect(() => Action.vibratePattern("abc")).toThrow();
   });
 });
 
-describe("setVar action", () => {
-  test("creates set variable action", () => {
-    const action = setVar("%myvar", "test");
-    expect(action._tag).toBe("SetVariableAction");
-    expect(action.name).toBe("%myvar");
-    expect(action.value).toBe("test");
+describe("Trigger builders", () => {
+  test("time trigger validates hours and minutes", () => {
+    const trigger = Trigger.time(
+      { hour: 7, minute: 0 },
+      { to: { hour: 9, minute: 30 }, days: ["monday", "friday"] }
+    );
+    expect(trigger._tag).toBe("TimeTrigger");
+    expect(trigger.from).toBeInstanceOf(TimeOfDay);
+    expect(() => Trigger.time({ hour: 25, minute: 0 })).toThrow();
   });
 
-  test("supports math mode", () => {
-    const action = setVar("%counter", "%counter + 1", { doMaths: true });
-    expect(action.doMaths).toBe(true);
+  test("battery trigger validates range", () => {
+    expect(() => Trigger.batteryLevel(0, 150)).toThrow();
   });
 
-  test("supports append mode", () => {
-    const action = setVar("%list", "item", { append: true });
-    expect(action.append).toBe(true);
+  test("location trigger validates coordinates", () => {
+    expect(() => Trigger.location(200, 0, 100)).toThrow();
   });
 });
 
-describe("javascriptlet action", () => {
-  test("creates javascriptlet action", () => {
-    const code = "var x = 1 + 1; setGlobal('result', x);";
-    const action = javascriptlet(code);
-    expect(action._tag).toBe("JavaScriptletAction");
-    expect(action.code).toBe(code);
-    expect(action.autoExit).toBe(true);
+describe("Task / Profile / Project", () => {
+  const morning = new Task({
+    name: "Morning Routine",
+    actions: [
+      Action.flash("Good morning!"),
+      Action.setVolume("media", 7),
+      Action.say("Time to wake up"),
+    ],
   });
 
-  test("supports libraries", () => {
-    const action = javascriptlet("console.log('test')", {
-      libraries: ["https://example.com/lib.js"],
+  test("Task.make works as advertised", () => {
+    const t = Task.make({
+      name: "T",
+      actions: [Action.flash("x")],
     });
-    expect(action.libraries).toHaveLength(1);
+    expect(t.name).toBe("T");
   });
 
-  test("supports custom timeout", () => {
-    const action = javascriptlet("longTask()", { timeout: 120 });
-    expect(action.timeout).toBe(120);
-  });
-});
-
-describe("task", () => {
-  test("creates task with actions", () => {
-    const t = task("My Task", [
-      flash("Start"),
-      setVar("%x", "1"),
-    ]);
-    expect(t.name).toBe("My Task");
-    expect(t.actions).toHaveLength(2);
-    expect(t.collision).toBe("abort_new");
-    expect(t.priority).toBe(5);
+  test("requires at least one action", () => {
+    const result = Schema.decodeUnknownEither(Task)({
+      name: "Empty",
+      actions: [],
+    });
+    expect(Either.isLeft(result)).toBe(true);
   });
 
-  test("supports collision handling", () => {
-    const t = task("My Task", [], { collision: "run_both" });
-    expect(t.collision).toBe("run_both");
+  test("profile bundles triggers with tasks", () => {
+    const profile = new Profile({
+      name: "Weekday mornings",
+      triggers: [Trigger.time({ hour: 7, minute: 0 })],
+      enter: morning,
+    });
+    expect(profile.enabled).toBe(true);
+    expect(profile.exit).toBeUndefined();
   });
 
-  test("supports keep awake", () => {
-    const t = task("My Task", [], { keepAwake: true });
-    expect(t.keepAwake).toBe(true);
-  });
-});
-
-describe("profile", () => {
-  test("creates profile with trigger and entry task", () => {
-    const p = profile(
-      "My Profile",
-      [time({ hour: 9, minute: 0 })],
-      "My Task"
-    );
-    expect(p.name).toBe("My Profile");
-    expect(p.triggers).toHaveLength(1);
-    expect(p.entry).toBe("My Task");
-    expect(p.enabled).toBe(true);
+  test("project defaults to empty collections", () => {
+    const project = new Project({ name: "My Automations" });
+    expect(project.profiles).toEqual([]);
+    expect(project.tasks).toEqual([]);
   });
 
-  test("supports inline entry task", () => {
-    const p = profile(
-      "My Profile",
-      [wifi({ ssid: "Home" })],
-      task("Home Entry", [flash("Home!")])
-    );
-    expect(typeof p.entry).toBe("object");
-    expect((p.entry as Task).name).toBe("Home Entry");
-  });
-
-  test("supports exit task", () => {
-    const p = profile(
-      "My Profile",
-      [time({ hour: 9, minute: 0 })],
-      "Entry",
-      { exit: "Exit" }
-    );
-    expect(p.exit).toBe("Exit");
-  });
-
-  test("supports description", () => {
-    const p = profile(
-      "My Profile",
-      [time({ hour: 9, minute: 0 })],
-      "My Task",
-      { description: "My description" }
-    );
-    expect(p.description).toBe("My description");
-  });
-});
-
-describe("project", () => {
-  test("creates empty project", () => {
-    const p = project("My Project");
-    expect(p.name).toBe("My Project");
-    expect(p.profiles).toHaveLength(0);
-    expect(p.tasks).toHaveLength(0);
-  });
-
-  test("creates project with profiles and tasks", () => {
-    const p = project("My Project", {
-      profiles: [
-        profile(
-          "Test Profile",
-          [wifi({ ssid: "*" })],
-          "Test Task"
-        ),
-      ],
-      tasks: [
-        task("Test Task", [flash("Test")]),
+  test("decodeTask round-trips encoded data including nested If", async () => {
+    const original = new Task({
+      name: "Nested",
+      actions: [
+        Action.when(cond("BATT", "lt", "20"), [Action.flash("low")]),
       ],
     });
-    expect(p.profiles).toHaveLength(1);
-    expect(p.tasks).toHaveLength(1);
-  });
-
-  test("supports description", () => {
-    const p = project("My Project", { description: "My project desc" });
-    expect(p.description).toBe("My project desc");
+    const encoded = Schema.encodeSync(Task)(original);
+    const decoded = await Effect.runPromise(decodeTask(encoded));
+    expect(decoded.name).toBe("Nested");
+    const first = decoded.actions[0];
+    expect(first._tag).toBe("If");
+    expect((first as If).then[0]?._tag).toBe("Flash");
   });
 });
 
-describe("helper functions", () => {
-  test("performTask creates PerformTaskAction", () => {
-    const action = performTask("Other Task");
-    expect(action._tag).toBe("PerformTaskAction");
-    expect(action.taskName).toBe("Other Task");
-    expect(action.priority).toBeUndefined();
-  });
-
-  test("performTask with params", () => {
-    const action = performTask("Other Task", {
-      param1: "arg1",
-      param2: "arg2",
-      priority: 10,
-    });
-    expect(action.param1).toBe("arg1");
-    expect(action.param2).toBe("arg2");
-    expect(action.priority).toBe(10);
+describe("variable helpers", () => {
+  test("distinguishes global from local names", () => {
+    expect(isGlobalVariable("%BATT")).toBe(true);
+    expect(isGlobalVariable("counter")).toBe(false);
+    expect(variableName("%WIFI")).toBe("WIFI");
+    expect(variableName("plain")).toBe("plain");
   });
 });

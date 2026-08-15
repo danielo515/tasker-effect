@@ -1,830 +1,858 @@
 /**
  * @module profile
- * @description Effect Schema-based DSL for defining Tasker profiles, tasks, and actions
+ * @description Effect Schema DSL for defining Tasker tasks and profiles.
+ *
+ * Tasks are sequences of declarative actions. Each action maps to one or more
+ * Tasker JavaScript API calls and is compiled to plain JavaScript by the
+ * compiler module. Profiles bundle a task with the trigger metadata that
+ * describes when Tasker should run it (the trigger itself is configured once
+ * in the Tasker UI, pointing at the compiled JS file).
  */
 
 import { Schema } from "effect";
 
 // =============================================================================
-// Base Types
+// Base schemas
 // =============================================================================
 
-/** Time specification (24h format) */
-export interface TimeSpec {
-  readonly hour: number;
-  readonly minute: number;
-}
-
-export const TimeSpec = Schema.Struct({
+/** A time of day in 24h format */
+export class TimeOfDay extends Schema.Class<TimeOfDay>("TimeOfDay")({
   hour: Schema.Number.pipe(Schema.int(), Schema.between(0, 23)),
   minute: Schema.Number.pipe(Schema.int(), Schema.between(0, 59)),
-});
+}) {}
 
-/** Day of week */
-export type DayOfWeek =
-  | "monday"
-  | "tuesday"
-  | "wednesday"
-  | "thursday"
-  | "friday"
-  | "saturday"
-  | "sunday";
+export const DayOfWeek = Schema.Literal(
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday"
+);
+export type DayOfWeek = typeof DayOfWeek.Type;
 
-/** Month */
-export type Month =
-  | "january"
-  | "february"
-  | "march"
-  | "april"
-  | "may"
-  | "june"
-  | "july"
-  | "august"
-  | "september"
-  | "october"
-  | "november"
-  | "december";
+/** Volume streams settable via the JS API */
+export const VolumeStream = Schema.Literal(
+  "alarm",
+  "system",
+  "media",
+  "ringer",
+  "notification",
+  "call",
+  "dtmf",
+  "btvoice"
+);
+export type VolumeStream = typeof VolumeStream.Type;
+
+/** Comparison operators available in conditions */
+export const ConditionOp = Schema.Literal(
+  "eq",
+  "neq",
+  "lt",
+  "gt",
+  "lte",
+  "gte",
+  "contains",
+  "matches",
+  "isSet",
+  "notSet"
+);
+export type ConditionOp = typeof ConditionOp.Type;
+
+/**
+ * A condition over a Tasker variable. Variable names follow Tasker
+ * conventions: ALL-CAPS names are globals, lowercase names are locals.
+ * The leading % is optional.
+ */
+export class Condition extends Schema.Class<Condition>("Condition")({
+  variable: Schema.NonEmptyString,
+  op: ConditionOp,
+  value: Schema.optional(Schema.String),
+}) {}
+
+const percentLess = (name: string): string =>
+  name.startsWith("%") ? name.slice(1) : name;
+
+/** Whether a Tasker variable name refers to a global (ALL-CAPS) variable */
+export const isGlobalVariable = (name: string): boolean => {
+  const bare = percentLess(name);
+  return bare === bare.toUpperCase();
+};
+
+/** Normalize a variable name by stripping the leading % */
+export const variableName = percentLess;
 
 // =============================================================================
-// Trigger Types
+// Actions
 // =============================================================================
 
-/** Time-based trigger */
-export interface TimeTrigger {
-  readonly _tag: "TimeTrigger";
-  readonly from: TimeSpec;
-  readonly to?: TimeSpec;
-  readonly repeatMinutes?: number;
-  readonly days?: readonly DayOfWeek[];
-  readonly months?: readonly Month[];
-  readonly invert?: boolean;
-}
+/** Show a toast message */
+export class Flash extends Schema.TaggedClass<Flash>()("Flash", {
+  text: Schema.NonEmptyString,
+  long: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+}) {}
 
-/** Location trigger */
-export interface LocationTrigger {
-  readonly _tag: "LocationTrigger";
-  readonly latitude: number;
-  readonly longitude: number;
-  readonly radius: number;
-  readonly invert?: boolean;
-}
+/** Show a popup dialog */
+export class Popup extends Schema.TaggedClass<Popup>()("Popup", {
+  title: Schema.String,
+  text: Schema.String,
+  showOverKeyguard: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  timeoutSecs: Schema.optionalWith(Schema.Number.pipe(Schema.nonNegative()), {
+    default: () => 0,
+  }),
+}) {}
 
-/** WiFi trigger */
-export interface WifiTrigger {
-  readonly _tag: "WifiTrigger";
-  readonly ssid?: string;
-  readonly mac?: string;
-  readonly connected?: boolean;
-  readonly invert?: boolean;
-}
+/** Speak text via TTS */
+export class Say extends Schema.TaggedClass<Say>()("Say", {
+  text: Schema.NonEmptyString,
+  engine: Schema.optional(Schema.String),
+  voice: Schema.optional(Schema.String),
+  stream: Schema.optionalWith(
+    Schema.Literal("call", "system", "ringer", "media", "alarm", "notification"),
+    { default: () => "media" as const }
+  ),
+  pitch: Schema.optionalWith(Schema.Number.pipe(Schema.between(1, 10)), {
+    default: () => 5,
+  }),
+  speed: Schema.optionalWith(Schema.Number.pipe(Schema.between(1, 10)), {
+    default: () => 5,
+  }),
+}) {}
 
-/** Bluetooth trigger */
-export interface BluetoothTrigger {
-  readonly _tag: "BluetoothTrigger";
-  readonly name?: string;
-  readonly address?: string;
-  readonly connected?: boolean;
-  readonly invert?: boolean;
-}
+/** Vibrate for a duration in milliseconds */
+export class Vibrate extends Schema.TaggedClass<Vibrate>()("Vibrate", {
+  milliseconds: Schema.Number.pipe(Schema.positive()),
+}) {}
 
-/** App trigger */
-export interface AppTrigger {
-  readonly _tag: "AppTrigger";
-  readonly app: string;
-  readonly activity?: string;
-  readonly invert?: boolean;
-}
+/** Vibrate with an off,on,off,on... millisecond pattern */
+export class VibratePattern extends Schema.TaggedClass<VibratePattern>()(
+  "VibratePattern",
+  {
+    pattern: Schema.NonEmptyString.pipe(Schema.pattern(/^\d+(,\d+)*$/)),
+  }
+) {}
 
-/** Event types */
-export type EventType =
-  | "alarm_clock"
-  | "alarm_done"
-  | "battery_changed"
-  | "display_off"
-  | "display_on"
-  | "notification"
-  | "shake"
-  | "variable_set";
+/** Set a Tasker global variable */
+export class SetGlobal extends Schema.TaggedClass<SetGlobal>()("SetGlobal", {
+  name: Schema.NonEmptyString,
+  value: Schema.String,
+}) {}
 
-/** Event trigger */
-export interface EventTrigger {
-  readonly _tag: "EventTrigger";
-  readonly event: EventType;
-  readonly pattern?: string;
-  readonly invert?: boolean;
-}
+/** Set a scene-local variable */
+export class SetLocal extends Schema.TaggedClass<SetLocal>()("SetLocal", {
+  name: Schema.NonEmptyString,
+  value: Schema.String,
+}) {}
 
-/** Notification trigger */
-export interface NotificationTrigger {
-  readonly _tag: "NotificationTrigger";
-  readonly ownerApp?: string;
-  readonly title?: string;
-  readonly text?: string;
-  readonly invert?: boolean;
-}
+/** Run another Tasker task by name */
+export class PerformTask extends Schema.TaggedClass<PerformTask>()(
+  "PerformTask",
+  {
+    taskName: Schema.NonEmptyString,
+    priority: Schema.optionalWith(
+      Schema.Number.pipe(Schema.int(), Schema.between(1, 50)),
+      { default: () => 5 }
+    ),
+    parameterOne: Schema.optional(Schema.String),
+    parameterTwo: Schema.optional(Schema.String),
+  }
+) {}
 
-/** State types */
-export type StateType =
-  | "airplane_mode"
-  | "battery"
-  | "bluetooth_connected"
-  | "wifi_connected"
-  | "variable_value";
+/** Enable or disable a Tasker profile */
+export class EnableProfile extends Schema.TaggedClass<EnableProfile>()(
+  "EnableProfile",
+  {
+    profileName: Schema.NonEmptyString,
+    enable: Schema.Boolean,
+  }
+) {}
 
-/** State trigger */
-export interface StateTrigger {
-  readonly _tag: "StateTrigger";
-  readonly state: StateType;
-  readonly params?: Record<string, string>;
-  readonly invert?: boolean;
-}
+/** Pause execution */
+export class Wait extends Schema.TaggedClass<Wait>()("Wait", {
+  milliseconds: Schema.Number.pipe(Schema.positive()),
+}) {}
 
-/** Battery state trigger */
-export interface BatteryStateTrigger {
-  readonly _tag: "BatteryStateTrigger";
-  readonly from: number;
-  readonly to: number;
-  readonly invert?: boolean;
-}
+/** Run a shell command, optionally storing its output in a global variable */
+export class Shell extends Schema.TaggedClass<Shell>()("Shell", {
+  command: Schema.NonEmptyString,
+  asRoot: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  timeoutSecs: Schema.optionalWith(Schema.Number.pipe(Schema.positive()), {
+    default: () => 30,
+  }),
+  outputGlobal: Schema.optional(Schema.String),
+}) {}
 
-/** Variable trigger */
-export interface VariableTrigger {
-  readonly _tag: "VariableTrigger";
-  readonly name: string;
-  readonly operator:
-    | "equals"
-    | "not_equals"
-    | "matches"
-    | "not_matches"
-    | "less_than"
-    | "greater_than"
-    | "is_set"
-    | "is_not_set";
-  readonly value?: string;
-  readonly invert?: boolean;
-}
+/** Read a file into a global variable */
+export class ReadFile extends Schema.TaggedClass<ReadFile>()("ReadFile", {
+  path: Schema.NonEmptyString,
+  outputGlobal: Schema.NonEmptyString,
+}) {}
 
-/** All trigger types */
+/** Write text to a file */
+export class WriteFile extends Schema.TaggedClass<WriteFile>()("WriteFile", {
+  path: Schema.NonEmptyString,
+  text: Schema.String,
+  append: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+}) {}
+
+/**
+ * Perform an HTTP request with a synchronous XMLHttpRequest (works in
+ * Tasker's WebView environment), optionally storing the response body in a
+ * global variable.
+ */
+export class HttpRequest extends Schema.TaggedClass<HttpRequest>()(
+  "HttpRequest",
+  {
+    method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"),
+    url: Schema.NonEmptyString,
+    headers: Schema.optionalWith(
+      Schema.Record({ key: Schema.String, value: Schema.String }),
+      { default: () => ({}) }
+    ),
+    body: Schema.optional(Schema.String),
+    outputGlobal: Schema.optional(Schema.String),
+  }
+) {}
+
+/** Open a URL in the default browser */
+export class BrowseUrl extends Schema.TaggedClass<BrowseUrl>()("BrowseUrl", {
+  url: Schema.NonEmptyString,
+}) {}
+
+/** Send an SMS */
+export class SendSms extends Schema.TaggedClass<SendSms>()("SendSms", {
+  number: Schema.NonEmptyString,
+  text: Schema.NonEmptyString,
+  storeInMessagingApp: Schema.optionalWith(Schema.Boolean, {
+    default: () => false,
+  }),
+}) {}
+
+/** Enable/disable Wi-Fi */
+export class SetWifi extends Schema.TaggedClass<SetWifi>()("SetWifi", {
+  on: Schema.Boolean,
+}) {}
+
+/** Enable/disable Bluetooth */
+export class SetBluetooth extends Schema.TaggedClass<SetBluetooth>()(
+  "SetBluetooth",
+  {
+    on: Schema.Boolean,
+  }
+) {}
+
+/** Enable/disable airplane mode */
+export class SetAirplaneMode extends Schema.TaggedClass<SetAirplaneMode>()(
+  "SetAirplaneMode",
+  {
+    on: Schema.Boolean,
+  }
+) {}
+
+/** Enable/disable the mobile data setting */
+export class SetMobileData extends Schema.TaggedClass<SetMobileData>()(
+  "SetMobileData",
+  {
+    on: Schema.Boolean,
+  }
+) {}
+
+/** Enable/disable global auto-sync */
+export class SetAutoSync extends Schema.TaggedClass<SetAutoSync>()(
+  "SetAutoSync",
+  {
+    on: Schema.Boolean,
+  }
+) {}
+
+/** Set the volume of an audio stream */
+export class SetVolume extends Schema.TaggedClass<SetVolume>()("SetVolume", {
+  stream: VolumeStream,
+  level: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  display: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  sound: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+}) {}
+
+/** Send a media control action to the foreground media app */
+export class MediaControl extends Schema.TaggedClass<MediaControl>()(
+  "MediaControl",
+  {
+    action: Schema.Literal("next", "pause", "prev", "toggle", "stop", "play"),
+  }
+) {}
+
+/** Play a music file */
+export class MusicPlay extends Schema.TaggedClass<MusicPlay>()("MusicPlay", {
+  path: Schema.NonEmptyString,
+  offsetSecs: Schema.optionalWith(Schema.Number.pipe(Schema.nonNegative()), {
+    default: () => 0,
+  }),
+  loop: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  stream: Schema.optionalWith(
+    Schema.Literal("call", "system", "ringer", "media", "alarm", "notification"),
+    { default: () => "media" as const }
+  ),
+}) {}
+
+/** Stop music playback */
+export class MusicStop extends Schema.TaggedClass<MusicStop>()("MusicStop", {}) {}
+
+/** Set the clipboard */
+export class SetClip extends Schema.TaggedClass<SetClip>()("SetClip", {
+  text: Schema.String,
+  append: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+}) {}
+
+/** Set the home screen wallpaper */
+export class SetWallpaper extends Schema.TaggedClass<SetWallpaper>()(
+  "SetWallpaper",
+  {
+    path: Schema.NonEmptyString,
+  }
+) {}
+
+/** Launch an app by package name or label */
+export class LaunchApp extends Schema.TaggedClass<LaunchApp>()("LaunchApp", {
+  app: Schema.NonEmptyString,
+  data: Schema.optional(Schema.String),
+  excludeFromRecents: Schema.optionalWith(Schema.Boolean, {
+    default: () => false,
+  }),
+}) {}
+
+/** Send an Android intent */
+export class SendIntent extends Schema.TaggedClass<SendIntent>()("SendIntent", {
+  action: Schema.NonEmptyString,
+  targetComp: Schema.Literal("receiver", "activity", "service"),
+  pkg: Schema.optional(Schema.String),
+  cls: Schema.optional(Schema.String),
+  category: Schema.optional(Schema.String),
+  data: Schema.optional(Schema.String),
+  mimeType: Schema.optional(Schema.String),
+  extras: Schema.optionalWith(Schema.Array(Schema.String), {
+    default: () => [],
+  }),
+}) {}
+
+/** Set the ringer mode */
+export class SetSilentMode extends Schema.TaggedClass<SetSilentMode>()(
+  "SetSilentMode",
+  {
+    mode: Schema.Literal("off", "vibrate", "on"),
+  }
+) {}
+
+/** Go to the home screen */
+export class GoHome extends Schema.TaggedClass<GoHome>()("GoHome", {
+  screen: Schema.optionalWith(Schema.Number.pipe(Schema.int(), Schema.nonNegative()), {
+    default: () => 0,
+  }),
+}) {}
+
+/** Request a location fix (%LOC / %LOCN get populated) */
+export class GetLocation extends Schema.TaggedClass<GetLocation>()(
+  "GetLocation",
+  {
+    source: Schema.Literal("gps", "net", "any"),
+    keepTracking: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+    timeoutSecs: Schema.optionalWith(Schema.Number.pipe(Schema.positive()), {
+      default: () => 100,
+    }),
+  }
+) {}
+
+/** Raw JavaScript escape hatch, inserted verbatim into the compiled output */
+export class JavaScript extends Schema.TaggedClass<JavaScript>()("JavaScript", {
+  code: Schema.NonEmptyString,
+}) {}
+
+/** Conditional block over a Tasker variable */
+export class If extends Schema.TaggedClass<If>()("If", {
+  condition: Condition,
+  then: Schema.Array(
+    Schema.suspend((): Schema.Schema<Action, ActionEncoded> => ActionSchema)
+  ),
+  orElse: Schema.optionalWith(
+    Schema.Array(
+      Schema.suspend((): Schema.Schema<Action, ActionEncoded> => ActionSchema)
+    ),
+    { default: () => [] }
+  ),
+}) {}
+
+/** Union of every action */
+export type Action =
+  | Flash
+  | Popup
+  | Say
+  | Vibrate
+  | VibratePattern
+  | SetGlobal
+  | SetLocal
+  | PerformTask
+  | EnableProfile
+  | Wait
+  | Shell
+  | ReadFile
+  | WriteFile
+  | HttpRequest
+  | BrowseUrl
+  | SendSms
+  | SetWifi
+  | SetBluetooth
+  | SetAirplaneMode
+  | SetMobileData
+  | SetAutoSync
+  | SetVolume
+  | MediaControl
+  | MusicPlay
+  | MusicStop
+  | SetClip
+  | SetWallpaper
+  | LaunchApp
+  | SendIntent
+  | SetSilentMode
+  | GoHome
+  | GetLocation
+  | JavaScript
+  | If;
+
+/** Encoded (wire) form of an action */
+export type ActionEncoded = { readonly _tag: string } & Record<string, unknown>;
+
+const actionMembers = [
+  Flash,
+  Popup,
+  Say,
+  Vibrate,
+  VibratePattern,
+  SetGlobal,
+  SetLocal,
+  PerformTask,
+  EnableProfile,
+  Wait,
+  Shell,
+  ReadFile,
+  WriteFile,
+  HttpRequest,
+  BrowseUrl,
+  SendSms,
+  SetWifi,
+  SetBluetooth,
+  SetAirplaneMode,
+  SetMobileData,
+  SetAutoSync,
+  SetVolume,
+  MediaControl,
+  MusicPlay,
+  MusicStop,
+  SetClip,
+  SetWallpaper,
+  LaunchApp,
+  SendIntent,
+  SetSilentMode,
+  GoHome,
+  GetLocation,
+  JavaScript,
+  If,
+] as const;
+
+/** Schema accepting any action */
+export const ActionSchema: Schema.Schema<Action, ActionEncoded> = Schema.Union(
+  ...actionMembers
+) as unknown as Schema.Schema<Action, ActionEncoded>;
+
+// =============================================================================
+// Triggers (metadata describing when Tasker should run the compiled JS)
+// =============================================================================
+
+/** Active during a time window, optionally on given days */
+export class TimeTrigger extends Schema.TaggedClass<TimeTrigger>()(
+  "TimeTrigger",
+  {
+    from: TimeOfDay,
+    to: Schema.optional(TimeOfDay),
+    repeatMinutes: Schema.optional(Schema.Number.pipe(Schema.positive())),
+    days: Schema.optionalWith(Schema.Array(DayOfWeek), { default: () => [] }),
+  }
+) {}
+
+/** Active inside a geographic radius */
+export class LocationTrigger extends Schema.TaggedClass<LocationTrigger>()(
+  "LocationTrigger",
+  {
+    latitude: Schema.Number.pipe(Schema.between(-90, 90)),
+    longitude: Schema.Number.pipe(Schema.between(-180, 180)),
+    radiusMeters: Schema.Number.pipe(Schema.positive()),
+  }
+) {}
+
+/** Active while connected to a Wi-Fi network */
+export class WifiConnectedTrigger extends Schema.TaggedClass<WifiConnectedTrigger>()(
+  "WifiConnectedTrigger",
+  {
+    ssid: Schema.optionalWith(Schema.String, { default: () => "*" }),
+  }
+) {}
+
+/** Active while connected to a Bluetooth device */
+export class BluetoothConnectedTrigger extends Schema.TaggedClass<BluetoothConnectedTrigger>()(
+  "BluetoothConnectedTrigger",
+  {
+    name: Schema.optionalWith(Schema.String, { default: () => "*" }),
+  }
+) {}
+
+/** Active while an app is in the foreground */
+export class AppOpenedTrigger extends Schema.TaggedClass<AppOpenedTrigger>()(
+  "AppOpenedTrigger",
+  {
+    app: Schema.NonEmptyString,
+  }
+) {}
+
+/** Active while the battery level is inside a range */
+export class BatteryLevelTrigger extends Schema.TaggedClass<BatteryLevelTrigger>()(
+  "BatteryLevelTrigger",
+  {
+    from: Schema.Number.pipe(Schema.int(), Schema.between(0, 100)),
+    to: Schema.Number.pipe(Schema.int(), Schema.between(0, 100)),
+  }
+) {}
+
+/** Active while a Tasker variable satisfies a condition */
+export class VariableTrigger extends Schema.TaggedClass<VariableTrigger>()(
+  "VariableTrigger",
+  {
+    condition: Condition,
+  }
+) {}
+
+/** Fires on a named Tasker event (e.g. "Display On", "Notification") */
+export class EventTrigger extends Schema.TaggedClass<EventTrigger>()(
+  "EventTrigger",
+  {
+    event: Schema.NonEmptyString,
+    parameter: Schema.optional(Schema.String),
+  }
+) {}
+
+/** Active while a named Tasker state holds (e.g. "Power", "Headset Plugged") */
+export class StateTrigger extends Schema.TaggedClass<StateTrigger>()(
+  "StateTrigger",
+  {
+    state: Schema.NonEmptyString,
+    parameter: Schema.optional(Schema.String),
+  }
+) {}
+
+/** Union of every trigger */
 export type Trigger =
   | TimeTrigger
   | LocationTrigger
-  | WifiTrigger
-  | BluetoothTrigger
-  | AppTrigger
+  | WifiConnectedTrigger
+  | BluetoothConnectedTrigger
+  | AppOpenedTrigger
+  | BatteryLevelTrigger
+  | VariableTrigger
   | EventTrigger
-  | NotificationTrigger
-  | StateTrigger
-  | BatteryStateTrigger
-  | VariableTrigger;
+  | StateTrigger;
+
+/** Schema accepting any trigger */
+export const TriggerSchema = Schema.Union(
+  TimeTrigger,
+  LocationTrigger,
+  WifiConnectedTrigger,
+  BluetoothConnectedTrigger,
+  AppOpenedTrigger,
+  BatteryLevelTrigger,
+  VariableTrigger,
+  EventTrigger,
+  StateTrigger
+);
 
 // =============================================================================
-// Action Types
+// Task / Profile / Project
 // =============================================================================
 
-/** Flash message action */
-export interface FlashAction {
-  readonly _tag: "FlashAction";
-  readonly message: string;
-  readonly long?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
+/** A named sequence of actions, compiled to one JavaScript file */
+export class Task extends Schema.Class<Task>("Task")({
+  name: Schema.NonEmptyString,
+  actions: Schema.NonEmptyArray(ActionSchema),
+  description: Schema.optional(Schema.String),
+}) {}
 
-/** Popup action */
-export interface PopupAction {
-  readonly _tag: "PopupAction";
-  readonly title: string;
-  readonly text: string;
-  readonly timeout?: number;
-  readonly background?: string;
-  readonly layout?: string;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
+/**
+ * A profile pairs trigger metadata with an enter (and optional exit) task.
+ * Triggers are configured once in the Tasker UI; the compiler emits setup
+ * instructions for them alongside the JavaScript files.
+ */
+export class Profile extends Schema.Class<Profile>("Profile")({
+  name: Schema.NonEmptyString,
+  triggers: Schema.NonEmptyArray(TriggerSchema),
+  enter: Task,
+  exit: Schema.optional(Task),
+  enabled: Schema.optionalWith(Schema.Boolean, { default: () => true }),
+  description: Schema.optional(Schema.String),
+}) {}
 
-/** Say (TTS) action */
-export interface SayAction {
-  readonly _tag: "SayAction";
-  readonly text: string;
-  readonly engine?: string;
-  readonly voice?: string;
-  readonly stream?: "call" | "system" | "ringer" | "media" | "alarm" | "notification";
-  readonly pitch?: number;
-  readonly speed?: number;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
+/** A collection of profiles and standalone tasks */
+export class Project extends Schema.Class<Project>("Project")({
+  name: Schema.NonEmptyString,
+  profiles: Schema.optionalWith(Schema.Array(Profile), { default: () => [] }),
+  tasks: Schema.optionalWith(Schema.Array(Task), { default: () => [] }),
+  description: Schema.optional(Schema.String),
+}) {}
 
-/** Vibrate action */
-export interface VibrateAction {
-  readonly _tag: "VibrateAction";
-  readonly duration: number;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
+/** Decode an unknown value into a Task */
+export const decodeTask = Schema.decodeUnknown(Task);
 
-/** Set variable action */
-export interface SetVariableAction {
-  readonly _tag: "SetVariableAction";
-  readonly name: string;
-  readonly value: string;
-  readonly append?: boolean;
-  readonly doMaths?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
+/** Decode an unknown value into a Profile */
+export const decodeProfile = Schema.decodeUnknown(Profile);
 
-/** Clear variable action */
-export interface ClearVariableAction {
-  readonly _tag: "ClearVariableAction";
-  readonly name: string;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Perform task action */
-export interface PerformTaskAction {
-  readonly _tag: "PerformTaskAction";
-  readonly taskName: string;
-  readonly priority?: number;
-  readonly param1?: string;
-  readonly param2?: string;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Wait action */
-export interface WaitAction {
-  readonly _tag: "WaitAction";
-  readonly hours?: number;
-  readonly minutes?: number;
-  readonly seconds?: number;
-  readonly milliseconds?: number;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Stop action */
-export interface StopAction {
-  readonly _tag: "StopAction";
-  readonly withError?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** If condition */
-export interface IfAction {
-  readonly _tag: "IfAction";
-  readonly lhs: string;
-  readonly operator:
-    | "eq"
-    | "neq"
-    | "lt"
-    | "gt"
-    | "lte"
-    | "gte"
-    | "matches"
-    | "not_matches"
-    | "set"
-    | "not_set"
-    | "contains"
-    | "not_contains";
-  readonly rhs?: string;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Else action */
-export interface ElseAction {
-  readonly _tag: "ElseAction";
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** End If action */
-export interface EndIfAction {
-  readonly _tag: "EndIfAction";
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** HTTP Request action */
-export interface HttpRequestAction {
-  readonly _tag: "HttpRequestAction";
-  readonly method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
-  readonly url: string;
-  readonly headers?: Record<string, string>;
-  readonly body?: string;
-  readonly outputVariable?: string;
-  readonly timeout?: number;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Shell action */
-export interface ShellAction {
-  readonly _tag: "ShellAction";
-  readonly command: string;
-  readonly root?: boolean;
-  readonly timeout?: number;
-  readonly outputVariable?: string;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** JavaScriptlet action */
-export interface JavaScriptletAction {
-  readonly _tag: "JavaScriptletAction";
-  readonly code: string;
-  readonly autoExit?: boolean;
-  readonly timeout?: number;
-  readonly libraries?: readonly string[];
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** JavaScript action (from file) */
-export interface JavaScriptAction {
-  readonly _tag: "JavaScriptAction";
-  readonly path: string;
-  readonly timeout?: number;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Show scene action */
-export interface ShowSceneAction {
-  readonly _tag: "ShowSceneAction";
-  readonly name: string;
-  readonly displayAs?:
-    | "Overlay"
-    | "OverBlocking"
-    | "OverBlockFullDisplay"
-    | "Dialog"
-    | "DialogBlur"
-    | "DialogDim"
-    | "ActivityFullWindow"
-    | "ActivityFullDisplay"
-    | "ActivityFullDisplayNoTitle";
-  readonly hOffset?: number;
-  readonly vOffset?: number;
-  readonly showExitIcon?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Hide scene action */
-export interface HideSceneAction {
-  readonly _tag: "HideSceneAction";
-  readonly name: string;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Set WiFi action */
-export interface SetWifiAction {
-  readonly _tag: "SetWifiAction";
-  readonly enabled: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Set Bluetooth action */
-export interface SetBluetoothAction {
-  readonly _tag: "SetBluetoothAction";
-  readonly enabled: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Set volume action */
-export interface SetVolumeAction {
-  readonly _tag: "SetVolumeAction";
-  readonly stream:
-    | "alarm"
-    | "bluetooth"
-    | "call"
-    | "dtmf"
-    | "media"
-    | "notification"
-    | "ringer"
-    | "system";
-  readonly level: number;
-  readonly display?: boolean;
-  readonly sound?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Browse URL action */
-export interface BrowseUrlAction {
-  readonly _tag: "BrowseUrlAction";
-  readonly url: string;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Send SMS action */
-export interface SendSmsAction {
-  readonly _tag: "SendSmsAction";
-  readonly number: string;
-  readonly message: string;
-  readonly store?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Write file action */
-export interface WriteFileAction {
-  readonly _tag: "WriteFileAction";
-  readonly path: string;
-  readonly text: string;
-  readonly append?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Read file action */
-export interface ReadFileAction {
-  readonly _tag: "ReadFileAction";
-  readonly path: string;
-  readonly outputVariable?: string;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Launch app action */
-export interface LaunchAppAction {
-  readonly _tag: "LaunchAppAction";
-  readonly app: string;
-  readonly data?: string;
-  readonly excludeFromRecents?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Profile status action */
-export interface ProfileStatusAction {
-  readonly _tag: "ProfileStatusAction";
-  readonly name: string;
-  readonly enabled: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** Notify action */
-export interface NotifyAction {
-  readonly _tag: "NotifyAction";
-  readonly title: string;
-  readonly text: string;
-  readonly icon?: string;
-  readonly number?: number;
-  readonly priority?: "low" | "normal" | "high";
-  readonly permanent?: boolean;
-  readonly sound?: string;
-  readonly vibrate?: boolean;
-  readonly label?: string;
-  readonly continueOnError?: boolean;
-}
-
-/** All action types */
-export type Action =
-  | FlashAction
-  | PopupAction
-  | SayAction
-  | VibrateAction
-  | SetVariableAction
-  | ClearVariableAction
-  | PerformTaskAction
-  | WaitAction
-  | StopAction
-  | IfAction
-  | ElseAction
-  | EndIfAction
-  | HttpRequestAction
-  | ShellAction
-  | JavaScriptletAction
-  | JavaScriptAction
-  | ShowSceneAction
-  | HideSceneAction
-  | SetWifiAction
-  | SetBluetoothAction
-  | SetVolumeAction
-  | BrowseUrlAction
-  | SendSmsAction
-  | WriteFileAction
-  | ReadFileAction
-  | LaunchAppAction
-  | ProfileStatusAction
-  | NotifyAction;
+/** Decode an unknown value into a Project */
+export const decodeProject = Schema.decodeUnknown(Project);
 
 // =============================================================================
-// Task Definition
+// Builders
 // =============================================================================
 
-/** Collision handling mode for tasks */
-export type CollisionHandling = "abort_new" | "abort_existing" | "run_both";
+/** Ergonomic factories for every action */
+export const Action = {
+  flash: (text: string, options?: { readonly long?: boolean }) =>
+    new Flash({ text, long: options?.long ?? false }),
+  popup: (
+    title: string,
+    text: string,
+    options?: { readonly showOverKeyguard?: boolean; readonly timeoutSecs?: number }
+  ) =>
+    new Popup({
+      title,
+      text,
+      showOverKeyguard: options?.showOverKeyguard ?? false,
+      timeoutSecs: options?.timeoutSecs ?? 0,
+    }),
+  say: (
+    text: string,
+    options?: {
+      readonly engine?: string;
+      readonly voice?: string;
+      readonly stream?: Say["stream"];
+      readonly pitch?: number;
+      readonly speed?: number;
+    }
+  ) =>
+    new Say({
+      text,
+      stream: options?.stream ?? "media",
+      pitch: options?.pitch ?? 5,
+      speed: options?.speed ?? 5,
+      ...(options?.engine !== undefined ? { engine: options.engine } : {}),
+      ...(options?.voice !== undefined ? { voice: options.voice } : {}),
+    }),
+  vibrate: (milliseconds: number) => new Vibrate({ milliseconds }),
+  vibratePattern: (pattern: string) => new VibratePattern({ pattern }),
+  setGlobal: (name: string, value: string) =>
+    new SetGlobal({ name: variableName(name), value }),
+  setLocal: (name: string, value: string) =>
+    new SetLocal({ name: variableName(name), value }),
+  performTask: (
+    taskName: string,
+    options?: {
+      readonly priority?: number;
+      readonly parameterOne?: string;
+      readonly parameterTwo?: string;
+    }
+  ) =>
+    new PerformTask({
+      taskName,
+      priority: options?.priority ?? 5,
+      ...(options?.parameterOne !== undefined
+        ? { parameterOne: options.parameterOne }
+        : {}),
+      ...(options?.parameterTwo !== undefined
+        ? { parameterTwo: options.parameterTwo }
+        : {}),
+    }),
+  enableProfile: (profileName: string, enable = true) =>
+    new EnableProfile({ profileName, enable }),
+  wait: (milliseconds: number) => new Wait({ milliseconds }),
+  shell: (
+    command: string,
+    options?: {
+      readonly asRoot?: boolean;
+      readonly timeoutSecs?: number;
+      readonly outputGlobal?: string;
+    }
+  ) =>
+    new Shell({
+      command,
+      asRoot: options?.asRoot ?? false,
+      timeoutSecs: options?.timeoutSecs ?? 30,
+      ...(options?.outputGlobal !== undefined
+        ? { outputGlobal: variableName(options.outputGlobal) }
+        : {}),
+    }),
+  readFile: (path: string, outputGlobal: string) =>
+    new ReadFile({ path, outputGlobal: variableName(outputGlobal) }),
+  writeFile: (path: string, text: string, options?: { readonly append?: boolean }) =>
+    new WriteFile({ path, text, append: options?.append ?? false }),
+  http: (
+    method: HttpRequest["method"],
+    url: string,
+    options?: {
+      readonly headers?: Record<string, string>;
+      readonly body?: string;
+      readonly outputGlobal?: string;
+    }
+  ) =>
+    new HttpRequest({
+      method,
+      url,
+      headers: options?.headers ?? {},
+      ...(options?.body !== undefined ? { body: options.body } : {}),
+      ...(options?.outputGlobal !== undefined
+        ? { outputGlobal: variableName(options.outputGlobal) }
+        : {}),
+    }),
+  browseUrl: (url: string) => new BrowseUrl({ url }),
+  sendSms: (number: string, text: string, options?: { readonly store?: boolean }) =>
+    new SendSms({
+      number,
+      text,
+      storeInMessagingApp: options?.store ?? false,
+    }),
+  setWifi: (on: boolean) => new SetWifi({ on }),
+  setBluetooth: (on: boolean) => new SetBluetooth({ on }),
+  setAirplaneMode: (on: boolean) => new SetAirplaneMode({ on }),
+  setMobileData: (on: boolean) => new SetMobileData({ on }),
+  setAutoSync: (on: boolean) => new SetAutoSync({ on }),
+  setVolume: (
+    stream: VolumeStream,
+    level: number,
+    options?: { readonly display?: boolean; readonly sound?: boolean }
+  ) =>
+    new SetVolume({
+      stream,
+      level,
+      display: options?.display ?? false,
+      sound: options?.sound ?? false,
+    }),
+  mediaControl: (action: MediaControl["action"]) => new MediaControl({ action }),
+  musicPlay: (
+    path: string,
+    options?: {
+      readonly offsetSecs?: number;
+      readonly loop?: boolean;
+      readonly stream?: MusicPlay["stream"];
+    }
+  ) =>
+    new MusicPlay({
+      path,
+      offsetSecs: options?.offsetSecs ?? 0,
+      loop: options?.loop ?? false,
+      stream: options?.stream ?? "media",
+    }),
+  musicStop: () => new MusicStop({}),
+  setClip: (text: string, options?: { readonly append?: boolean }) =>
+    new SetClip({ text, append: options?.append ?? false }),
+  setWallpaper: (path: string) => new SetWallpaper({ path }),
+  launchApp: (
+    app: string,
+    options?: { readonly data?: string; readonly excludeFromRecents?: boolean }
+  ) =>
+    new LaunchApp({
+      app,
+      excludeFromRecents: options?.excludeFromRecents ?? false,
+      ...(options?.data !== undefined ? { data: options.data } : {}),
+    }),
+  sendIntent: (
+    action: string,
+    targetComp: SendIntent["targetComp"],
+    options?: {
+      readonly pkg?: string;
+      readonly cls?: string;
+      readonly category?: string;
+      readonly data?: string;
+      readonly mimeType?: string;
+      readonly extras?: ReadonlyArray<string>;
+    }
+  ) =>
+    new SendIntent({
+      action,
+      targetComp,
+      extras: options?.extras ?? [],
+      ...(options?.pkg !== undefined ? { pkg: options.pkg } : {}),
+      ...(options?.cls !== undefined ? { cls: options.cls } : {}),
+      ...(options?.category !== undefined ? { category: options.category } : {}),
+      ...(options?.data !== undefined ? { data: options.data } : {}),
+      ...(options?.mimeType !== undefined ? { mimeType: options.mimeType } : {}),
+    }),
+  silentMode: (mode: SetSilentMode["mode"]) => new SetSilentMode({ mode }),
+  goHome: (screen = 0) => new GoHome({ screen }),
+  getLocation: (
+    source: GetLocation["source"],
+    options?: { readonly keepTracking?: boolean; readonly timeoutSecs?: number }
+  ) =>
+    new GetLocation({
+      source,
+      keepTracking: options?.keepTracking ?? false,
+      timeoutSecs: options?.timeoutSecs ?? 100,
+    }),
+  js: (code: string) => new JavaScript({ code }),
+  when: (
+    condition: Condition,
+    then: ReadonlyArray<Action>,
+    orElse: ReadonlyArray<Action> = []
+  ) => new If({ condition, then, orElse }),
+} as const;
 
-/** Task definition */
-export interface Task {
-  readonly name: string;
-  readonly actions: readonly Action[];
-  readonly collision?: CollisionHandling;
-  readonly priority?: number;
-  readonly keepAwake?: boolean;
-  readonly description?: string;
-}
+/** Build a condition over a Tasker variable */
+export const cond = (
+  variable: string,
+  op: ConditionOp,
+  value?: string
+): Condition =>
+  new Condition({
+    variable: variableName(variable),
+    op,
+    ...(value !== undefined ? { value } : {}),
+  });
 
-// =============================================================================
-// Profile Definition
-// =============================================================================
-
-/** Profile definition */
-export interface Profile {
-  readonly name: string;
-  readonly triggers: readonly [Trigger, ...Trigger[]];
-  readonly entry: string | Task;
-  readonly exit?: string | Task;
-  readonly priority?: number;
-  readonly enabled?: boolean;
-  readonly description?: string;
-}
-
-// =============================================================================
-// Project Definition
-// =============================================================================
-
-/** Project definition */
-export interface Project {
-  readonly name: string;
-  readonly profiles?: readonly Profile[];
-  readonly tasks?: readonly Task[];
-  readonly description?: string;
-}
-
-// =============================================================================
-// Helper Functions for Building Profiles
-// =============================================================================
-
-/** Create a time trigger */
-export const time = (
-  from: TimeSpec,
-  options?: {
-    to?: TimeSpec;
-    repeatMinutes?: number;
-    days?: DayOfWeek[];
-    months?: Month[];
-    invert?: boolean;
-  }
-): TimeTrigger => ({
-  _tag: "TimeTrigger",
-  from,
-  to: options?.to,
-  repeatMinutes: options?.repeatMinutes,
-  days: options?.days,
-  months: options?.months,
-  invert: options?.invert,
-});
-
-/** Create a location trigger */
-export const location = (
-  lat: number,
-  lon: number,
-  radius: number,
-  invert?: boolean
-): LocationTrigger => ({
-  _tag: "LocationTrigger",
-  latitude: lat,
-  longitude: lon,
-  radius,
-  invert,
-});
-
-/** Create a WiFi trigger */
-export const wifi = (options?: {
-  ssid?: string;
-  mac?: string;
-  connected?: boolean;
-  invert?: boolean;
-}): WifiTrigger => ({
-  _tag: "WifiTrigger",
-  ssid: options?.ssid ?? "*",
-  mac: options?.mac,
-  connected: options?.connected ?? true,
-  invert: options?.invert,
-});
-
-/** Create a Bluetooth trigger */
-export const bluetooth = (options?: {
-  name?: string;
-  address?: string;
-  connected?: boolean;
-  invert?: boolean;
-}): BluetoothTrigger => ({
-  _tag: "BluetoothTrigger",
-  name: options?.name,
-  address: options?.address,
-  connected: options?.connected ?? true,
-  invert: options?.invert,
-});
-
-/** Create an app trigger */
-export const app = (
-  packageOrLabel: string,
-  options?: {
-    activity?: string;
-    invert?: boolean;
-  }
-): AppTrigger => ({
-  _tag: "AppTrigger",
-  app: packageOrLabel,
-  activity: options?.activity,
-  invert: options?.invert,
-});
-
-/** Create a battery state trigger */
-export const battery = (
-  from: number,
-  to: number,
-  invert?: boolean
-): BatteryStateTrigger => ({
-  _tag: "BatteryStateTrigger",
-  from,
-  to,
-  invert,
-});
-
-/** Create a variable trigger */
-export const variable = (
-  name: string,
-  operator: VariableTrigger["operator"],
-  value?: string,
-  invert?: boolean
-): VariableTrigger => ({
-  _tag: "VariableTrigger",
-  name,
-  operator,
-  value,
-  invert,
-});
-
-// ----------------------------- Action helpers -------------------------------
-
-/** Create a flash action */
-export const flash = (message: string, long = false): FlashAction => ({
-  _tag: "FlashAction",
-  message,
-  long,
-});
-
-/** Create a set variable action */
-export const setVar = (
-  name: string,
-  value: string,
-  options?: {
-    append?: boolean;
-    doMaths?: boolean;
-  }
-): SetVariableAction => ({
-  _tag: "SetVariableAction",
-  name,
-  value,
-  append: options?.append,
-  doMaths: options?.doMaths,
-});
-
-/** Create a wait action */
-export const wait = (options: {
-  hours?: number;
-  minutes?: number;
-  seconds?: number;
-  milliseconds?: number;
-}): WaitAction => ({
-  _tag: "WaitAction",
-  ...options,
-});
-
-/** Create a perform task action */
-export const performTask = (
-  taskName: string,
-  options?: {
-    priority?: number;
-    param1?: string;
-    param2?: string;
-  }
-): PerformTaskAction => ({
-  _tag: "PerformTaskAction",
-  taskName,
-  priority: options?.priority,
-  param1: options?.param1,
-  param2: options?.param2,
-});
-
-/** Create a shell action */
-export const shell = (
-  command: string,
-  options?: {
-    root?: boolean;
-    timeout?: number;
-    outputVariable?: string;
-  }
-): ShellAction => ({
-  _tag: "ShellAction",
-  command,
-  root: options?.root,
-  timeout: options?.timeout,
-  outputVariable: options?.outputVariable,
-});
-
-/** Create a JavaScriptlet action */
-export const javascriptlet = (
-  code: string,
-  options?: {
-    autoExit?: boolean;
-    timeout?: number;
-    libraries?: string[];
-  }
-): JavaScriptletAction => ({
-  _tag: "JavaScriptletAction",
-  code,
-  autoExit: options?.autoExit ?? true,
-  timeout: options?.timeout,
-  libraries: options?.libraries,
-});
-
-/** Create an HTTP request action */
-export const http = (
-  method: HttpRequestAction["method"],
-  url: string,
-  options?: {
-    headers?: Record<string, string>;
-    body?: string;
-    outputVariable?: string;
-    timeout?: number;
-  }
-): HttpRequestAction => ({
-  _tag: "HttpRequestAction",
-  method,
-  url,
-  headers: options?.headers,
-  body: options?.body,
-  outputVariable: options?.outputVariable ?? "%http_data",
-  timeout: options?.timeout ?? 30,
-});
-
-// ----------------------------- Task/Profile builders ------------------------
-
-/** Create a task */
-export const task = (
-  name: string,
-  actions: Action[],
-  options?: {
-    collision?: CollisionHandling;
-    priority?: number;
-    keepAwake?: boolean;
-    description?: string;
-  }
-): Task => ({
-  name,
-  actions,
-  collision: options?.collision ?? "abort_new",
-  priority: options?.priority ?? 5,
-  keepAwake: options?.keepAwake ?? false,
-  description: options?.description,
-});
-
-/** Create a profile */
-export const profile = (
-  name: string,
-  triggers: [Trigger, ...Trigger[]],
-  entry: string | Task,
-  options?: {
-    exit?: string | Task;
-    priority?: number;
-    enabled?: boolean;
-    description?: string;
-  }
-): Profile => ({
-  name,
-  triggers,
-  entry,
-  exit: options?.exit,
-  priority: options?.priority ?? 100,
-  enabled: options?.enabled ?? true,
-  description: options?.description,
-});
-
-/** Create a project */
-export const project = (
-  name: string,
-  options?: {
-    profiles?: Profile[];
-    tasks?: Task[];
-    description?: string;
-  }
-): Project => ({
-  name,
-  profiles: options?.profiles ?? [],
-  tasks: options?.tasks ?? [],
-  description: options?.description,
-});
+/** Ergonomic factories for every trigger */
+export const Trigger = {
+  time: (
+    from: { readonly hour: number; readonly minute: number },
+    options?: {
+      readonly to?: { readonly hour: number; readonly minute: number };
+      readonly repeatMinutes?: number;
+      readonly days?: ReadonlyArray<DayOfWeek>;
+    }
+  ) =>
+    new TimeTrigger({
+      from: new TimeOfDay(from),
+      days: options?.days ?? [],
+      ...(options?.to !== undefined ? { to: new TimeOfDay(options.to) } : {}),
+      ...(options?.repeatMinutes !== undefined
+        ? { repeatMinutes: options.repeatMinutes }
+        : {}),
+    }),
+  location: (latitude: number, longitude: number, radiusMeters: number) =>
+    new LocationTrigger({ latitude, longitude, radiusMeters }),
+  wifiConnected: (ssid = "*") => new WifiConnectedTrigger({ ssid }),
+  bluetoothConnected: (name = "*") => new BluetoothConnectedTrigger({ name }),
+  appOpened: (app: string) => new AppOpenedTrigger({ app }),
+  batteryLevel: (from: number, to: number) => new BatteryLevelTrigger({ from, to }),
+  variable: (condition: Condition) => new VariableTrigger({ condition }),
+  event: (event: string, parameter?: string) =>
+    new EventTrigger({
+      event,
+      ...(parameter !== undefined ? { parameter } : {}),
+    }),
+  state: (state: string, parameter?: string) =>
+    new StateTrigger({
+      state,
+      ...(parameter !== undefined ? { parameter } : {}),
+    }),
+} as const;
