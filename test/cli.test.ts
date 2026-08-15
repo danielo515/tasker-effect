@@ -93,10 +93,12 @@ describe("compileEntry", () => {
     const filenames = result.files.map((file) => file.filename).sort();
     expect(filenames).toEqual([
       "README.md",
+      "dispatcher.js",
       "greet.js",
       "night-mode.enter.js",
       "night-mode.exit.js",
       "project-task.js",
+      "tasker-effect.tsk.xml",
     ]);
     for (const file of result.files) {
       expect(existsSync(join(outDir, file.filename))).toBe(true);
@@ -156,7 +158,7 @@ describe("CLI end-to-end (spawned)", () => {
     expect(stderr).toBe("");
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Compiled 3 export(s)");
-    expect(stdout).toContain("5 file(s) written");
+    expect(stdout).toContain("7 file(s) written");
     expect(existsSync(join(outDir, "greet.js"))).toBe(true);
     expect(existsSync(join(outDir, "night-mode.enter.js"))).toBe(true);
     expect(existsSync(join(outDir, "README.md"))).toBe(true);

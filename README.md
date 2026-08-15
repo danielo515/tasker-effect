@@ -24,7 +24,7 @@ dist-tasker/*.js  ──►  GitHub CI artifact + rolling release
 | --- | --- |
 | `tasker-api` | Type-safe Effect bindings for every documented Tasker JS function (~110), plus a typed `raw` escape hatch |
 | `profile` | Schema-validated DSL: tasks are sequences of tagged actions, profiles add trigger metadata |
-| `compiler` | Compiles DSL definitions to standalone JS using only Tasker globals (no runtime deps) |
+| `compiler` | Compiles DSL definitions to standalone JS using only Tasker globals (no runtime deps), plus a dispatcher and an import-once task XML |
 | `runtime` | `runInTasker` for Effect programs bundled to a single file |
 | `sync` | Pulls the latest compiled JS from GitHub releases/artifacts — works on-device |
 
@@ -86,6 +86,38 @@ intentionally left to the consumer, e.g.:
 esbuild script.ts --bundle --minify --format=iife --platform=browser --outfile=dist-tasker/script.js
 ```
 
+### The dispatcher: import once, then only triggers
+
+Compiling a `Project` also emits two extra files:
+
+- **`tasker-effect.tsk.xml`** — static scaffolding containing a single
+  shared task, **TE Dispatch**, whose only action is a file-based
+  *JavaScript* action (Auto Exit on) pointing at
+  `/sdcard/Tasker/js/dispatcher.js`. It never embeds compiled logic, so you
+  import it exactly once: Tasker → Tasks tab → long-press → *Import Task*.
+- **`dispatcher.js`** — generated from your project: it embeds a map of
+  profile/task names to compiled files and runs the right one with
+  `eval(readFile(...))`.
+
+How the dispatcher picks the file:
+
+1. **Explicit `%par1`** (a profile or task name) wins; `%par2` = `exit`
+   selects a profile's exit file. Use this from Perform Task, widgets, etc.
+2. Otherwise it reads Tasker's **`%caller1`**, which for profile-launched
+   tasks is `profile=enter:<name>` or `profile=exit:<name>` — so a new
+   profile only needs its trigger plus `TE Dispatch` as both its enter and
+   its exit task. No per-task file paths, no per-task UI work.
+
+Unknown names or unreadable files `flash()` a clear error. The JS directory
+defaults to `/sdcard/Tasker/js/` and can be overridden with the Tasker
+global `%TE_JS_DIR` (also edit the path inside the imported task if you do).
+
+Because `dispatcher.js` is a regular `.js` release asset it updates through
+the normal sync, keeping the name→file map current. The `.tsk.xml` is *not*
+synced (sync pulls only `.js` on purpose): download it manually once from
+the latest release — it only ever contains the pointer to `dispatcher.js`,
+so it never goes stale.
+
 ### Effect programs on-device
 
 Scripts in `tasks/scripts/` run the full Effect runtime inside Tasker; the
@@ -133,9 +165,13 @@ artifact and refreshes a rolling GitHub release (`tasker-js-latest`).
 3. Create a profile that runs **Sync** whenever you want updates: a daily
    Time trigger, "connected to home Wi-Fi", an NFC tag, or just a home
    screen shortcut.
-4. For each of your own tasks, create its Tasker task/profile once in the
-   UI: configure the trigger (the generated `README.md` asset lists them)
-   and point a JavaScript action at the task's file in `/sdcard/Tasker/js/`.
+4. Download `tasker-effect.tsk.xml` from the release and import it once
+   (Tasks tab → long-press → *Import Task*) to get the shared `TE Dispatch`
+   task.
+5. For each of your profiles, configure its trigger in the Tasker UI (the
+   generated `README.md` asset lists them) and set `TE Dispatch` as the
+   enter and exit task. Standalone tasks run via Perform Task →
+   `TE Dispatch` with `%par1` = the task name.
 
 **How updates propagate:** Tasker reads the `.js` file from disk every time
 an action runs — nothing is cached. Each **Sync** run overwrites
@@ -145,8 +181,11 @@ This applies to DSL-generated files, Effect bundles, and `sync-profiles.js`
 itself, which updates its own file too.
 
 **The one manual step that remains:** Tasker's JS API cannot create
-profiles or triggers, so a *brand-new* task needs the one-time UI pairing
-from step 4. After that, every change to its code ships automatically.
+profiles or triggers, so a *brand-new* profile still needs its trigger
+configured once in the UI (step 5) — but thanks to the dispatcher that is
+all: the task slots always point at `TE Dispatch`, and the dispatcher's
+name→file map updates itself on every sync. After that, every change to
+its code ships automatically.
 Point the sync at your own fork with the Tasker globals `%SYNC_OWNER` /
 `%SYNC_REPO`.
 

@@ -37,7 +37,7 @@ export class CompileError extends Schema.TaggedError<CompileError>()(
 export interface CompiledFile {
   readonly filename: string;
   readonly content: string;
-  readonly kind: "task-js" | "doc";
+  readonly kind: "task-js" | "dispatcher-js" | "tasker-xml" | "doc";
 }
 
 // =============================================================================
@@ -351,6 +351,187 @@ const profileReadmeSection = (profile: Profile): string => {
   return lines.join("\n");
 };
 
+// =============================================================================
+// Dispatcher (single JS entry point) + importable task XML scaffolding
+// =============================================================================
+
+/** Directory on the device where synced JS files live by default */
+export const DEFAULT_DEVICE_JS_DIR = "/sdcard/Tasker/js/";
+
+/** Filename of the generated dispatcher */
+export const DISPATCHER_FILENAME = "dispatcher.js";
+
+/** Filename of the importable Tasker task XML */
+export const TASKER_IMPORT_XML_FILENAME = "tasker-effect.tsk.xml";
+
+/** Name of the shared Tasker task created by the import XML */
+export const DISPATCH_TASK_NAME = "TE Dispatch";
+
+/**
+ * Compile the dispatcher: a single JS file that resolves which compiled file
+ * should run and `eval`s it. Resolution order:
+ *
+ * 1. Explicit `%par1` (a profile or task name from the embedded map), with
+ *    `%par2` = "exit" selecting a profile's exit file.
+ * 2. Caller detection via Tasker's `%caller1` local variable, which for
+ *    profile-launched tasks has the form `profile=enter:<name>` or
+ *    `profile=exit:<name>` (verified against the Tasker variables userguide:
+ *    "callername is either enter or exit depending on whether the profile
+ *    activated or deactivated; subcallername is the name of the profile").
+ *
+ * The base directory defaults to /sdcard/Tasker/js/ and can be overridden
+ * with the Tasker global %TE_JS_DIR.
+ */
+export const compileDispatcherJs = (project: Project): string => {
+  const profileEntries = project.profiles.map((profile) => {
+    const slug = slugify(profile.name);
+    const exitPart =
+      profile.exit !== undefined ? `, exit: ${js(`${slug}.exit.js`)}` : "";
+    return `    ${js(profile.name)}: { enter: ${js(`${slug}.enter.js`)}${exitPart} },`;
+  });
+  const taskEntries = project.tasks.map(
+    (task) => `    ${js(task.name)}: ${js(`${slugify(task.name)}.js`)},`
+  );
+
+  return [
+    ...header(
+      `Dispatcher: ${project.name}`,
+      "Single entry point that runs the mapped file for the calling profile or %par1."
+    ),
+    '"use strict";',
+    "(function () {",
+    "  var PROFILES = {",
+    ...profileEntries,
+    "  };",
+    "  var TASKS = {",
+    ...taskEntries,
+    "  };",
+    "  try {",
+    '    var base = global("TE_JS_DIR");',
+    `    if (base === undefined || base === "") base = ${js(DEFAULT_DEVICE_JS_DIR)};`,
+    '    if (base.charAt(base.length - 1) !== "/") base = base + "/";',
+    "",
+    '    var par1 = local("par1");',
+    '    var par2 = local("par2");',
+    "    var target;",
+    '    if (par1 !== undefined && par1 !== "") {',
+    '      var wantExit = par2 !== undefined && String(par2).toLowerCase() === "exit";',
+    "      if (PROFILES.hasOwnProperty(par1)) {",
+    "        target = wantExit ? PROFILES[par1].exit : PROFILES[par1].enter;",
+    "        if (target === undefined) {",
+    '          flash("tasker-effect dispatch: profile \\"" + par1 + "\\" has no " + (wantExit ? "exit" : "enter") + " task");',
+    "          return;",
+    "        }",
+    "      } else if (TASKS.hasOwnProperty(par1)) {",
+    "        target = TASKS[par1];",
+    "      } else {",
+    '        flash("tasker-effect dispatch: unknown profile or task \\"" + par1 + "\\"");',
+    "        return;",
+    "      }",
+    "    } else {",
+    '      // %caller1 is "profile=enter:<name>" / "profile=exit:<name>" when a',
+    "      // profile state change launched this task.",
+    '      var caller = local("caller1");',
+    '      var match = /^profile=(enter|exit):([\\s\\S]+)$/.exec(caller === undefined ? "" : caller);',
+    "      if (match === null) {",
+    '        flash("tasker-effect dispatch: no %par1 given and caller is not a profile (%caller1=" + caller + ")");',
+    "        return;",
+    "      }",
+    "      var entry = PROFILES[match[2]];",
+    "      if (entry === undefined) {",
+    '        flash("tasker-effect dispatch: unknown profile \\"" + match[2] + "\\"");',
+    "        return;",
+    "      }",
+    '      target = match[1] === "exit" ? entry.exit : entry.enter;',
+    "      if (target === undefined) {",
+    '        flash("tasker-effect dispatch: profile \\"" + match[2] + "\\" has no " + match[1] + " task");',
+    "        return;",
+    "      }",
+    "    }",
+    "",
+    "    var path = base + target;",
+    "    var source = readFile(path);",
+    '    if (source === undefined || source === "") {',
+    '      flash("tasker-effect dispatch: could not read " + path);',
+    "      return;",
+    "    }",
+    "    eval(source);",
+    "  } catch (err) {",
+    '    flash("tasker-effect dispatch failed: " + err);',
+    "  }",
+    "})();",
+    "",
+  ].join("\n");
+};
+
+const escapeXml = (value: string): string =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+
+/**
+ * Importable Tasker task XML containing the shared "TE Dispatch" task, whose
+ * only action is a file-based JavaScript action (Tasker action code 131,
+ * verified against real .tsk.xml exports and the Taskomater Tasker-XML-Info
+ * action code list; the JavaScriptlet action is 129) pointing at the
+ * dispatcher. Argument layout of action 131: arg0 = script path (Str),
+ * arg1 = libraries (Str), arg2 = Auto Exit (Int, on), arg3 = timeout in
+ * seconds (Int).
+ *
+ * This XML is static scaffolding for a one-time import: it never embeds
+ * compiled logic, only the pointer to the dispatcher file.
+ */
+export const taskerImportXml = (options?: {
+  readonly dispatcherPath?: string;
+}): string => {
+  const path =
+    options?.dispatcherPath ?? `${DEFAULT_DEVICE_JS_DIR}${DISPATCHER_FILENAME}`;
+  return [
+    '<TaskerData sr="" dvi="1" tv="6.3.13">',
+    '\t<Task sr="task1">',
+    "\t\t<cdate>1</cdate>",
+    "\t\t<id>1</id>",
+    `\t\t<nme>${escapeXml(DISPATCH_TASK_NAME)}</nme>`,
+    '\t\t<Action sr="act0" ve="7">',
+    "\t\t\t<code>131</code>",
+    `\t\t\t<Str sr="arg0" ve="3">${escapeXml(path)}</Str>`,
+    '\t\t\t<Str sr="arg1" ve="3"/>',
+    '\t\t\t<Int sr="arg2" val="1"/>',
+    '\t\t\t<Int sr="arg3" val="45"/>',
+    "\t\t</Action>",
+    "\t</Task>",
+    "</TaskerData>",
+    "",
+  ].join("\n");
+};
+
+const dispatcherReadmeSection = (project: Project): Array<string> => [
+  "## One-time setup with the dispatcher",
+  "",
+  `1. Import \`${TASKER_IMPORT_XML_FILENAME}\` once in Tasker (long-press the`,
+  `   Tasks tab → Import Task). This creates the shared task \`${DISPATCH_TASK_NAME}\`,`,
+  `   whose only action runs \`${DEFAULT_DEVICE_JS_DIR}${DISPATCHER_FILENAME}\`.`,
+  "2. For each profile below, configure its trigger(s) in the Tasker UI and",
+  `   set both the enter and the exit task to \`${DISPATCH_TASK_NAME}\`. The dispatcher`,
+  "   detects the calling profile from `%caller1` (`profile=enter:<name>` /",
+  "   `profile=exit:<name>`) and runs the matching file.",
+  ...(project.tasks.length > 0
+    ? [
+        `3. Run standalone tasks with Perform Task → \`${DISPATCH_TASK_NAME}\`, passing the`,
+        "   task name as `%par1` (use `%par2` = `exit` to force a profile's exit",
+        "   file when calling explicitly).",
+      ]
+    : []),
+  "",
+  "The dispatcher reads files from `" + DEFAULT_DEVICE_JS_DIR + "`; override with",
+  "the Tasker global `%TE_JS_DIR` (then also edit the path in the imported",
+  "task).",
+  "",
+];
+
 /** Compile a whole project to JS files plus a setup README */
 export const compileProjectFiles = (project: Project): Array<CompiledFile> => {
   const files: Array<CompiledFile> = [];
@@ -364,18 +545,30 @@ export const compileProjectFiles = (project: Project): Array<CompiledFile> => {
       kind: "task-js",
     });
   }
+  files.push({
+    filename: DISPATCHER_FILENAME,
+    content: compileDispatcherJs(project),
+    kind: "dispatcher-js",
+  });
+  files.push({
+    filename: TASKER_IMPORT_XML_FILENAME,
+    content: taskerImportXml(),
+    kind: "tasker-xml",
+  });
 
   const readme = [
     `# ${project.name}`,
     "",
     ...(project.description !== undefined ? [project.description, ""] : []),
     "Compiled with tasker-effect. Copy the `.js` files to your device (e.g.",
-    "`/sdcard/Tasker/js/`) and point Tasker JavaScript actions at them.",
+    "`/sdcard/Tasker/js/`) and point Tasker JavaScript actions at them —",
+    "or import the dispatcher task once and skip per-task actions entirely:",
     "",
     "## Files",
     "",
     ...files.map((file) => `- \`${file.filename}\``),
     "",
+    ...dispatcherReadmeSection(project),
     ...(project.profiles.length > 0 ? ["## Profiles", ""] : []),
     ...project.profiles.map(profileReadmeSection),
     ...(project.tasks.length > 0

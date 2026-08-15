@@ -138,6 +138,12 @@ export {
   describeTrigger,
   compileProfileFiles,
   compileProjectFiles,
+  compileDispatcherJs,
+  taskerImportXml,
+  DEFAULT_DEVICE_JS_DIR,
+  DISPATCHER_FILENAME,
+  TASKER_IMPORT_XML_FILENAME,
+  DISPATCH_TASK_NAME,
   TaskerCompiler,
 } from "./compiler.js";
 

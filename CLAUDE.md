@@ -40,7 +40,7 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 
 - CI (`.github/workflows/ci.yml`): typecheck + test → `bun run compile` → uploads `dist-tasker/` as the `tasker-js` artifact → refreshes the rolling release `tasker-js-latest`.
 - On-device, `sync-profiles.js` (a bundled script from `tasks/scripts/`) downloads the newest release assets to `/sdcard/Tasker/js/` via Tasker's own `writeFile`. Tasker reads JS files from disk on every action run, so overwriting a file updates behavior on the next trigger — including sync-profiles.js itself.
-- Tasker profiles/triggers cannot be created from JS: new tasks need a one-time manual pairing in the Tasker UI (trigger + JavaScript action → file path). The compiler emits a README describing the triggers to configure.
+- Tasker profiles/triggers cannot be created from JS, but the dispatcher minimizes the manual work: `compileProjectFiles` emits `dispatcher.js` (name→file map; resolves via `%par1`/`%par2` or `%caller1` = `profile=enter|exit:<name>`, then `eval(readFile(...))`) plus `tasker-effect.tsk.xml`, an import-once XML holding the shared `TE Dispatch` task. New profiles then only need their trigger + `TE Dispatch` as enter/exit task. The XML is downloaded manually once (sync pulls `.js` only); the compiler README describes the triggers to configure.
 
 ## Effect Patterns
 
@@ -63,7 +63,7 @@ bun run compile      # Compile tasks/ to dist-tasker/ (Tasker-ready JS)
 
 ## What NOT to do
 
-- ❌ No XML. Tasker runs JS directly; never generate `.tsk.xml`/`.prf.xml`
+- ❌ No XML for *compiled logic* — tasks/profiles compile to JS only, never to `.tsk.xml`/`.prf.xml`. The one sanctioned exception is static import-once scaffolding: the generated `tasker-effect.tsk.xml` contains only the shared `TE Dispatch` task pointing at `dispatcher.js` (JavaScript action, code 131) and must never embed per-task content — there is a test enforcing this
 - ❌ No bundling in the CLI — consumers bring their own bundler
 - ❌ No Node APIs in code that runs on-device (`compiler.ts` output, `tasks/scripts/`)
 - ❌ Don't upgrade to Effect 4 beta unless explicitly requested
