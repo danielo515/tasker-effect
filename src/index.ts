@@ -1,14 +1,15 @@
 /**
  * @module tasker-effect
- * @description TypeScript library for managing Tasker profiles using Effect
+ * @description Write Tasker (Android automation) tasks in TypeScript with
+ * Effect, compile them to plain JavaScript that Tasker executes directly.
  */
 
 // =============================================================================
-// Tasker API Bindings
+// Tasker API bindings
 // =============================================================================
 
 export {
-  // Types
+  // Option types
   type AudioStream,
   type AudioSource,
   type AudioCodec,
@@ -21,23 +22,32 @@ export {
   type RebootType,
   type LocationSource,
   type IntentTarget,
-  type IntentCategory,
   type SettingsScreen,
   type SceneDisplayAs,
   type ConversionType,
   type ImageFilterMode,
+  type RotateDirection,
   type LanguageModel,
-  type CameraOption,
+  type CameraId,
   type ElementTextPosition,
+  type SceneOrientation,
   // Errors
-  TaskerError,
+  TaskerCallError,
   TaskerNotAvailableError,
+  type TaskerApiError,
+  // Raw surface
+  type TaskerRawApi,
+  TASKER_FUNCTION_NAMES,
+  raw,
   // Service
-  type TaskerService,
+  type TaskerApi,
+  type TaskerShape,
   Tasker,
-  // Layers
-  TaskerLive,
-  TaskerMock,
+  // Test helpers
+  type RecordedCall,
+  makeTestTasker,
+  makeTaskerTestLayer,
+  TaskerTest,
 } from "./tasker-api.js";
 
 // =============================================================================
@@ -45,114 +55,117 @@ export {
 // =============================================================================
 
 export {
-  // Base types
-  TimeSpec,
-  type DayOfWeek,
-  type Month,
-  // Triggers
-  type TimeTrigger,
-  type LocationTrigger,
-  type WifiTrigger,
-  type BluetoothTrigger,
-  type AppTrigger,
-  type EventTrigger,
-  type NotificationTrigger,
-  type StateTrigger,
-  type BatteryStateTrigger,
-  type VariableTrigger,
-  type EventType,
-  type StateType,
-  type Trigger,
-  // Actions
-  type FlashAction,
-  type PopupAction,
-  type SayAction,
-  type VibrateAction,
-  type SetVariableAction,
-  type ClearVariableAction,
-  type PerformTaskAction,
-  type WaitAction,
-  type StopAction,
-  type IfAction,
-  type ElseAction,
-  type EndIfAction,
-  type HttpRequestAction,
-  type ShellAction,
-  type JavaScriptletAction,
-  type JavaScriptAction,
-  type ShowSceneAction,
-  type HideSceneAction,
-  type SetWifiAction,
-  type SetBluetoothAction,
-  type SetVolumeAction,
-  type BrowseUrlAction,
-  type SendSmsAction,
-  type WriteFileAction,
-  type ReadFileAction,
-  type LaunchAppAction,
-  type ProfileStatusAction,
-  type NotifyAction,
-  type Action,
-  // Core types
-  type CollisionHandling,
-  type Task,
-  type Profile,
-  type Project,
-  // Helper builders
-  time,
-  location,
-  wifi,
-  bluetooth,
-  app,
-  battery,
-  variable,
-  flash,
-  setVar,
-  wait,
-  performTask,
-  shell,
-  javascriptlet,
-  http,
-  task,
-  profile,
-  project,
+  // Base schemas
+  TimeOfDay,
+  DayOfWeek,
+  VolumeStream,
+  ConditionOp,
+  Condition,
+  isGlobalVariable,
+  variableName,
+  // Action classes
+  Flash,
+  Popup,
+  Say,
+  Vibrate,
+  VibratePattern,
+  SetGlobal,
+  SetLocal,
+  PerformTask,
+  EnableProfile,
+  Wait,
+  Shell,
+  ReadFile,
+  WriteFile,
+  HttpRequest,
+  BrowseUrl,
+  SendSms,
+  SetWifi,
+  SetBluetooth,
+  SetAirplaneMode,
+  SetMobileData,
+  SetAutoSync,
+  SetVolume,
+  MediaControl,
+  MusicPlay,
+  MusicStop,
+  SetClip,
+  SetWallpaper,
+  LaunchApp,
+  SendIntent,
+  SetSilentMode,
+  GoHome,
+  GetLocation,
+  JavaScript,
+  If,
+  type ActionEncoded,
+  ActionSchema,
+  // Trigger classes
+  TimeTrigger,
+  LocationTrigger,
+  WifiConnectedTrigger,
+  BluetoothConnectedTrigger,
+  AppOpenedTrigger,
+  BatteryLevelTrigger,
+  VariableTrigger,
+  EventTrigger,
+  StateTrigger,
+  TriggerSchema,
+  // Core containers
+  Task,
+  Profile,
+  Project,
+  decodeTask,
+  decodeProfile,
+  decodeProject,
+  // Builders (Action and Trigger double as builder namespaces)
+  Action,
+  Trigger,
+  cond,
 } from "./profile.js";
 
 // =============================================================================
-// Compiler
+// Compiler (TS definitions → Tasker-executable JS)
 // =============================================================================
 
 export {
-  CompilerError,
-  type CompiledOutput,
-  type TaskerCompilerService,
+  CompileError,
+  type CompiledFile,
+  slugify,
+  conditionExpr,
+  emitAction,
+  compileTaskToJs,
+  describeTrigger,
+  compileProfileFiles,
+  compileProjectFiles,
   TaskerCompiler,
-  TaskerCompilerLive,
-  compileTaskToXml,
-  compileProfileToXml,
-  compileProjectToXml,
 } from "./compiler.js";
 
 // =============================================================================
-// Sync
+// Runtime helpers (for Effect-based scripts bundled for Tasker)
+// =============================================================================
+
+export { runInTasker } from "./runtime.js";
+
+// =============================================================================
+// Sync (pull compiled JS from CI)
 // =============================================================================
 
 export {
-  type SyncConfig,
-  SyncError,
-  NetworkError,
-  FileSystemError,
-  type Artifact,
+  GitHubApiError,
+  DownloadError,
+  NothingToSyncError,
+  StorageWriteError,
+  ZipExtractError,
+  type ArtifactInfo,
+  SyncHttpClient,
+  FileStore,
+  TaskerFileStore,
+  ZipExtractor,
+  TaskerZipExtractor,
+  type SyncOptions,
   type SyncResult,
-  type HttpClientService,
-  HttpClient,
-  NodeHttpClient,
-  type FileSystemService,
-  FileSystem,
-  NodeFileSystem,
-  type SyncServiceInterface,
-  SyncService,
-  makeSyncService,
-  NodeSyncLive,
+  ProfileSync,
+  TaskerProfileSyncLive,
   pullLatestProfiles,
 } from "./sync.js";
