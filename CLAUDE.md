@@ -2,107 +2,68 @@
 
 ## Project Overview
 
-TypeScript library for writing Tasker (Android automation app) profiles and tasks in TypeScript, compiled to JavaScript that Tasker executes directly.
+TypeScript library for writing Tasker (Android automation app) tasks in TypeScript, compiled to JavaScript that Tasker executes directly.
 
-**Key insight:** Tasker can execute JavaScript/JavaScriptlet actions natively. We write TypeScript → compile to JS → Tasker runs the JS directly. No XML conversion needed.
+**Key insight:** Tasker runs JavaScript natively (JavaScript/JavaScriptlet actions). We never generate XML. TypeScript → JS → the device pulls the latest build and runs it.
 
 ## Tech Stack
 
 - **Runtime**: Bun
 - **Language**: TypeScript 7.0
-- **Core**: Effect 4.0 (beta)
-- **Target**: Tasker's JavaScript execution environment
+- **Core**: Effect 3.22 — Effect 4 beta was tried and reverted (breaking API churn between betas); we write "Effect 4 style" (`Effect.Service`, `Schema.TaggedError`, Layers) so a future migration is mechanical. Do not re-introduce the 4.x beta without being asked.
+- **Target**: Tasker's JavaScript execution environment (WebView; sync XHR available, no Node APIs)
 
 ## Architecture
 
 ```
 src/
-├── index.ts          # Main exports
-├── tasker-api.ts     # Type-safe bindings for Tasker's JavaScript API
-├── profile.ts        # Task/Profile definitions using Effect Schema
-├── sync.ts           # Pull compiled JS from CI artifacts
-└── runtime.ts        # Runtime helpers for execution in Tasker
+├── index.ts          # Public exports
+├── tasker-api.ts     # Effect bindings for all ~110 Tasker JS functions + `raw` escape hatch
+├── profile.ts        # DSL: Schema.TaggedClass actions/triggers, Task/Profile/Project classes
+├── compiler.ts       # DSL → plain JS codegen (no runtime deps in output)
+├── runtime.ts        # runInTasker for Effect programs that run on-device
+├── sync.ts           # Pull compiled JS from GitHub releases/artifacts (works on-device)
+└── cli.ts            # `tasker-effect compile` for consumer repos
+tasks/
+├── automations.ts    # DSL definitions compiled by CI
+└── scripts/*.ts      # Effect programs, each bundled to a single JS file
+scripts/compile-tasks.ts  # bun run compile → dist-tasker/
+bin/tasker-effect.mjs     # CLI entry (npm bin)
 ```
 
-## Key Requirements
+## Two compilation paths (keep them distinct)
 
-### 1. Tasker API Bindings (`tasker-api.ts`)
-Create type-safe wrappers for ALL Tasker JavaScript functions:
-- Reference: https://tasker.joaoapps.com/userguide/en/javascript.html
-- Functions: `flash()`, `performTask()`, `setGlobal()`, `global()`, `setLocal()`, `local()`, `setWallpaper()`, `browseURL()`, `mediaControl()`, `say()`, `shell()`, etc.
-- Include ALL functions from the documentation
-- Use Effect services for testability
+1. **DSL codegen** (`compiler.ts`): tasks are *data*; `compileTaskToJs`/`compileProjectFiles` are pure functions emitting ~20-line dependency-free JS that only calls Tasker globals. Consumers use the CLI: `bunx tasker-effect compile [entry] [--out dir]`. No bundler involved.
+2. **Effect programs** (`tasks/scripts/`): full TS + Effect, bundled per-entrypoint to a single IIFE file with Bun.build (≈350 KB min — the Effect core is not further tree-shakeable). Bundling for *consumer* repos is intentionally NOT the library's job; they use their own bundler (e.g. `esbuild script.ts --bundle --minify --format=iife --platform=browser`). Do not add bundling to the CLI.
 
-### 2. Task DSL (`profile.ts`)
-Effect-based DSL for defining Tasker tasks as TypeScript:
-- Use Effect Schema for validation
-- Tasks are sequences of actions
-- Actions map to Tasker JS API calls
-- Should compile to clean JS that Tasker understands
+## Distribution / device sync
 
-Example target API:
-```typescript
-const morningRoutine = Task.make({
-  name: "Morning Routine",
-  actions: [
-    Action.flash({ text: "Good morning!" }),
-    Action.setVolume({ stream: "media", level: 50 }),
-    Action.say({ text: "Time to wake up" }),
-  ],
-});
-
-// Compiles to JS that Tasker can execute
-const js = compileTask(morningRoutine);
-```
-
-### 3. Sync Module (`sync.ts`)
-Pull latest compiled JS profiles from GitHub CI:
-- Fetch artifacts from GitHub Actions (use gh CLI or GitHub API)
-- Download and apply to device
-- Must work when called FROM Tasker's JavaScript environment
-- Simple HTTP fetch to grab latest release/artifact
-
-### 4. Compiler/Bundler
-Compile TypeScript tasks to standalone JS files:
-- Output should be single-file JS that Tasker can execute
-- Include only the runtime helpers needed
-- Strip types, bundle dependencies
-- CI produces these artifacts
+- CI (`.github/workflows/ci.yml`): typecheck + test → `bun run compile` → uploads `dist-tasker/` as the `tasker-js` artifact → refreshes the rolling release `tasker-js-latest`.
+- On-device, `sync-profiles.js` (a bundled script from `tasks/scripts/`) downloads the newest release assets to `/sdcard/Tasker/js/` via Tasker's own `writeFile`. Tasker reads JS files from disk on every action run, so overwriting a file updates behavior on the next trigger — including sync-profiles.js itself.
+- Tasker profiles/triggers cannot be created from JS: new tasks need a one-time manual pairing in the Tasker UI (trigger + JavaScript action → file path). The compiler emits a README describing the triggers to configure.
 
 ## Effect Patterns
 
-Follow Effect 4 best practices:
-- Use `Effect.Service` for dependency injection
-- Use `Schema.TaggedError` for typed errors
-- Use `Layer` composition for configuration
-- Prefer `yield*` over `.pipe()` for readability
-- Use `Schema.TaggedClass` for domain types
-
-## CI/CD (`.github/workflows/ci.yml`)
-
-GitHub Actions should:
-1. Type check (`bun run typecheck`)
-2. Run tests (`bun test`)
-3. Build/compile tasks to JS
-4. Upload compiled JS as artifacts
-5. On release: publish artifacts that devices can pull
+- `Effect.Service` for services (`Tasker`, `TaskerCompiler`, `ProfileSync`, `FileStore`, …)
+- `Schema.TaggedError` for every error; handle with `Effect.catchTag`/`catchTags`
+- `Schema.TaggedClass` for DSL actions/triggers; validation happens at construction
+- `Layer` composition to swap Node vs on-device implementations (`TaskerFileStore`, `TaskerProfileSyncLive`)
+- `Effect.runPromise` only at edges (scripts, CLI, runtime entry)
+- Tests provide the recording test layer from `makeTaskerTestLayer` — no device needed
 
 ## Development Commands
 
 ```bash
 bun install          # Install deps
-bun run typecheck    # Type check
+bun run typecheck    # Type check (src/ only)
 bun test             # Run tests
-bun run build        # Compile to dist/
-bun run compile      # Compile tasks to Tasker-ready JS
+bun run build        # Compile library to dist/ (npm publish surface)
+bun run compile      # Compile tasks/ to dist-tasker/ (Tasker-ready JS)
 ```
 
 ## What NOT to do
 
-- ❌ Do NOT compile to XML - Tasker runs JS directly
-- ❌ Do NOT try to create `.tsk.xml` files
-- ❌ Do NOT overcomplicate - Tasker just needs valid JS files
-
-## Existing Code
-
-There may be existing code from a previous attempt that compiled to XML. Ignore it or remove it. Focus on the JS-based approach described above.
+- ❌ No XML. Tasker runs JS directly; never generate `.tsk.xml`/`.prf.xml`
+- ❌ No bundling in the CLI — consumers bring their own bundler
+- ❌ No Node APIs in code that runs on-device (`compiler.ts` output, `tasks/scripts/`)
+- ❌ Don't upgrade to Effect 4 beta unless explicitly requested

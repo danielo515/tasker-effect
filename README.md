@@ -124,12 +124,31 @@ const { layer, calls } = makeTaskerTestLayer({
 CI compiles `tasks/` on every push, uploads the result as the `tasker-js`
 artifact and refreshes a rolling GitHub release (`tasker-js-latest`).
 
-On the device, run the bundled `sync-profiles.js` (itself produced by
-`bun run compile`) from a Tasker task — e.g. triggered daily or by an NFC
-tag. It downloads the newest release assets to `/sdcard/Tasker/js/` using
-Tasker's own `writeFile`, so every JavaScript action that points there picks
-up the new build on its next run. Point it at your fork with the Tasker
-globals `%SYNC_OWNER` / `%SYNC_REPO`.
+**One-time device setup:**
+
+1. Download `sync-profiles.js` from the latest release to
+   `/sdcard/Tasker/js/` (any way you like — browser, `adb push`, …).
+2. In Tasker, create a task **Sync** with a single **JavaScript** action
+   pointing at that file, with *Auto Exit* disabled.
+3. Create a profile that runs **Sync** whenever you want updates: a daily
+   Time trigger, "connected to home Wi-Fi", an NFC tag, or just a home
+   screen shortcut.
+4. For each of your own tasks, create its Tasker task/profile once in the
+   UI: configure the trigger (the generated `README.md` asset lists them)
+   and point a JavaScript action at the task's file in `/sdcard/Tasker/js/`.
+
+**How updates propagate:** Tasker reads the `.js` file from disk every time
+an action runs — nothing is cached. Each **Sync** run overwrites
+`/sdcard/Tasker/js/` with the newest release assets (via Tasker's own
+`writeFile`), so the next time any profile fires it executes the new code.
+This applies to DSL-generated files, Effect bundles, and `sync-profiles.js`
+itself, which updates its own file too.
+
+**The one manual step that remains:** Tasker's JS API cannot create
+profiles or triggers, so a *brand-new* task needs the one-time UI pairing
+from step 4. After that, every change to its code ships automatically.
+Point the sync at your own fork with the Tasker globals `%SYNC_OWNER` /
+`%SYNC_REPO`.
 
 From Node/CI you can do the same programmatically:
 
