@@ -1,227 +1,194 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
+import { Action, Trigger, Task, Profile, Project, cond } from "../src/profile.js";
 import {
-  task,
-  profile,
-  project,
-  time,
-  wifi,
-  flash,
-  setVar,
-  performTask,
-  javascriptlet,
-  shell,
-} from "../src/profile.js";
-import {
-  compileTaskToXml,
-  compileProfileToXml,
-  compileProjectToXml,
+  TaskerCompiler,
+  compileTaskToJs,
+  compileProfileFiles,
+  compileProjectFiles,
+  describeTrigger,
+  slugify,
 } from "../src/compiler.js";
 
-describe("Task Compilation", () => {
-  test("compiles simple task", async () => {
-    const t = task("Test Task", [flash("Hello World")]);
+const expectValidJs = (code: string) => {
+  // Throws SyntaxError if the emitted code does not parse.
+  expect(() => new Function(code)).not.toThrow();
+};
 
-    const xml = await Effect.runPromise(compileTaskToXml(t));
-
-    expect(xml).toContain('<?xml version="1.0" encoding="UTF-8"?>');
-    expect(xml).toContain("<TaskerData");
-    expect(xml).toContain("<Task");
-    expect(xml).toContain("<nme>Test Task</nme>");
-    expect(xml).toContain("<code>548</code>"); // Flash action code
-    expect(xml).toContain("Hello World");
-  });
-
-  test("compiles task with multiple actions", async () => {
-    const t = task("Multi Action Task", [
-      flash("Start"),
-      setVar("%counter", "0"),
-      performTask("Other Task"),
-      flash("End"),
-    ]);
-
-    const xml = await Effect.runPromise(compileTaskToXml(t));
-
-    expect(xml).toContain("act0");
-    expect(xml).toContain("act1");
-    expect(xml).toContain("act2");
-    expect(xml).toContain("act3");
-  });
-
-  test("compiles task with shell action", async () => {
-    const t = task("Shell Task", [
-      shell("echo hello", { root: true, timeout: 30 }),
-    ]);
-
-    const xml = await Effect.runPromise(compileTaskToXml(t));
-
-    expect(xml).toContain("<code>123</code>"); // Shell action code
-    expect(xml).toContain("echo hello");
-  });
-
-  test("compiles task with JavaScriptlet", async () => {
-    const code = "var x = 1 + 1; setGlobal('result', x);";
-    const t = task("JS Task", [javascriptlet(code)]);
-
-    const xml = await Effect.runPromise(compileTaskToXml(t));
-
-    expect(xml).toContain("<code>129</code>"); // JavaScriptlet code
-    expect(xml).toContain("var x = 1 + 1");
-  });
-
-  test("handles special XML characters", async () => {
-    const t = task("Special Chars", [
-      flash("Hello <world> & 'friends' \"everyone\""),
-    ]);
-
-    const xml = await Effect.runPromise(compileTaskToXml(t));
-
-    expect(xml).toContain("&lt;world&gt;");
-    expect(xml).toContain("&amp;");
-  });
-
-  test("compiles setVar with doMaths", async () => {
-    const t = task("Math Task", [
-      setVar("%counter", "%counter + 1", { doMaths: true }),
-    ]);
-
-    const xml = await Effect.runPromise(compileTaskToXml(t));
-
-    expect(xml).toContain("<code>547</code>"); // SetVariable code
-    expect(xml).toContain("%counter + 1");
-  });
-});
-
-describe("Profile Compilation", () => {
-  test("compiles profile with time trigger", async () => {
-    const p = profile(
-      "Morning Profile",
-      [time({ hour: 7, minute: 0 }, { to: { hour: 9, minute: 0 } })],
-      task("Morning Task", [flash("Good morning!")])
-    );
-
-    const outputs = await Effect.runPromise(compileProfileToXml(p));
-
-    expect(outputs.length).toBeGreaterThan(0);
-
-    const profileOutput = outputs.find((o) => o.type === "profile");
-    expect(profileOutput).toBeDefined();
-    expect(profileOutput!.content).toContain("<Profile");
-    expect(profileOutput!.content).toContain("<Time");
-    expect(profileOutput!.content).toContain("<fh>7</fh>");
-    expect(profileOutput!.content).toContain("<fm>0</fm>");
-    expect(profileOutput!.content).toContain("<th>9</th>");
-    expect(profileOutput!.content).toContain("<tm>0</tm>");
-  });
-
-  test("compiles profile with WiFi trigger", async () => {
-    const p = profile(
-      "Home WiFi Profile",
-      [wifi({ ssid: "MyHomeNetwork" })],
-      "Home Task"
-    );
-
-    const outputs = await Effect.runPromise(compileProfileToXml(p));
-
-    const profileOutput = outputs.find((o) => o.type === "profile");
-    expect(profileOutput!.content).toContain("<State");
-    expect(profileOutput!.content).toContain("<ssid>MyHomeNetwork</ssid>");
-  });
-
-  test("compiles profile with entry and exit tasks", async () => {
-    const p = profile(
-      "Dual Task Profile",
-      [time({ hour: 9, minute: 0 })],
-      task("Entry Task", [flash("Entering")]),
-      {
-        exit: task("Exit Task", [flash("Exiting")]),
-      }
-    );
-
-    const outputs = await Effect.runPromise(compileProfileToXml(p));
-
-    expect(outputs.length).toBeGreaterThanOrEqual(2);
-
-    const profileOutput = outputs.find((o) => o.type === "profile");
-    expect(profileOutput!.content).toContain("<mid0>"); // Entry task ref
-    expect(profileOutput!.content).toContain("<mid1>"); // Exit task ref
-  });
-
-  test("generates correct filenames", async () => {
-    const p = profile(
-      "My Profile",
-      [time({ hour: 12, minute: 0 })],
-      "Test Task"
-    );
-
-    const outputs = await Effect.runPromise(compileProfileToXml(p));
-
-    const profileOutput = outputs.find((o) => o.type === "profile");
-    expect(profileOutput!.filename).toBe("My Profile.prf.xml");
-  });
-
-  test("compiles profile with day filter", async () => {
-    const p = profile(
-      "Weekday Profile",
-      [
-        time(
-          { hour: 9, minute: 0 },
-          { days: ["monday", "tuesday", "wednesday", "thursday", "friday"] }
-        ),
+describe("compileTaskToJs", () => {
+  test("emits Tasker API calls for each action", () => {
+    const task = new Task({
+      name: "Morning Routine",
+      actions: [
+        Action.flash("Good morning!"),
+        Action.setVolume("media", 5),
+        Action.say("Time to wake up"),
+        Action.setGlobal("%MODE", "day"),
       ],
-      "Work Task"
-    );
-
-    const outputs = await Effect.runPromise(compileProfileToXml(p));
-    const profileOutput = outputs.find((o) => o.type === "profile");
-    expect(profileOutput!.content).toContain("<days>");
-  });
-});
-
-describe("Project Compilation", () => {
-  test("compiles empty project", async () => {
-    const p = project("Empty Project");
-
-    const xml = await Effect.runPromise(compileProjectToXml(p));
-
-    expect(xml).toContain("<Project");
-    expect(xml).toContain("<name>Empty Project</name>");
-  });
-
-  test("compiles project with profiles and tasks", async () => {
-    const p = project("My Project", {
-      profiles: [
-        profile(
-          "Test Profile",
-          [time({ hour: 8, minute: 0 })],
-          task("Profile Task", [flash("Hello")])
-        ),
-      ],
-      tasks: [task("Standalone Task", [flash("Standalone")])],
     });
 
-    const xml = await Effect.runPromise(compileProjectToXml(p));
+    const jsSource = compileTaskToJs(task);
 
-    expect(xml).toContain("<Project");
-    expect(xml).toContain("<Profile");
-    expect(xml).toContain("<Task");
-    expect(xml).toContain("<pids>"); // Profile IDs
-    expect(xml).toContain("<tids>"); // Task IDs
+    expect(jsSource).toContain('flash("Good morning!");');
+    expect(jsSource).toContain("mediaVol(5, false, false);");
+    expect(jsSource).toContain('say("Time to wake up"');
+    expect(jsSource).toContain('setGlobal("MODE", "day");');
+    expect(jsSource).toContain('"use strict";');
+    expectValidJs(jsSource);
+  });
+
+  test("escapes quotes and newlines in strings", () => {
+    const task = new Task({
+      name: "Escapes",
+      actions: [Action.flash('He said "hi"\nand left')],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('flash("He said \\"hi\\"\\nand left");');
+    expectValidJs(jsSource);
+  });
+
+  test("compiles conditionals with else branches", () => {
+    const task = new Task({
+      name: "Battery Check",
+      actions: [
+        Action.when(
+          cond("%BATT", "lt", "20"),
+          [Action.flash("Low battery"), Action.setWifi(false)],
+          [Action.flash("All good")]
+        ),
+      ],
+    });
+
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('if (parseFloat(global("BATT")) < parseFloat("20")) {');
+    expect(jsSource).toContain("} else {");
+    expect(jsSource).toContain("setWifi(false);");
+    expectValidJs(jsSource);
+  });
+
+  test("compiles HTTP requests to synchronous XHR", () => {
+    const task = new Task({
+      name: "Fetch Weather",
+      actions: [
+        Action.http("GET", "https://example.com/weather", {
+          headers: { Accept: "application/json" },
+          outputGlobal: "%WEATHER",
+        }),
+      ],
+    });
+
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('xhr.open("GET", "https://example.com/weather", false);');
+    expect(jsSource).toContain('xhr.setRequestHeader("Accept", "application/json");');
+    expect(jsSource).toContain('setGlobal("WEATHER", __out);');
+    expectValidJs(jsSource);
+  });
+
+  test("shell output lands in a global variable", () => {
+    const task = new Task({
+      name: "Uptime",
+      actions: [Action.shell("uptime", { outputGlobal: "%UPTIME" })],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('__out = shell("uptime", false, 30);');
+    expect(jsSource).toContain('setGlobal("UPTIME"');
+    expectValidJs(jsSource);
+  });
+
+  test("raw JavaScript is inserted verbatim", () => {
+    const task = new Task({
+      name: "Custom",
+      actions: [Action.js("var x = 1;\nflash(String(x));")],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain("var x = 1;");
+    expectValidJs(jsSource);
+  });
+
+  test("wraps everything in an error handler that flashes", () => {
+    const task = new Task({ name: "T", actions: [Action.flash("x")] });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain("catch (err)");
+    expect(jsSource).toContain('flash("Task \\"T\\" failed: " + err);');
   });
 });
 
-describe("XML Structure", () => {
-  test("includes TaskerData root with version info", async () => {
-    const t = task("Test", [flash("Hi")]);
-    const xml = await Effect.runPromise(compileTaskToXml(t));
+describe("compileProfileFiles", () => {
+  test("emits enter and exit files", () => {
+    const profile = new Profile({
+      name: "Home WiFi",
+      triggers: [Trigger.wifiConnected("MyNetwork")],
+      enter: new Task({ name: "Arrive", actions: [Action.flash("Welcome home")] }),
+      exit: new Task({ name: "Leave", actions: [Action.flash("Goodbye")] }),
+    });
 
-    expect(xml).toMatch(/<TaskerData sr="" dvi="\d+" tv="[\d.]+[^"]*">/);
+    const files = compileProfileFiles(profile);
+    expect(files.map((f) => f.filename)).toEqual([
+      "home-wifi.enter.js",
+      "home-wifi.exit.js",
+    ]);
+    for (const file of files) expectValidJs(file.content);
+  });
+});
+
+describe("compileProjectFiles", () => {
+  test("bundles profiles, tasks and a setup README", () => {
+    const project = new Project({
+      name: "My Automations",
+      profiles: [
+        new Profile({
+          name: "Low Battery",
+          triggers: [Trigger.batteryLevel(0, 20)],
+          enter: new Task({
+            name: "Save Power",
+            actions: [Action.setWifi(false)],
+          }),
+        }),
+      ],
+      tasks: [
+        new Task({ name: "Greet", actions: [Action.flash("Hi")] }),
+      ],
+    });
+
+    const files = compileProjectFiles(project);
+    const names = files.map((f) => f.filename);
+    expect(names).toContain("low-battery.enter.js");
+    expect(names).toContain("greet.js");
+    expect(names).toContain("README.md");
+
+    const readme = files.find((f) => f.filename === "README.md");
+    expect(readme?.content).toContain("Battery Level from 0% to 20%");
+    expect(readme?.content).toContain("low-battery.enter.js");
+  });
+});
+
+describe("TaskerCompiler service", () => {
+  test("compileTask returns a CompiledFile", async () => {
+    const program = Effect.gen(function* () {
+      const compiler = yield* TaskerCompiler;
+      return yield* compiler.compileTask(
+        new Task({ name: "Service Task", actions: [Action.flash("via service")] })
+      );
+    });
+
+    const file = await Effect.runPromise(
+      program.pipe(Effect.provide(TaskerCompiler.Default))
+    );
+    expect(file.filename).toBe("service-task.js");
+    expect(file.content).toContain('flash("via service");');
+  });
+});
+
+describe("helpers", () => {
+  test("slugify produces safe file names", () => {
+    expect(slugify("Morning Routine!")).toBe("morning-routine");
+    expect(slugify("  ")).toBe("task");
   });
 
-  test("actions have proper sr and ve attributes", async () => {
-    const t = task("Test", [flash("Hi")]);
-    const xml = await Effect.runPromise(compileTaskToXml(t));
-
-    expect(xml).toMatch(/<Action sr="act\d+" ve="\d+">/);
+  test("describeTrigger formats times", () => {
+    const description = describeTrigger(
+      Trigger.time({ hour: 7, minute: 5 }, { to: { hour: 9, minute: 0 } })
+    );
+    expect(description).toBe("Time from 07:05 to 09:00");
   });
 });
