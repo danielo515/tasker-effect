@@ -1,7 +1,7 @@
 {
   "name": "tasker-effect",
   "version": "0.1.0",
-  "description": "Manage and program Tasker profiles in TypeScript with Effect 4",
+  "description": "Write Tasker tasks in TypeScript with Effect, compiled to JS that Tasker runs directly",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

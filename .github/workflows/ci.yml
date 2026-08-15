@@ -2,13 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 jobs:
-  typecheck:
-    name: Type Check
+  verify:
+    name: Type check & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,32 +18,18 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Type check
         run: bun run typecheck
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    needs: typecheck
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install
 
       - name: Run tests
         run: bun test
 
   build:
-    name: Build
+    name: Build library
     runs-on: ubuntu-latest
-    needs: [typecheck, test]
+    needs: verify
     steps:
       - uses: actions/checkout@v4
 
@@ -52,23 +38,22 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Build
         run: bun run build
 
-      - name: Upload build artifacts
+      - name: Upload dist
         uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
           retention-days: 7
 
-  compile-profiles:
-    name: Compile Profiles
+  compile:
+    name: Compile Tasker JS
     runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main'
+    needs: verify
     steps:
       - uses: actions/checkout@v4
 
@@ -77,95 +62,44 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
-      - name: Build
-        run: bun run build
+      - name: Compile tasks to JavaScript
+        run: bun run compile
 
-      - name: Compile profiles
-        run: |
-          mkdir -p compiled-profiles
-          # Run the profile compiler script if it exists
-          if [ -f "scripts/compile-profiles.ts" ]; then
-            bun run scripts/compile-profiles.ts
-          else
-            echo "No profile compiler script found. Creating example..."
-            cat > compiled-profiles/README.md << 'EOF'
-          # Compiled Tasker Profiles
-
-          This directory contains compiled Tasker profiles from the tasker-effect project.
-
-          ## Usage
-
-          1. Download the XML files to your Android device
-          2. Import them into Tasker:
-             - For tasks: Long press TASKS tab → Import Task
-             - For profiles: Long press PROFILES tab → Import Profile
-             - For projects: Long press project bar → Import Project
-
-          ## Files
-
-          Files are named according to their type:
-          - `*.tsk.xml` - Task files
-          - `*.prf.xml` - Profile files
-          - `*.prj.xml` - Project files
-          EOF
-          fi
-
-      - name: Upload compiled profiles
+      - name: Upload compiled Tasker JS
         uses: actions/upload-artifact@v4
         with:
-          name: tasker-profiles
-          path: compiled-profiles/
+          name: tasker-js
+          path: dist-tasker/
           retention-days: 30
 
   release:
-    name: Release
+    name: Publish rolling release
     runs-on: ubuntu-latest
-    needs: [build, compile-profiles]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [build, compile]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download build artifacts
+      - name: Download compiled Tasker JS
         uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          name: tasker-js
+          path: dist-tasker/
 
-      - name: Download compiled profiles
-        uses: actions/download-artifact@v4
-        with:
-          name: tasker-profiles
-          path: compiled-profiles/
-
-      - name: Get version from package.json
-        id: version
-        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Create release zip
+      # Devices pull from the latest release (see src/sync.ts), so keep a
+      # rolling release whose assets always match the newest green commit.
+      - name: Update rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          zip -r tasker-profiles-${{ steps.version.outputs.version }}.zip compiled-profiles/
-
-      - name: Check if release exists
-        id: check_release
-        run: |
-          if gh release view v${{ steps.version.outputs.version }} > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
+          TAG=tasker-js-latest
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Latest compiled Tasker JS" \
+              --notes "Rolling release updated by CI on every push. Devices sync from these assets."
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create or update release
-        if: steps.check_release.outputs.exists == 'false'
-        run: |
-          gh release create v${{ steps.version.outputs.version }} \
-            --title "v${{ steps.version.outputs.version }}" \
-            --notes "Automated release of tasker-effect v${{ steps.version.outputs.version }}" \
-            tasker-profiles-${{ steps.version.outputs.version }}.zip
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          gh release upload "$TAG" dist-tasker/* --clobber

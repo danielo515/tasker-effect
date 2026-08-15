@@ -1,411 +1,149 @@
 # tasker-effect
 
-TypeScript library for managing [Tasker](https://tasker.joaoapps.com/) profiles using [Effect 4](https://effect.website/).
+Write [Tasker](https://tasker.joaoapps.com/) (Android automation) tasks in
+TypeScript with [Effect](https://effect.website/), and compile them to plain
+JavaScript that Tasker executes directly.
 
-> Define, compile, and sync Tasker automations with type safety and functional programming patterns.
+**The approach:** Tasker can run JavaScript natively via its JavaScript /
+JavaScriptlet actions. So there is no XML to generate — you write TypeScript,
+CI compiles it to JS, and your device pulls the latest build and runs it.
 
-## Features
+```
+TypeScript (DSL or Effect programs)
+        │  bun run compile
+        ▼
+dist-tasker/*.js  ──►  GitHub CI artifact + rolling release
+        │
+        ▼  sync-profiles.js (runs on-device)
+/sdcard/Tasker/js/*.js  ──►  Tasker JavaScript actions
+```
 
-- 🔒 **Type-safe API bindings** - Full TypeScript types for all Tasker JavaScript functions
-- 📝 **Profile DSL** - Effect Schema-based domain language for defining profiles, tasks, and actions
-- 🔄 **Compiler** - Transform TypeScript definitions into Tasker-importable XML files
-- ☁️ **CI Sync** - Pull compiled profiles from GitHub Actions artifacts
-- 🧪 **Testable** - Mock implementations for testing without a device
+## Modules
 
-## Installation
+| Module | Purpose |
+| --- | --- |
+| `tasker-api` | Type-safe Effect bindings for every documented Tasker JS function (~110), plus a typed `raw` escape hatch |
+| `profile` | Schema-validated DSL: tasks are sequences of tagged actions, profiles add trigger metadata |
+| `compiler` | Compiles DSL definitions to standalone JS using only Tasker globals (no runtime deps) |
+| `runtime` | `runInTasker` for Effect programs bundled to a single file |
+| `sync` | Pulls the latest compiled JS from GitHub releases/artifacts — works on-device |
+
+## Quick start
 
 ```bash
-bun add tasker-effect
-# or
-npm install tasker-effect
+bun install
+bun run typecheck   # type check
+bun test            # run tests
+bun run compile     # compile tasks/ to dist-tasker/
 ```
 
-## Quick Start
+### Declarative DSL
 
 ```typescript
-import { Effect } from "effect";
-import {
-  profile, task, time, wifi,
-  flash, setVar, performTask,
-  compileProfileToXml
-} from "tasker-effect";
+import { Action, Trigger, Task, Profile, cond } from "tasker-effect";
 
-// Define a task
-const morningTask = task("Morning Routine", [
-  flash("Good morning!"),
-  setVar("%MODE", "morning"),
-  performTask("Enable Work Apps"),
-]);
-
-// Define a profile with time trigger
-const morningProfile = profile(
-  "Morning Mode",
-  [time({ hour: 7, minute: 0 }, { to: { hour: 9, minute: 0 } })],
-  morningTask
-);
-
-// Compile to Tasker XML
-const program = compileProfileToXml(morningProfile);
-const outputs = await Effect.runPromise(program);
-
-outputs.forEach(output => {
-  console.log(`${output.filename}:`);
-  console.log(output.content);
+const lowBattery = new Profile({
+  name: "Low Battery Saver",
+  triggers: [Trigger.batteryLevel(0, 20)],
+  enter: new Task({
+    name: "Battery Saver On",
+    actions: [
+      Action.flash("Battery low — saving power"),
+      Action.setWifi(false),
+      Action.when(cond("%LOCATION", "eq", "home"), [
+        Action.say("Charge me, please"),
+      ]),
+    ],
+  }),
 });
 ```
 
-## Triggers
+`bun run compile` turns each task into a plain JS file plus a README that
+documents which triggers to configure in the Tasker UI. Everything is
+validated at construction time by Effect Schema — invalid hours, empty
+messages or malformed vibration patterns fail before anything reaches the
+device.
 
-### Time Trigger
+### Effect programs on-device
 
-```typescript
-import { time } from "tasker-effect";
-
-// Simple time
-time({ hour: 9, minute: 0 });
-
-// Time range
-time({ hour: 9, minute: 0 }, { to: { hour: 17, minute: 0 } });
-
-// With day filtering
-time({ hour: 9, minute: 0 }, {
-  days: ["monday", "tuesday", "wednesday", "thursday", "friday"],
-});
-
-// Repeating
-time({ hour: 9, minute: 0 }, { repeatMinutes: 30 });
-```
-
-### WiFi Trigger
+Scripts in `tasks/scripts/` run the full Effect runtime inside Tasker; the
+compile step bundles each one (with `effect` included) into a single file:
 
 ```typescript
-import { wifi } from "tasker-effect";
-
-// Connected to specific network
-wifi({ ssid: "MyNetwork" });
-
-// Disconnected
-wifi({ ssid: "MyNetwork", connected: false });
-
-// Any network
-wifi();
-```
-
-### Bluetooth Trigger
-
-```typescript
-import { bluetooth } from "tasker-effect";
-
-// Connected to device
-bluetooth({ name: "Car Stereo" });
-
-// By address
-bluetooth({ address: "AA:BB:CC:DD:EE:FF" });
-```
-
-### Battery Trigger
-
-```typescript
-import { battery } from "tasker-effect";
-
-// Low battery (0-20%)
-battery(0, 20);
-
-// Full battery (80-100%)
-battery(80, 100);
-```
-
-### App Trigger
-
-```typescript
-import { app } from "tasker-effect";
-
-// By package name
-app("com.spotify.music");
-
-// By label
-app("Spotify");
-```
-
-### Variable Trigger
-
-```typescript
-import { variable } from "tasker-effect";
-
-variable("%DEBUG", "equals", "true");
-variable("%COUNTER", "greater_than", "10");
-variable("%FLAG", "is_set");
-```
-
-## Actions
-
-### Alert Actions
-
-```typescript
-import { flash, PopupAction, SayAction, VibrateAction, NotifyAction } from "tasker-effect";
-
-// Flash message
-flash("Hello!");
-flash("Hello!", true); // Long flash
-
-// TTS
-new SayAction({ text: "Hello world", pitch: 5, speed: 5 });
-
-// Vibrate
-new VibrateAction({ duration: 500 });
-
-// Notification
-new NotifyAction({
-  title: "Alert",
-  text: "Something happened",
-  priority: "high",
-});
-```
-
-### Variable Actions
-
-```typescript
-import { setVar, ClearVariableAction, VariableAddAction } from "tasker-effect";
-
-// Set variable
-setVar("%myvar", "value");
-
-// With math
-setVar("%counter", "%counter + 1", { doMaths: true });
-
-// Clear
-new ClearVariableAction({ name: "%myvar" });
-
-// Add
-new VariableAddAction({ name: "%counter", value: 5 });
-```
-
-### Task Control
-
-```typescript
-import { performTask, wait, StopAction, ReturnAction, GotoAction } from "tasker-effect";
-
-// Run another task
-performTask("Other Task");
-performTask("Other Task", { param1: "arg1", param2: "arg2" });
-
-// Wait
-wait({ seconds: 5 });
-wait({ milliseconds: 500 });
-
-// Stop
-new StopAction({ withError: false });
-
-// Return value
-new ReturnAction({ value: "result" });
-
-// Goto
-new GotoAction({ target: { type: "label", label: "MyLabel" } });
-new GotoAction({ target: { type: "action", number: 5 } });
-new GotoAction({ target: { type: "end" } });
-```
-
-### Control Flow
-
-```typescript
-import { IfAction, ElseAction, EndIfAction, ForAction, EndForAction } from "tasker-effect";
-
-// If-Else-EndIf
-new IfAction({ lhs: "%var", operator: "eq", rhs: "value" });
-new ElseAction({});
-new EndIfAction({});
-
-// For loop
-new ForAction({ variable: "%item", items: "%array" });
-new EndForAction({});
-```
-
-### Network Actions
-
-```typescript
-import { http, BrowseUrlAction, SendSmsAction } from "tasker-effect";
-
-// HTTP request
-http("GET", "https://api.example.com/data");
-http("POST", "https://api.example.com/data", {
-  body: JSON.stringify({ key: "value" }),
-  headers: { "Content-Type": "application/json" },
-  outputVariable: "%response",
-});
-
-// Open URL
-new BrowseUrlAction({ url: "https://example.com" });
-
-// Send SMS
-new SendSmsAction({ number: "+1234567890", message: "Hello!" });
-```
-
-### Shell Actions
-
-```typescript
-import { shell, ShellAction } from "tasker-effect";
-
-// Basic shell command
-shell("echo hello");
-
-// With root
-shell("settings put system...", { root: true });
-
-// With timeout
-shell("long-running-command", { timeout: 120 });
-```
-
-### JavaScript Actions
-
-```typescript
-import { javascriptlet, JavaScriptAction } from "tasker-effect";
-
-// Inline JavaScript
-javascriptlet(`
-  var x = 1 + 1;
-  setGlobal('result', x);
-`);
-
-// From file
-new JavaScriptAction({ path: "/sdcard/scripts/myscript.js" });
-```
-
-## Compilation
-
-### Compile Task
-
-```typescript
-import { task, flash, compileTaskToXml } from "tasker-effect";
 import { Effect } from "effect";
-
-const myTask = task("My Task", [flash("Hello!")]);
-
-const xml = await Effect.runPromise(compileTaskToXml(myTask));
-console.log(xml); // Outputs .tsk.xml content
-```
-
-### Compile Profile
-
-```typescript
-import { profile, time, task, flash, compileProfileToXml } from "tasker-effect";
-import { Effect } from "effect";
-
-const myProfile = profile(
-  "My Profile",
-  [time({ hour: 9, minute: 0 })],
-  task("Entry", [flash("Activated!")])
-);
-
-const outputs = await Effect.runPromise(compileProfileToXml(myProfile));
-// outputs: Array<{ filename, content, type }>
-```
-
-### Compile Project
-
-```typescript
-import { project, compileProjectToXml } from "tasker-effect";
-import { Effect } from "effect";
-
-const myProject = project("My Project", {
-  profiles: [/* ... */],
-  tasks: [/* ... */],
-});
-
-const xml = await Effect.runPromise(compileProjectToXml(myProject));
-console.log(xml); // Outputs .prj.xml content
-```
-
-## Syncing from CI
-
-Pull compiled profiles from GitHub Actions artifacts:
-
-```typescript
-import { pullLatestProfiles } from "tasker-effect";
-import { Effect } from "effect";
-
-const result = await Effect.runPromise(
-  pullLatestProfiles({
-    owner: "your-username",
-    repo: "your-repo",
-    token: process.env.GITHUB_TOKEN,
-    targetDir: "./profiles",
-  })
-);
-
-console.log(`Downloaded ${result.files.length} files`);
-```
-
-## Tasker API Bindings
-
-Use Tasker's JavaScript API with full type safety:
-
-```typescript
-import { Tasker, TaskerLive, TaskerMock } from "tasker-effect";
-import { Effect } from "effect";
+import { Tasker, runInTasker } from "tasker-effect";
 
 const program = Effect.gen(function* () {
   const tasker = yield* Tasker;
-  
-  // Flash a message
-  yield* tasker.flash("Hello from Effect!");
-  
-  // Get a global variable
-  const value = yield* tasker.global("MY_VAR");
-  
-  // Set a variable
-  yield* tasker.setGlobal("RESULT", "done");
-  
-  // Check if on device
-  const onDevice = yield* tasker.isOnDevice();
+  const battery = yield* tasker.global("BATT");
+  yield* tasker.flash(`Battery at ${battery}%`);
 });
 
-// Run on device with real Tasker
-Effect.runPromise(program.pipe(Effect.provide(TaskerLive)));
-
-// Run in tests with mock
-Effect.runPromise(program.pipe(Effect.provide(TaskerMock)));
+void runInTasker(program, { exitWhenDone: true });
 ```
 
-## CI/CD Integration
+In Tasker: create a task with a **JavaScript** action pointing at the bundled
+file and disable *Auto Exit* (the script calls `exit()` itself).
 
-The library includes a GitHub Actions workflow for:
+The `Tasker` service is an `Effect.Service` — swap in the test layer to unit
+test your automations off-device:
 
-1. Type checking
-2. Running tests
-3. Building the library
-4. Compiling profiles to XML
-5. Uploading artifacts
+```typescript
+import { makeTaskerTestLayer } from "tasker-effect";
 
-See `.github/workflows/ci.yml` for the full workflow.
-
-## Development
-
-```bash
-# Install dependencies
-bun install
-
-# Type check
-bun run typecheck
-
-# Run tests
-bun test
-
-# Build
-bun run build
-
-# Compile example profiles
-bun run scripts/compile-profiles.ts
+const { layer, calls } = makeTaskerTestLayer({
+  global: () => Effect.succeed("15"),
+});
+// run your program with `Effect.provide(layer)` and assert on `calls`
 ```
 
-## File Format Reference
+## Keeping devices up to date
 
-Tasker uses XML files with specific extensions:
+CI compiles `tasks/` on every push, uploads the result as the `tasker-js`
+artifact and refreshes a rolling GitHub release (`tasker-js-latest`).
 
-| Extension | Type | Import Location |
-|-----------|------|-----------------|
-| `.tsk.xml` | Task | TASKS tab → Import Task |
-| `.prf.xml` | Profile | PROFILES tab → Import Profile |
-| `.prj.xml` | Project | Project bar → Import Project |
+On the device, run the bundled `sync-profiles.js` (itself produced by
+`bun run compile`) from a Tasker task — e.g. triggered daily or by an NFC
+tag. It downloads the newest release assets to `/sdcard/Tasker/js/` using
+Tasker's own `writeFile`, so every JavaScript action that points there picks
+up the new build on its next run. Point it at your fork with the Tasker
+globals `%SYNC_OWNER` / `%SYNC_REPO`.
+
+From Node/CI you can do the same programmatically:
+
+```typescript
+import { Effect } from "effect";
+import { pullLatestProfiles } from "tasker-effect";
+
+await Effect.runPromise(
+  pullLatestProfiles({
+    owner: "danielo515",
+    repo: "tasker-effect",
+    targetDir: "./synced",
+  })
+);
+```
+
+## Project layout
+
+```
+src/               # the library (published surface)
+tasks/             # your automations, compiled by CI
+  automations.ts   #   DSL project → one JS file per task
+  scripts/         #   Effect programs → single-file bundles
+scripts/           # build tooling (compile-tasks.ts)
+examples/          # runnable walkthroughs
+dist-tasker/       # compiled output (gitignored; CI artifact)
+```
+
+## Effect patterns used
+
+- `Effect.Service` for `Tasker`, the compiler and the sync services
+- `Schema.TaggedError` for every error (`TaskerCallError`, `CompileError`,
+  `GitHubApiError`, …) — catch them with `Effect.catchTag`
+- `Schema.TaggedClass` for DSL actions and triggers
+- `Layer` composition to swap Node vs Tasker implementations of storage,
+  HTTP and zip extraction (`TaskerFileStore`, `TaskerProfileSyncLive`)
 
 ## License
 
