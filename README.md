@@ -64,6 +64,28 @@ validated at construction time by Effect Schema — invalid hours, empty
 messages or malformed vibration patterns fail before anything reaches the
 device.
 
+### CLI
+
+Repos that depend on `tasker-effect` can compile their DSL definitions
+without writing any build script:
+
+```bash
+bunx tasker-effect compile                       # tasks/automations.ts → dist-tasker/
+bunx tasker-effect compile my/entry.ts --out build
+```
+
+The CLI imports the entry module and compiles every export (default and
+named) that is a `Project`, `Profile` or `Task` into Tasker-ready JS files,
+plus a setup README per project. TypeScript entries require Bun (`bunx`);
+plain JavaScript entries also work under Node (`npx tasker-effect`).
+
+The CLI is DSL codegen only — bundling Effect programs for Tasker is
+intentionally left to the consumer, e.g.:
+
+```bash
+esbuild script.ts --bundle --minify --format=iife --platform=browser --outfile=dist-tasker/script.js
+```
+
 ### Effect programs on-device
 
 Scripts in `tasks/scripts/` run the full Effect runtime inside Tasker; the
