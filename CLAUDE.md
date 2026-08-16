@@ -22,7 +22,12 @@ src/
 ├── profile.ts        # DSL: Schema.TaggedClass actions/triggers, Task/Profile/Project classes
 ├── compiler.ts       # DSL → plain JS codegen (no runtime deps in output)
 ├── runtime.ts        # runInTasker for Effect programs that run on-device
-├── sync.ts           # Pull compiled JS from GitHub releases/artifacts (works on-device)
+├── sync.ts           # Barrel re-exporting sync/ under the pre-split names (pulls in platform-node)
+├── sync/
+│   ├── contract.ts   # Platform-free: errors, schemas, FileStore/ZipExtractor capability tags
+│   ├── core.ts       # ProfileSync program against @effect/platform HttpClient (platform-free)
+│   ├── node.ts       # Desktop layers (@effect/platform-node: FileSystem, Path, Command)
+│   └── tasker.ts     # On-device layers (Tasker builtins; device bundles import this, never the barrel)
 └── cli.ts            # `tasker-effect compile` for consumer repos
 tasks/
 ├── automations.ts    # DSL definitions compiled by CI
@@ -44,10 +49,10 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 
 ## Effect Patterns
 
-- `Effect.Service` for services (`Tasker`, `TaskerCompiler`, `ProfileSync`, `FileStore`, …)
+- `Effect.Service` for services (`Tasker`, `TaskerCompiler`, `ProfileSync`, …); plain `Context.Tag` for the platform-injected sync capabilities (`FileStore`, `ZipExtractor`)
 - `Schema.TaggedError` for every error; handle with `Effect.catchTag`/`catchTags`
 - `Schema.TaggedClass` for DSL actions/triggers; validation happens at construction
-- `Layer` composition to swap Node vs on-device implementations (`TaskerFileStore`, `TaskerProfileSyncLive`)
+- `Layer` composition to swap Node vs on-device implementations (`SyncNodeLive` vs `SyncTaskerLive`); HTTP goes through `@effect/platform`'s `HttpClient` (`FetchHttpClient.layer` on both platforms). `@effect/platform-node` may only be imported from `src/sync/node.ts` (and tests)
 - `Effect.runPromise` only at edges (scripts, CLI, runtime entry)
 - Tests provide the recording test layer from `makeTaskerTestLayer` — no device needed
 

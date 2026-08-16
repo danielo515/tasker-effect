@@ -223,7 +223,8 @@ dist-tasker/       # compiled output (gitignored; CI artifact)
   `GitHubApiError`, …) — catch them with `Effect.catchTag`
 - `Schema.TaggedClass` for DSL actions and triggers
 - `Layer` composition to swap Node vs Tasker implementations of storage,
-  HTTP and zip extraction (`TaskerFileStore`, `TaskerProfileSyncLive`)
+  HTTP and zip extraction (`SyncNodeLive`, `SyncTaskerLive`); HTTP is
+  `@effect/platform`'s `HttpClient` behind `FetchHttpClient.layer` on both
 
 ## License
 
