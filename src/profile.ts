@@ -145,9 +145,35 @@ export class SetLocal extends Schema.TaggedClass<SetLocal>()("SetLocal", {
   value: Schema.String,
 }) {}
 
-/** Run another Tasker task by name */
+/**
+ * Run another DSL-defined task, routed through the shared dispatcher task
+ * (`TE Dispatch`). Stores only the target task's *name* — actions stay flat
+ * and serializable; use the `Action.performTask(task)` builder to derive it
+ * from a `Task` object.
+ *
+ * No custom parameters: the dispatcher consumes `%par1` as the target name
+ * and `%par2` as its exit switch, so there is nothing left to forward. Use
+ * `PerformTaskerTask` for a direct call that supports parameters.
+ */
 export class PerformTask extends Schema.TaggedClass<PerformTask>()(
   "PerformTask",
+  {
+    taskName: Schema.NonEmptyString,
+    priority: Schema.optionalWith(
+      Schema.Number.pipe(Schema.int(), Schema.between(1, 50)),
+      { default: () => 5 }
+    ),
+  }
+) {}
+
+/**
+ * Run a task created by hand in the Tasker UI, by name — a direct
+ * `performTask(...)` call, exactly like Tasker's own action. No validation
+ * beyond the name being non-empty: the referenced task only exists on the
+ * phone, so the compiler cannot check it.
+ */
+export class PerformTaskerTask extends Schema.TaggedClass<PerformTaskerTask>()(
+  "PerformTaskerTask",
   {
     taskName: Schema.NonEmptyString,
     priority: Schema.optionalWith(
@@ -391,6 +417,7 @@ export type Action =
   | SetGlobal
   | SetLocal
   | PerformTask
+  | PerformTaskerTask
   | EnableProfile
   | Wait
   | Shell
@@ -430,6 +457,7 @@ const actionMembers = [
   SetGlobal,
   SetLocal,
   PerformTask,
+  PerformTaskerTask,
   EnableProfile,
   Wait,
   Shell,
@@ -657,7 +685,18 @@ export const Action = {
     new SetGlobal({ name: variableName(name), value }),
   setLocal: (name: string, value: string) =>
     new SetLocal({ name: variableName(name), value }),
-  performTask: (
+  /**
+   * Call another DSL task by reference. Routed through the dispatcher, which
+   * uses `%par1`/`%par2` for its own resolution — custom parameters are not
+   * supported here; use {@link Action.performTaskerTask} for that.
+   */
+  performTask: (task: Task, options?: { readonly priority?: number }) =>
+    new PerformTask({
+      taskName: task.name,
+      priority: options?.priority ?? 5,
+    }),
+  /** Call a task that only exists in the Tasker UI, by name (direct call) */
+  performTaskerTask: (
     taskName: string,
     options?: {
       readonly priority?: number;
@@ -665,7 +704,7 @@ export const Action = {
       readonly parameterTwo?: string;
     }
   ) =>
-    new PerformTask({
+    new PerformTaskerTask({
       taskName,
       priority: options?.priority ?? 5,
       ...(options?.parameterOne !== undefined
@@ -675,7 +714,11 @@ export const Action = {
         ? { parameterTwo: options.parameterTwo }
         : {}),
     }),
-  enableProfile: (profileName: string, enable = true) =>
+  /** Enable/disable a DSL profile by reference */
+  enableProfile: (profile: Profile, enable = true) =>
+    new EnableProfile({ profileName: profile.name, enable }),
+  /** Enable/disable a profile that only exists in the Tasker UI, by name */
+  enableTaskerProfile: (profileName: string, enable = true) =>
     new EnableProfile({ profileName, enable }),
   wait: (milliseconds: number) => new Wait({ milliseconds }),
   shell: (

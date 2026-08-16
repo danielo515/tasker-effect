@@ -64,6 +64,49 @@ validated at construction time by Effect Schema — invalid hours, empty
 messages or malformed vibration patterns fail before anything reaches the
 device.
 
+### Typed task references
+
+Calling another DSL task takes the `Task` *object*, not a string — typos
+become type errors, and renames propagate automatically:
+
+```typescript
+const weatherCheck = new Task({ name: "Weather Check", actions: [/* … */] });
+
+const morningEnter = new Task({
+  name: "Morning Enter",
+  actions: [
+    Action.flash("Good morning!"),
+    Action.performTask(weatherCheck),        // typed reference
+    Action.enableProfile(nightMode, false),  // same for profiles
+  ],
+});
+```
+
+The action itself stays flat and serializable — only the task's name is
+stored. At compile time `Action.performTask` routes through the shared
+dispatcher: it emits `performTask("TE Dispatch", <priority>, "<name>",
+undefined)`, so the call resolves against the dispatcher's name→file map.
+Because the dispatcher consumes `%par1` (target name) and `%par2` (exit
+switch) for its own resolution, this variant takes no custom parameters —
+only `priority`.
+
+**Escape hatch for UI-created tasks:** tasks and profiles that only exist
+on the phone (hand-built in the Tasker UI) are referenced by name and
+compile to a direct call, parameters included:
+
+```typescript
+Action.performTaskerTask("Hand Made Task", { parameterOne: "now" });
+Action.enableTaskerProfile("Hand Made Profile", false);
+```
+
+These are not validated — the compiler cannot see what exists on-device.
+
+**Linker check:** compiling a `Project` fails with a `CompileError` if any
+DSL `performTask` references a task that is not in `project.tasks`, naming
+the offending profile/task and listing the valid targets. Standalone
+task/profile compilation has no project context, so the check only runs at
+the project level.
+
 ### CLI
 
 Repos that depend on `tasker-effect` can compile their DSL definitions
@@ -222,6 +265,8 @@ dist-tasker/       # compiled output (gitignored; CI artifact)
 - `Schema.TaggedError` for every error (`TaskerCallError`, `CompileError`,
   `GitHubApiError`, …) — catch them with `Effect.catchTag`
 - `Schema.TaggedClass` for DSL actions and triggers
+- `Match` (with `Match.exhaustive`) for the compiler's action/trigger/op
+  dispatch — adding a variant fails typecheck until every site handles it
 - `Layer` composition to swap Node vs Tasker implementations of storage,
   HTTP and zip extraction (`TaskerFileStore`, `TaskerProfileSyncLive`)
 

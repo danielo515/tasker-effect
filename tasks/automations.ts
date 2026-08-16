@@ -14,6 +14,30 @@ import {
   cond,
 } from "../src/index.js";
 
+/** Standalone task: fetch weather and warn conditionally */
+const weatherCheck = new Task({
+  name: "Weather Check",
+  description: "Fetch current weather and warn when it is freezing",
+  actions: [
+    Action.http(
+      "GET",
+      "https://api.open-meteo.com/v1/forecast?latitude=40.41&longitude=-3.70&current_weather=true",
+      { outputGlobal: "%WEATHER_JSON" }
+    ),
+    Action.js(
+      [
+        'var data = JSON.parse(global("WEATHER_JSON"));',
+        'setGlobal("TEMPERATURE", String(data.current_weather.temperature));',
+      ].join("\n")
+    ),
+    Action.when(
+      cond("%TEMPERATURE", "lt", "0"),
+      [Action.flash("Freezing outside: %TEMPERATURE °C"), Action.say("It is freezing outside")],
+      [Action.flash("Current temperature: %TEMPERATURE °C")]
+    ),
+  ],
+});
+
 /** Weekday wake-up: greet, raise media volume, announce the day */
 const morningRoutine = new Profile({
   name: "Morning Routine",
@@ -34,6 +58,9 @@ const morningRoutine = new Profile({
       Action.setVolume("media", 7),
       Action.say("Time to wake up"),
       Action.setGlobal("%DAY_PHASE", "morning"),
+      // Typed task reference: passes the Task object, the compiler routes the
+      // call through TE Dispatch and the linker verifies it at compile time.
+      Action.performTask(weatherCheck),
     ],
   }),
   exit: new Task({
@@ -86,30 +113,6 @@ const homeWifi = new Profile({
       Action.setVolume("ringer", 2),
     ],
   }),
-});
-
-/** Standalone task: fetch weather and warn conditionally */
-const weatherCheck = new Task({
-  name: "Weather Check",
-  description: "Fetch current weather and warn when it is freezing",
-  actions: [
-    Action.http(
-      "GET",
-      "https://api.open-meteo.com/v1/forecast?latitude=40.41&longitude=-3.70&current_weather=true",
-      { outputGlobal: "%WEATHER_JSON" }
-    ),
-    Action.js(
-      [
-        'var data = JSON.parse(global("WEATHER_JSON"));',
-        'setGlobal("TEMPERATURE", String(data.current_weather.temperature));',
-      ].join("\n")
-    ),
-    Action.when(
-      cond("%TEMPERATURE", "lt", "0"),
-      [Action.flash("Freezing outside: %TEMPERATURE °C"), Action.say("It is freezing outside")],
-      [Action.flash("Current temperature: %TEMPERATURE °C")]
-    ),
-  ],
 });
 
 export const automations = new Project({

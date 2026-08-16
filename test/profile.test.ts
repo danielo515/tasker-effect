@@ -53,6 +53,51 @@ describe("Action builders", () => {
   });
 });
 
+describe("typed task and profile references", () => {
+  const weather = new Task({
+    name: "Weather Check",
+    actions: [Action.flash("weather")],
+  });
+
+  test("performTask takes a Task object and stores only its name", () => {
+    const action = Action.performTask(weather, { priority: 10 });
+    expect(action._tag).toBe("PerformTask");
+    expect(action.taskName).toBe("Weather Check");
+    expect(action.priority).toBe(10);
+    // The action stays flat: no embedded Task object.
+    expect(Object.keys(action)).not.toContain("task");
+  });
+
+  test("performTaskerTask references UI-created tasks by name with parameters", () => {
+    const action = Action.performTaskerTask("Hand Made", {
+      priority: 7,
+      parameterOne: "now",
+      parameterTwo: "fast",
+    });
+    expect(action._tag).toBe("PerformTaskerTask");
+    expect(action.taskName).toBe("Hand Made");
+    expect(action.parameterOne).toBe("now");
+    expect(action.parameterTwo).toBe("fast");
+  });
+
+  test("enableProfile takes a Profile object; enableTaskerProfile a name", () => {
+    const profile = new Profile({
+      name: "Night Mode",
+      triggers: [Trigger.time({ hour: 22, minute: 0 })],
+      enter: weather,
+    });
+    const typed = Action.enableProfile(profile, false);
+    expect(typed._tag).toBe("EnableProfile");
+    expect(typed.profileName).toBe("Night Mode");
+    expect(typed.enable).toBe(false);
+
+    const byName = Action.enableTaskerProfile("Hand Made Profile");
+    expect(byName._tag).toBe("EnableProfile");
+    expect(byName.profileName).toBe("Hand Made Profile");
+    expect(byName.enable).toBe(true);
+  });
+});
+
 describe("Trigger builders", () => {
   test("time trigger validates hours and minutes", () => {
     const trigger = Trigger.time(

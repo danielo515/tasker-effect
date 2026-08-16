@@ -72,6 +72,7 @@ export {
   SetGlobal,
   SetLocal,
   PerformTask,
+  PerformTaskerTask,
   EnableProfile,
   Wait,
   Shell,

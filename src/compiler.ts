@@ -8,10 +8,11 @@
  * needs no bundler and no runtime dependencies.
  */
 
-import { Effect, Schema } from "effect";
+import { Effect, Match, Schema } from "effect";
 import {
   type Action,
   type Trigger,
+  type VolumeStream,
   Condition,
   Profile,
   Project,
@@ -69,31 +70,24 @@ const readVarExpr = (name: string): string =>
 export const conditionExpr = (condition: Condition): string => {
   const v = readVarExpr(condition.variable);
   const value = condition.value ?? "";
-  switch (condition.op) {
-    case "eq":
-      return `${v} === ${js(value)}`;
-    case "neq":
-      return `${v} !== ${js(value)}`;
-    case "lt":
-      return `parseFloat(${v}) < parseFloat(${js(value)})`;
-    case "gt":
-      return `parseFloat(${v}) > parseFloat(${js(value)})`;
-    case "lte":
-      return `parseFloat(${v}) <= parseFloat(${js(value)})`;
-    case "gte":
-      return `parseFloat(${v}) >= parseFloat(${js(value)})`;
-    case "contains":
-      return `String(${v}).indexOf(${js(value)}) !== -1`;
-    case "matches":
-      return `new RegExp(${js(value)}).test(String(${v}))`;
-    case "isSet":
-      return `(${v} !== undefined && ${v} !== "")`;
-    case "notSet":
-      return `(${v} === undefined || ${v} === "")`;
-  }
+  return Match.value(condition.op).pipe(
+    Match.when("eq", () => `${v} === ${js(value)}`),
+    Match.when("neq", () => `${v} !== ${js(value)}`),
+    Match.when("lt", () => `parseFloat(${v}) < parseFloat(${js(value)})`),
+    Match.when("gt", () => `parseFloat(${v}) > parseFloat(${js(value)})`),
+    Match.when("lte", () => `parseFloat(${v}) <= parseFloat(${js(value)})`),
+    Match.when("gte", () => `parseFloat(${v}) >= parseFloat(${js(value)})`),
+    Match.when("contains", () => `String(${v}).indexOf(${js(value)}) !== -1`),
+    Match.when("matches", () => `new RegExp(${js(value)}).test(String(${v}))`),
+    Match.when("isSet", () => `(${v} !== undefined && ${v} !== "")`),
+    Match.when("notSet", () => `(${v} === undefined || ${v} === "")`),
+    Match.exhaustive
+  );
 };
 
-const VOLUME_FN: Record<string, string> = {
+// Keyed by the closed VolumeStream union so adding a stream fails typecheck
+// here until a Tasker function is mapped for it.
+const VOLUME_FN: Record<VolumeStream, string> = {
   alarm: "alarmVol",
   system: "systemVol",
   media: "mediaVol",
@@ -108,145 +102,121 @@ const opt = (value: string | undefined): string =>
   value === undefined ? "undefined" : js(value);
 
 /** Compile one action to JavaScript source lines (unindented) */
-export const emitAction = (action: Action): Array<string> => {
-  switch (action._tag) {
-    case "Flash":
-      return [`${action.long ? "flashLong" : "flash"}(${js(action.text)});`];
-    case "Popup":
-      return [
-        `popup(${js(action.title)}, ${js(action.text)}, ${action.showOverKeyguard}, "", "", ${action.timeoutSecs});`,
-      ];
-    case "Say":
-      return [
-        `say(${js(action.text)}, ${opt(action.engine)}, ${opt(action.voice)}, ${js(action.stream)}, ${action.pitch}, ${action.speed});`,
-      ];
-    case "Vibrate":
-      return [`vibrate(${action.milliseconds});`];
-    case "VibratePattern":
-      return [`vibratePattern(${js(action.pattern)});`];
-    case "SetGlobal":
-      return [`setGlobal(${js(action.name)}, ${js(action.value)});`];
-    case "SetLocal":
-      return [`setLocal(${js(action.name)}, ${js(action.value)});`];
-    case "PerformTask":
-      return [
-        `performTask(${js(action.taskName)}, ${action.priority}, ${opt(action.parameterOne)}, ${opt(action.parameterTwo)});`,
-      ];
-    case "EnableProfile":
-      return [`enableProfile(${js(action.profileName)}, ${action.enable});`];
-    case "Wait":
-      return [`wait(${action.milliseconds});`];
-    case "Shell": {
-      const call = `shell(${js(action.command)}, ${action.asRoot}, ${action.timeoutSecs})`;
-      if (action.outputGlobal === undefined) {
+export const emitAction = (action: Action): Array<string> =>
+  Match.value(action).pipe(
+    Match.tag("Flash", (a) => [
+      `${a.long ? "flashLong" : "flash"}(${js(a.text)});`,
+    ]),
+    Match.tag("Popup", (a) => [
+      `popup(${js(a.title)}, ${js(a.text)}, ${a.showOverKeyguard}, "", "", ${a.timeoutSecs});`,
+    ]),
+    Match.tag("Say", (a) => [
+      `say(${js(a.text)}, ${opt(a.engine)}, ${opt(a.voice)}, ${js(a.stream)}, ${a.pitch}, ${a.speed});`,
+    ]),
+    Match.tag("Vibrate", (a) => [`vibrate(${a.milliseconds});`]),
+    Match.tag("VibratePattern", (a) => [`vibratePattern(${js(a.pattern)});`]),
+    Match.tag("SetGlobal", (a) => [`setGlobal(${js(a.name)}, ${js(a.value)});`]),
+    Match.tag("SetLocal", (a) => [`setLocal(${js(a.name)}, ${js(a.value)});`]),
+    // DSL task references route through the shared dispatcher: %par1 carries
+    // the target task name (%par2 stays free for its exit switch), so this
+    // variant cannot forward custom parameters.
+    Match.tag("PerformTask", (a) => [
+      `performTask(${js(DISPATCH_TASK_NAME)}, ${a.priority}, ${js(a.taskName)}, undefined);`,
+    ]),
+    Match.tag("PerformTaskerTask", (a) => [
+      `performTask(${js(a.taskName)}, ${a.priority}, ${opt(a.parameterOne)}, ${opt(a.parameterTwo)});`,
+    ]),
+    Match.tag("EnableProfile", (a) => [
+      `enableProfile(${js(a.profileName)}, ${a.enable});`,
+    ]),
+    Match.tag("Wait", (a) => [`wait(${a.milliseconds});`]),
+    Match.tag("Shell", (a) => {
+      const call = `shell(${js(a.command)}, ${a.asRoot}, ${a.timeoutSecs})`;
+      if (a.outputGlobal === undefined) {
         return [`${call};`];
       }
       return [
         `__out = ${call};`,
-        `setGlobal(${js(action.outputGlobal)}, __out === undefined ? "" : String(__out));`,
+        `setGlobal(${js(a.outputGlobal)}, __out === undefined ? "" : String(__out));`,
       ];
-    }
-    case "ReadFile":
-      return [
-        `__out = readFile(${js(action.path)});`,
-        `setGlobal(${js(action.outputGlobal)}, __out === undefined ? "" : String(__out));`,
-      ];
-    case "WriteFile":
-      return [
-        `writeFile(${js(action.path)}, ${js(action.text)}, ${action.append});`,
-      ];
-    case "HttpRequest": {
+    }),
+    Match.tag("ReadFile", (a) => [
+      `__out = readFile(${js(a.path)});`,
+      `setGlobal(${js(a.outputGlobal)}, __out === undefined ? "" : String(__out));`,
+    ]),
+    Match.tag("WriteFile", (a) => [
+      `writeFile(${js(a.path)}, ${js(a.text)}, ${a.append});`,
+    ]),
+    Match.tag("HttpRequest", (a) => {
       const lines = [
         "__out = (function () {",
         "  var xhr = new XMLHttpRequest();",
-        `  xhr.open(${js(action.method)}, ${js(action.url)}, false);`,
+        `  xhr.open(${js(a.method)}, ${js(a.url)}, false);`,
       ];
-      for (const [key, value] of Object.entries(action.headers)) {
+      for (const [key, value] of Object.entries(a.headers)) {
         lines.push(`  xhr.setRequestHeader(${js(key)}, ${js(value)});`);
       }
       lines.push(
-        `  xhr.send(${action.body === undefined ? "null" : js(action.body)});`,
+        `  xhr.send(${a.body === undefined ? "null" : js(a.body)});`,
         "  return xhr.responseText;",
         "})();"
       );
-      if (action.outputGlobal !== undefined) {
-        lines.push(`setGlobal(${js(action.outputGlobal)}, __out);`);
+      if (a.outputGlobal !== undefined) {
+        lines.push(`setGlobal(${js(a.outputGlobal)}, __out);`);
       }
       return lines;
-    }
-    case "BrowseUrl":
-      return [`browseURL(${js(action.url)});`];
-    case "SendSms":
+    }),
+    Match.tag("BrowseUrl", (a) => [`browseURL(${js(a.url)});`]),
+    Match.tag("SendSms", (a) => [
+      `sendSMS(${js(a.number)}, ${js(a.text)}, ${a.storeInMessagingApp});`,
+    ]),
+    Match.tag("SetWifi", (a) => [`setWifi(${a.on});`])
+  ).pipe(
+    Match.tag("SetBluetooth", (a) => [`setBT(${a.on});`]),
+    Match.tag("SetAirplaneMode", (a) => [`setAirplaneMode(${a.on});`]),
+    Match.tag("SetMobileData", (a) => [`mobileData(${a.on});`]),
+    Match.tag("SetAutoSync", (a) => [`setAutoSync(${a.on});`]),
+    Match.tag("SetVolume", (a) => [
+      `${VOLUME_FN[a.stream]}(${a.level}, ${a.display}, ${a.sound});`,
+    ]),
+    Match.tag("MediaControl", (a) => [`mediaControl(${js(a.action)});`]),
+    Match.tag("MusicPlay", (a) => [
+      `musicPlay(${js(a.path)}, ${a.offsetSecs}, ${a.loop}, ${js(a.stream)});`,
+    ]),
+    Match.tag("MusicStop", () => ["musicStop();"]),
+    Match.tag("SetClip", (a) => [`setClip(${js(a.text)}, ${a.append});`]),
+    Match.tag("SetWallpaper", (a) => [`setWallpaper(${js(a.path)});`]),
+    Match.tag("LaunchApp", (a) => [
+      `loadApp(${js(a.app)}, ${opt(a.data)}, ${a.excludeFromRecents});`,
+    ]),
+    Match.tag("SendIntent", (a) => {
+      const extras = `[${a.extras.map((extra) => js(extra)).join(", ")}]`;
       return [
-        `sendSMS(${js(action.number)}, ${js(action.text)}, ${action.storeInMessagingApp});`,
+        `sendIntent(${js(a.action)}, ${js(a.targetComp)}, ${opt(a.pkg)}, ${opt(a.cls)}, ${opt(a.category)}, ${opt(a.data)}, ${opt(a.mimeType)}, ${extras});`,
       ];
-    case "SetWifi":
-      return [`setWifi(${action.on});`];
-    case "SetBluetooth":
-      return [`setBT(${action.on});`];
-    case "SetAirplaneMode":
-      return [`setAirplaneMode(${action.on});`];
-    case "SetMobileData":
-      return [`mobileData(${action.on});`];
-    case "SetAutoSync":
-      return [`setAutoSync(${action.on});`];
-    case "SetVolume": {
-      const fn = VOLUME_FN[action.stream];
-      if (fn === undefined) {
-        throw new CompileError({
-          message: `Unknown volume stream: ${action.stream}`,
-        });
-      }
-      return [`${fn}(${action.level}, ${action.display}, ${action.sound});`];
-    }
-    case "MediaControl":
-      return [`mediaControl(${js(action.action)});`];
-    case "MusicPlay":
-      return [
-        `musicPlay(${js(action.path)}, ${action.offsetSecs}, ${action.loop}, ${js(action.stream)});`,
-      ];
-    case "MusicStop":
-      return ["musicStop();"];
-    case "SetClip":
-      return [`setClip(${js(action.text)}, ${action.append});`];
-    case "SetWallpaper":
-      return [`setWallpaper(${js(action.path)});`];
-    case "LaunchApp":
-      return [
-        `loadApp(${js(action.app)}, ${opt(action.data)}, ${action.excludeFromRecents});`,
-      ];
-    case "SendIntent": {
-      const extras = `[${action.extras.map((extra) => js(extra)).join(", ")}]`;
-      return [
-        `sendIntent(${js(action.action)}, ${js(action.targetComp)}, ${opt(action.pkg)}, ${opt(action.cls)}, ${opt(action.category)}, ${opt(action.data)}, ${opt(action.mimeType)}, ${extras});`,
-      ];
-    }
-    case "SetSilentMode":
-      return [`silentMode(${js(action.mode)});`];
-    case "GoHome":
-      return [`goHome(${action.screen});`];
-    case "GetLocation":
-      return [
-        `getLocation(${js(action.source)}, ${action.keepTracking}, ${action.timeoutSecs});`,
-      ];
-    case "JavaScript":
-      return action.code.split("\n");
-    case "If": {
-      const lines = [`if (${conditionExpr(action.condition)}) {`];
-      for (const inner of action.then) {
+    }),
+    Match.tag("SetSilentMode", (a) => [`silentMode(${js(a.mode)});`]),
+    Match.tag("GoHome", (a) => [`goHome(${a.screen});`]),
+    Match.tag("GetLocation", (a) => [
+      `getLocation(${js(a.source)}, ${a.keepTracking}, ${a.timeoutSecs});`,
+    ]),
+    Match.tag("JavaScript", (a) => a.code.split("\n")),
+    Match.tag("If", (a) => {
+      const lines = [`if (${conditionExpr(a.condition)}) {`];
+      for (const inner of a.then) {
         lines.push(...indentLines(emitAction(inner), 2));
       }
-      if (action.orElse.length > 0) {
+      if (a.orElse.length > 0) {
         lines.push("} else {");
-        for (const inner of action.orElse) {
+        for (const inner of a.orElse) {
           lines.push(...indentLines(emitAction(inner), 2));
         }
       }
       lines.push("}");
       return lines;
-    }
-  }
-};
+    }),
+    Match.exhaustive
+  );
 
 // =============================================================================
 // Task / Profile / Project compilation
@@ -281,36 +251,52 @@ export const compileTaskToJs = (task: Task): string => {
 };
 
 /** Human-readable description of a trigger for setup instructions */
-export const describeTrigger = (trigger: Trigger): string => {
-  switch (trigger._tag) {
-    case "TimeTrigger": {
-      const fmt = (t: { hour: number; minute: number }) =>
-        `${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}`;
-      const parts = [`Time from ${fmt(trigger.from)}`];
-      if (trigger.to !== undefined) parts.push(`to ${fmt(trigger.to)}`);
-      if (trigger.repeatMinutes !== undefined)
-        parts.push(`every ${trigger.repeatMinutes}m`);
-      if (trigger.days.length > 0) parts.push(`on ${trigger.days.join(", ")}`);
+export const describeTrigger = (trigger: Trigger): string =>
+  Match.value(trigger).pipe(
+    Match.tag("TimeTrigger", (t) => {
+      const fmt = (time: { hour: number; minute: number }) =>
+        `${String(time.hour).padStart(2, "0")}:${String(time.minute).padStart(2, "0")}`;
+      const parts = [`Time from ${fmt(t.from)}`];
+      if (t.to !== undefined) parts.push(`to ${fmt(t.to)}`);
+      if (t.repeatMinutes !== undefined) parts.push(`every ${t.repeatMinutes}m`);
+      if (t.days.length > 0) parts.push(`on ${t.days.join(", ")}`);
       return parts.join(" ");
-    }
-    case "LocationTrigger":
-      return `Location within ${trigger.radiusMeters}m of ${trigger.latitude}, ${trigger.longitude}`;
-    case "WifiConnectedTrigger":
-      return `State > Net > Wifi Connected (SSID: ${trigger.ssid})`;
-    case "BluetoothConnectedTrigger":
-      return `State > Net > BT Connected (Name: ${trigger.name})`;
-    case "AppOpenedTrigger":
-      return `Application: ${trigger.app}`;
-    case "BatteryLevelTrigger":
-      return `State > Power > Battery Level from ${trigger.from}% to ${trigger.to}%`;
-    case "VariableTrigger":
-      return `State > Variables > Variable Value: %${trigger.condition.variable} ${trigger.condition.op} ${trigger.condition.value ?? ""}`;
-    case "EventTrigger":
-      return `Event: ${trigger.event}${trigger.parameter !== undefined ? ` (${trigger.parameter})` : ""}`;
-    case "StateTrigger":
-      return `State: ${trigger.state}${trigger.parameter !== undefined ? ` (${trigger.parameter})` : ""}`;
-  }
-};
+    }),
+    Match.tag(
+      "LocationTrigger",
+      (t) =>
+        `Location within ${t.radiusMeters}m of ${t.latitude}, ${t.longitude}`
+    ),
+    Match.tag(
+      "WifiConnectedTrigger",
+      (t) => `State > Net > Wifi Connected (SSID: ${t.ssid})`
+    ),
+    Match.tag(
+      "BluetoothConnectedTrigger",
+      (t) => `State > Net > BT Connected (Name: ${t.name})`
+    ),
+    Match.tag("AppOpenedTrigger", (t) => `Application: ${t.app}`),
+    Match.tag(
+      "BatteryLevelTrigger",
+      (t) => `State > Power > Battery Level from ${t.from}% to ${t.to}%`
+    ),
+    Match.tag(
+      "VariableTrigger",
+      (t) =>
+        `State > Variables > Variable Value: %${t.condition.variable} ${t.condition.op} ${t.condition.value ?? ""}`
+    ),
+    Match.tag(
+      "EventTrigger",
+      (t) =>
+        `Event: ${t.event}${t.parameter !== undefined ? ` (${t.parameter})` : ""}`
+    ),
+    Match.tag(
+      "StateTrigger",
+      (t) =>
+        `State: ${t.state}${t.parameter !== undefined ? ` (${t.parameter})` : ""}`
+    ),
+    Match.exhaustive
+  );
 
 /** Compile a profile: one JS file per enter/exit task */
 export const compileProfileFiles = (profile: Profile): Array<CompiledFile> => {
@@ -532,8 +518,59 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
   "",
 ];
 
+// =============================================================================
+// Linker check (Project-level)
+// =============================================================================
+
+/** Collect every DSL `PerformTask` reference in an action tree */
+const collectTaskRefs = (actions: ReadonlyArray<Action>): Array<string> => {
+  const refs: Array<string> = [];
+  const walk = (action: Action): void => {
+    if (action._tag === "PerformTask") {
+      refs.push(action.taskName);
+    } else if (action._tag === "If") {
+      action.then.forEach(walk);
+      action.orElse.forEach(walk);
+    }
+  };
+  actions.forEach(walk);
+  return refs;
+};
+
+/**
+ * Fail compilation if any DSL `PerformTask` references a task that is not in
+ * `project.tasks` — those are the only names the dispatcher's task map knows.
+ * Only Project compilation can run this check: a standalone task or profile
+ * has no surrounding project to resolve references against.
+ */
+const checkTaskReferences = (project: Project): void => {
+  const targets = project.tasks.map((task) => task.name);
+  const targetList =
+    targets.length > 0 ? targets.map((name) => `"${name}"`).join(", ") : "(none)";
+  const check = (owner: string, task: Task): void => {
+    for (const ref of collectTaskRefs(task.actions)) {
+      if (!targets.includes(ref)) {
+        throw new CompileError({
+          message: `${owner} references unknown task "${ref}". Valid targets: ${targetList}`,
+          source: project.name,
+        });
+      }
+    }
+  };
+  for (const profile of project.profiles) {
+    check(`Profile "${profile.name}" enter task "${profile.enter.name}"`, profile.enter);
+    if (profile.exit !== undefined) {
+      check(`Profile "${profile.name}" exit task "${profile.exit.name}"`, profile.exit);
+    }
+  }
+  for (const task of project.tasks) {
+    check(`Task "${task.name}"`, task);
+  }
+};
+
 /** Compile a whole project to JS files plus a setup README */
 export const compileProjectFiles = (project: Project): Array<CompiledFile> => {
+  checkTaskReferences(project);
   const files: Array<CompiledFile> = [];
   for (const profile of project.profiles) {
     files.push(...compileProfileFiles(profile));
