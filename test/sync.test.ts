@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { HttpClient, HttpClientResponse } from "@effect/platform";
 import { Effect, Layer } from "effect";
 import {
-  ProfileSync,
-  SyncHttpClient,
   FileStore,
-  ZipExtractor,
+  ProfileSync,
   StorageWriteError,
+  ZipExtractor,
   type SyncOptions,
 } from "../src/sync.js";
 
@@ -54,50 +54,62 @@ const artifacts = {
   ],
 };
 
-const makeStubs = (options?: { readonly releaseJson?: unknown }) => {
+const makeStubs = (options?: {
+  readonly releaseJson?: unknown;
+  readonly releaseStatus?: number;
+}) => {
   const written = new Map<string, string | Uint8Array>();
   const extractedInto: Array<string> = [];
 
   const httpLayer = Layer.succeed(
-    SyncHttpClient,
-    new SyncHttpClient({
-      getJson: (url: string) =>
-        Effect.succeed(
-          url.includes("/releases/latest")
-            ? (options?.releaseJson ?? release)
-            : artifacts
-        ),
-      getText: (url: string) => Effect.succeed(`// contents of ${url}`),
-      getBytes: () => Effect.succeed(new Uint8Array([80, 75])),
+    HttpClient.HttpClient,
+    HttpClient.make((request) => {
+      const url = request.url;
+      const respond = (body: Response) =>
+        Effect.succeed(HttpClientResponse.fromWeb(request, body));
+
+      if (url.includes("/releases/latest")) {
+        return respond(
+          new Response(JSON.stringify(options?.releaseJson ?? release), {
+            status: options?.releaseStatus ?? 200,
+            headers: { "content-type": "application/json" },
+          })
+        );
+      }
+      if (url.includes("/actions/artifacts")) {
+        return respond(
+          new Response(JSON.stringify(artifacts), {
+            headers: { "content-type": "application/json" },
+          })
+        );
+      }
+      if (url.endsWith(".zip")) {
+        return respond(new Response(new Uint8Array([80, 75])));
+      }
+      return respond(new Response(`// contents of ${url}`));
     })
   );
 
-  const fileLayer = Layer.succeed(
-    FileStore,
-    new FileStore({
-      writeText: (path: string, content: string) =>
-        Effect.sync(() => {
-          written.set(path, content);
-        }),
-      writeBytes: (path: string, content: Uint8Array) =>
-        Effect.sync(() => {
-          written.set(path, content);
-        }),
-    })
-  );
+  const fileLayer = Layer.succeed(FileStore, {
+    writeText: (path: string, content: string) =>
+      Effect.sync(() => {
+        written.set(path, content);
+      }),
+    writeBytes: (path: string, content: Uint8Array) =>
+      Effect.sync(() => {
+        written.set(path, content);
+      }),
+  });
 
-  const zipLayer = Layer.succeed(
-    ZipExtractor,
-    new ZipExtractor({
-      extract: (zipPath: string, targetDir: string) =>
-        Effect.sync(() => {
-          extractedInto.push(`${zipPath} -> ${targetDir}`);
-          return ["a.js", "b.js"] as ReadonlyArray<string>;
-        }),
-    })
-  );
+  const zipLayer = Layer.succeed(ZipExtractor, {
+    extract: (zipPath: string, targetDir: string) =>
+      Effect.sync(() => {
+        extractedInto.push(`${zipPath} -> ${targetDir}`);
+        return ["a.js", "b.js"] as ReadonlyArray<string>;
+      }),
+  });
 
-  const layer = ProfileSync.DefaultWithoutDependencies.pipe(
+  const layer = ProfileSync.Default.pipe(
     Layer.provide(httpLayer),
     Layer.provide(fileLayer),
     Layer.provide(zipLayer)
@@ -174,6 +186,20 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
     );
 
     expect(error._tag).toBe("GitHubApiError");
+  });
+
+  test("maps non-2xx API responses to GitHubApiError with the status", async () => {
+    const { layer } = makeStubs({ releaseStatus: 500 });
+
+    const error = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullLatestProfiles(baseOptions);
+      }).pipe(Effect.provide(layer), Effect.flip)
+    );
+
+    expect(error._tag).toBe("GitHubApiError");
+    expect(error._tag === "GitHubApiError" && error.status).toBe(500);
   });
 });
 
