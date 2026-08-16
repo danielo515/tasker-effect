@@ -268,7 +268,8 @@ dist-tasker/       # compiled output (gitignored; CI artifact)
 - `Match` (with `Match.exhaustive`) for the compiler's action/trigger/op
   dispatch — adding a variant fails typecheck until every site handles it
 - `Layer` composition to swap Node vs Tasker implementations of storage,
-  HTTP and zip extraction (`TaskerFileStore`, `TaskerProfileSyncLive`)
+  HTTP and zip extraction (`SyncNodeLive`, `SyncTaskerLive`); HTTP is
+  `@effect/platform`'s `HttpClient` behind `FetchHttpClient.layer` on both
 
 ## License
 
