@@ -155,8 +155,13 @@ export {
 export { runInTasker } from "./runtime.js";
 
 // =============================================================================
-// Sync (pull compiled JS from CI)
+// Sync (pull compiled JS from CI) — platform-free surface only
 // =============================================================================
+//
+// The platform layers live behind dedicated entry points so the bundler
+// never sees the other platform's graph:
+//   tasker-effect/sync/node    (desktop: @effect/platform-node)
+//   tasker-effect/sync/tasker  (on-device: Tasker builtins)
 
 export {
   GitHubApiError,
@@ -169,16 +174,9 @@ export {
   type ZipExtractorShape,
   DEFAULT_TARGET_DIR,
   FileStore,
-  FileStoreNodeLive,
-  TaskerFileStore,
   ZipExtractor,
-  ZipExtractorNodeLive,
-  TaskerZipExtractor,
   type SyncOptions,
   type SyncResult,
-  ProfileSync,
-  SyncNodeLive,
-  SyncTaskerLive,
-  TaskerProfileSyncLive,
-  pullLatestProfiles,
-} from "./sync.js";
+} from "./sync/contract.js";
+
+export { ProfileSync } from "./sync/core.js";

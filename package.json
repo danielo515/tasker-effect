@@ -5,6 +5,20 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./sync/node": {
+      "types": "./dist/sync/node.d.ts",
+      "default": "./dist/sync/node.js"
+    },
+    "./sync/tasker": {
+      "types": "./dist/sync/tasker.d.ts",
+      "default": "./dist/sync/tasker.js"
+    }
+  },
   "bin": {
     "tasker-effect": "./bin/tasker-effect.mjs"
   },

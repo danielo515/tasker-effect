@@ -26,7 +26,9 @@ dist-tasker/*.js  ──►  GitHub CI artifact + rolling release
 | `profile` | Schema-validated DSL: tasks are sequences of tagged actions, profiles add trigger metadata |
 | `compiler` | Compiles DSL definitions to standalone JS using only Tasker globals (no runtime deps), plus a dispatcher and an import-once task XML |
 | `runtime` | `runInTasker` for Effect programs bundled to a single file |
-| `sync` | Pulls the latest compiled JS from GitHub releases/artifacts — works on-device |
+| `sync/core` + `sync/contract` | Platform-free sync program (`ProfileSync`) and its error/capability contract — exported from the package root |
+| `sync/node` | Desktop layers (`tasker-effect/sync/node` entry point; @effect/platform-node) |
+| `sync/tasker` | On-device layers (`tasker-effect/sync/tasker` entry point; Tasker builtins) |
 
 ## Quick start
 
@@ -232,11 +234,17 @@ its code ships automatically.
 Point the sync at your own fork with the Tasker globals `%SYNC_OWNER` /
 `%SYNC_REPO`.
 
-From Node/CI you can do the same programmatically:
+From Node/CI you can do the same programmatically. The platform layers
+live behind dedicated entry points — `tasker-effect/sync/node` for desktop,
+`tasker-effect/sync/tasker` for scripts bundled for the device — so your
+bundler never sees the other platform's graph. This is a structural
+guarantee: the package root exports only platform-free sync pieces, because
+tree-shaking cannot be trusted to drop @effect/platform-node's node:*
+imports from a browser bundle.
 
 ```typescript
 import { Effect } from "effect";
-import { pullLatestProfiles } from "tasker-effect";
+import { pullLatestProfiles } from "tasker-effect/sync/node";
 
 await Effect.runPromise(
   pullLatestProfiles({

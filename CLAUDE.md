@@ -22,12 +22,11 @@ src/
 ├── profile.ts        # DSL: Schema.TaggedClass actions/triggers, Task/Profile/Project classes
 ├── compiler.ts       # DSL → plain JS codegen (no runtime deps in output)
 ├── runtime.ts        # runInTasker for Effect programs that run on-device
-├── sync.ts           # Barrel re-exporting sync/ under the pre-split names (pulls in platform-node)
 ├── sync/
 │   ├── contract.ts   # Platform-free: errors, schemas, FileStore/ZipExtractor capability tags
 │   ├── core.ts       # ProfileSync program against @effect/platform HttpClient (platform-free)
-│   ├── node.ts       # Desktop layers (@effect/platform-node: FileSystem, Path, Command)
-│   └── tasker.ts     # On-device layers (Tasker builtins; device bundles import this, never the barrel)
+│   ├── node.ts       # Desktop layers — entry point `tasker-effect/sync/node` (@effect/platform-node)
+│   └── tasker.ts     # On-device layers — entry point `tasker-effect/sync/tasker` (Tasker builtins)
 └── cli.ts            # `tasker-effect compile` for consumer repos
 tasks/
 ├── automations.ts    # DSL definitions compiled by CI
@@ -53,6 +52,7 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 - `Schema.TaggedError` for every error; handle with `Effect.catchTag`/`catchTags`
 - `Schema.TaggedClass` for DSL actions/triggers; validation happens at construction
 - `Layer` composition to swap Node vs on-device implementations (`SyncNodeLive` vs `SyncTaskerLive`); HTTP goes through `@effect/platform`'s `HttpClient` (`FetchHttpClient.layer` on both platforms). `@effect/platform-node` may only be imported from `src/sync/node.ts` (and tests)
+- **Sync entry points are structural, not tree-shaken**: there is deliberately no barrel mixing node and tasker layers. The package root exports only the platform-free pieces (`sync/contract.ts` + `sync/core.ts`); platform layers live behind the `tasker-effect/sync/node` / `tasker-effect/sync/tasker` subpath exports so a browser/device bundle can never accidentally pull @effect/platform-node's node:* graph (tree-shaking must not be relied on to remove it). Guard tests bundle both the index and sync-profiles for browser and assert no `node:` specifiers
 - `Effect.runPromise` only at edges (scripts, CLI, runtime entry)
 - Tests provide the recording test layer from `makeTaskerTestLayer` — no device needed
 

@@ -121,9 +121,9 @@ export class ZipExtractor extends ZipExtractorTag {
 
 /** Everything ProfileSync needs, desktop edition */
 export const SyncNodeLive: Layer.Layer<ProfileSync> = ProfileSync.Default.pipe(
-  Layer.provide(FetchHttpClient.layer),
-  Layer.provide(FileStoreNodeLive),
-  Layer.provide(ZipExtractorNodeLive)
+  Layer.provide(
+    Layer.mergeAll(FetchHttpClient.layer, FileStoreNodeLive, ZipExtractorNodeLive)
+  )
 );
 
 /**

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Effect, Either, Layer } from "effect";
 import { Action, Task } from "../src/profile.js";
 import { TaskerCompiler } from "../src/compiler.js";
-import { FileStore } from "../src/sync.js";
+import { FileStore } from "../src/sync/node.js";
 import {
   asCompilable,
   collectCompilables,

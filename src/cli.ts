@@ -14,7 +14,7 @@
 import { Console, Effect, Either, Layer, Schema } from "effect";
 import { TaskerCompiler, type CompiledFile } from "./compiler.js";
 import { Profile, Project, Task } from "./profile.js";
-import { FileStore } from "./sync.js";
+import { FileStore } from "./sync/node.js";
 
 // =============================================================================
 // Errors

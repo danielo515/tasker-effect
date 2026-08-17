@@ -12,8 +12,6 @@
 
 import { Effect } from "effect";
 import { Tasker } from "../../src/tasker-api.js";
-// Import from sync/tasker.js directly: the sync.js barrel pulls in
-// @effect/platform-node, which must never reach the device bundle.
 import { ProfileSync, SyncTaskerLive } from "../../src/sync/tasker.js";
 import { runInTasker } from "../../src/runtime.js";
 

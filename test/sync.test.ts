@@ -3,11 +3,11 @@ import { HttpClient, HttpClientResponse } from "@effect/platform";
 import { Effect, Layer } from "effect";
 import {
   FileStore,
-  ProfileSync,
   StorageWriteError,
   ZipExtractor,
   type SyncOptions,
-} from "../src/sync.js";
+} from "../src/sync/contract.js";
+import { ProfileSync } from "../src/sync/core.js";
 
 const release = {
   tag_name: "v1.2.0",
@@ -110,9 +110,7 @@ const makeStubs = (options?: {
   });
 
   const layer = ProfileSync.Default.pipe(
-    Layer.provide(httpLayer),
-    Layer.provide(fileLayer),
-    Layer.provide(zipLayer)
+    Layer.provide(Layer.mergeAll(httpLayer, fileLayer, zipLayer))
   );
 
   return { layer, written, extractedInto };

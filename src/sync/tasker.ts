@@ -86,9 +86,9 @@ export const TaskerZipExtractor: Layer.Layer<ZipExtractor> = Layer.effect(
  * plus Tasker-backed file writes and zip extraction.
  */
 export const SyncTaskerLive: Layer.Layer<ProfileSync> = ProfileSync.Default.pipe(
-  Layer.provide(FetchHttpClient.layer),
-  Layer.provide(TaskerFileStore),
-  Layer.provide(TaskerZipExtractor)
+  Layer.provide(
+    Layer.mergeAll(FetchHttpClient.layer, TaskerFileStore, TaskerZipExtractor)
+  )
 );
 
 /**

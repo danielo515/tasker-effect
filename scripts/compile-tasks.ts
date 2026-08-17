@@ -15,7 +15,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
 import { TaskerCompiler } from "../src/compiler.js";
-import { FileStore } from "../src/sync.js";
+import { FileStore } from "../src/sync/node.js";
 import { automations } from "../tasks/automations.js";
 
 const OUTPUT_DIR = "dist-tasker";
