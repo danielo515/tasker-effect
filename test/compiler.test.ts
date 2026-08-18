@@ -11,9 +11,13 @@ import {
   Project,
   cond,
 } from "../src/profile.js";
+import { Secret, secret } from "../src/profile.js";
 import {
   CompileError,
+  SECRETS_FILENAME,
   TaskerCompiler,
+  collectProjectSecrets,
+  compileSecretsJson,
   compileTaskToJs,
   compileProfileFiles,
   compileProjectFiles,
@@ -22,6 +26,8 @@ import {
   emitAction,
   slugify,
 } from "../src/compiler.js";
+
+const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
 const expectValidJs = (code: string) => {
   // Throws SyntaxError if the emitted code does not parse.
@@ -163,7 +169,7 @@ describe("compileProjectFiles", () => {
       ],
     });
 
-    const files = compileProjectFiles(project);
+    const files = compileProjectFiles(project, { repo: TEST_REPO });
     const names = files.map((f) => f.filename);
     expect(names).toContain("low-battery.enter.js");
     expect(names).toContain("greet.js");
@@ -172,6 +178,111 @@ describe("compileProjectFiles", () => {
     const readme = files.find((f) => f.filename === "README.md");
     expect(readme?.content).toContain("Battery Level from 0% to 20%");
     expect(readme?.content).toContain("low-battery.enter.js");
+  });
+});
+
+describe("secrets", () => {
+  const weatherTask = new Task({
+    name: "Weather",
+    actions: [Action.flash("w")],
+    secrets: [secret("OPENWEATHER_KEY", "OpenWeather API key")],
+  });
+
+  test("secret() normalizes the leading % and validates the name", () => {
+    expect(secret("%API_KEY", "key").name).toBe("API_KEY");
+    expect(() => secret("lowercase", "key")).toThrow();
+  });
+
+  test("collectProjectSecrets merges project, profile and task declarations", () => {
+    const project = new Project({
+      name: "P",
+      secrets: [secret("GH_TOKEN", "GitHub token for private syncs")],
+      profiles: [
+        new Profile({
+          name: "Prof",
+          triggers: [Trigger.time({ hour: 7, minute: 0 })],
+          enter: new Task({
+            name: "Enter",
+            actions: [Action.flash("x")],
+            secrets: [secret("HOME_ASSISTANT_TOKEN", "HA long-lived token")],
+          }),
+        }),
+      ],
+      tasks: [weatherTask],
+    });
+
+    const secrets = collectProjectSecrets(project);
+    expect(secrets.map((s) => s.name)).toEqual([
+      "GH_TOKEN",
+      "HOME_ASSISTANT_TOKEN",
+      "OPENWEATHER_KEY",
+    ]);
+  });
+
+  test("duplicate declarations with the same description deduplicate", () => {
+    const shared = secret("API_KEY", "Shared API key");
+    const project = new Project({
+      name: "P",
+      tasks: [
+        new Task({ name: "A", actions: [Action.flash("a")], secrets: [shared] }),
+        new Task({
+          name: "B",
+          actions: [Action.flash("b")],
+          secrets: [new Secret({ name: "API_KEY", description: "Shared API key" })],
+        }),
+      ],
+    });
+    expect(collectProjectSecrets(project)).toHaveLength(1);
+  });
+
+  test("conflicting descriptions for the same secret fail compilation", () => {
+    const project = new Project({
+      name: "P",
+      tasks: [
+        new Task({
+          name: "A",
+          actions: [Action.flash("a")],
+          secrets: [secret("API_KEY", "one thing")],
+        }),
+        new Task({
+          name: "B",
+          actions: [Action.flash("b")],
+          secrets: [secret("API_KEY", "another thing")],
+        }),
+      ],
+    });
+    expect(() => collectProjectSecrets(project)).toThrow(CompileError);
+  });
+
+  test("compileProjectFiles emits secrets.json with name and description", () => {
+    const project = new Project({ name: "P", tasks: [weatherTask] });
+    const files = compileProjectFiles(project, { repo: TEST_REPO });
+    const manifest = files.find((f) => f.filename === SECRETS_FILENAME);
+    expect(manifest?.kind).toBe("secrets-json");
+    expect(JSON.parse(manifest!.content)).toEqual([
+      { name: "OPENWEATHER_KEY", description: "OpenWeather API key" },
+    ]);
+  });
+
+  test("secrets.json is emitted even when no secrets are declared", () => {
+    const project = new Project({
+      name: "Empty",
+      tasks: [new Task({ name: "T", actions: [Action.flash("x")] })],
+    });
+    const files = compileProjectFiles(project, { repo: TEST_REPO });
+    const manifest = files.find((f) => f.filename === SECRETS_FILENAME);
+    expect(JSON.parse(manifest!.content)).toEqual([]);
+  });
+
+  test("compileSecretsJson output is stable and sorted by name", () => {
+    const project = new Project({
+      name: "P",
+      secrets: [secret("ZEBRA", "z"), secret("ALPHA", "a")],
+    });
+    expect(JSON.parse(compileSecretsJson(project)).map((s: Secret) => s.name)).toEqual([
+      "ALPHA",
+      "ZEBRA",
+    ]);
   });
 });
 
@@ -230,7 +341,7 @@ describe("task references", () => {
 
     let error: unknown;
     try {
-      compileProjectFiles(project);
+      compileProjectFiles(project, { repo: TEST_REPO });
     } catch (caught) {
       error = caught;
     }
@@ -254,7 +365,7 @@ describe("task references", () => {
     });
     const program = Effect.gen(function* () {
       const compiler = yield* TaskerCompiler;
-      return yield* compiler.compileProject(project);
+      return yield* compiler.compileProject(project, { repo: TEST_REPO });
     });
     const error = await Effect.runPromise(
       program.pipe(Effect.flip, Effect.provide(TaskerCompiler.Default))
@@ -282,7 +393,7 @@ describe("task references", () => {
       ],
       tasks: [weather],
     });
-    expect(() => compileProjectFiles(project)).not.toThrow();
+    expect(() => compileProjectFiles(project, { repo: TEST_REPO })).not.toThrow();
   });
 });
 

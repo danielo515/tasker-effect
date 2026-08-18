@@ -35,6 +35,10 @@ export {
   TaskerCallError,
   TaskerNotAvailableError,
   type TaskerApiError,
+  MissingSecretError,
+  // Secrets runtime helper
+  type SecretRef,
+  requireSecret,
   // Raw surface
   type TaskerRawApi,
   TASKER_FUNCTION_NAMES,
@@ -63,6 +67,9 @@ export {
   Condition,
   isGlobalVariable,
   variableName,
+  // Secrets
+  Secret,
+  secret,
   // Action classes
   Flash,
   Popup,
@@ -132,6 +139,8 @@ export {
 export {
   CompileError,
   type CompiledFile,
+  type RepoRef,
+  type CompileProjectOptions,
   slugify,
   conditionExpr,
   emitAction,
@@ -140,11 +149,17 @@ export {
   compileProfileFiles,
   compileProjectFiles,
   compileDispatcherJs,
-  taskerImportXml,
+  collectProjectSecrets,
+  compileSecretsJson,
+  taskerProjectXml,
   DEFAULT_DEVICE_JS_DIR,
   DISPATCHER_FILENAME,
-  TASKER_IMPORT_XML_FILENAME,
+  SECRETS_FILENAME,
+  TASKER_PROJECT_XML_FILENAME,
   DISPATCH_TASK_NAME,
+  SYNC_TASK_NAME,
+  CONFIG_TASK_NAME,
+  SYNC_PROFILE_NAME,
   TaskerCompiler,
 } from "./compiler.js";
 
@@ -173,6 +188,7 @@ export {
   type FileStoreShape,
   type ZipExtractorShape,
   DEFAULT_TARGET_DIR,
+  DEFAULT_ASSET_SUFFIXES,
   FileStore,
   ZipExtractor,
   type SyncOptions,

@@ -14,6 +14,7 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
+import { detectRepoFromGit } from "../src/cli.js";
 import { TaskerCompiler } from "../src/compiler.js";
 import { FileStore } from "../src/sync/node.js";
 import { automations } from "../tasks/automations.js";
@@ -25,7 +26,8 @@ const compileDslProject = Effect.gen(function* () {
   const compiler = yield* TaskerCompiler;
   const files = yield* FileStore;
 
-  const outputs = yield* compiler.compileProject(automations);
+  const repo = yield* detectRepoFromGit();
+  const outputs = yield* compiler.compileProject(automations, { repo });
   for (const file of outputs) {
     yield* files.writeText(join(OUTPUT_DIR, file.filename), file.content);
     yield* Effect.log("Compiled", { file: file.filename, kind: file.kind });

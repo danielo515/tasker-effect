@@ -12,7 +12,7 @@
  */
 
 import { Console, Effect, Either, Layer, Schema } from "effect";
-import { TaskerCompiler, type CompiledFile } from "./compiler.js";
+import { TaskerCompiler, type CompiledFile, type RepoRef } from "./compiler.js";
 import { Profile, Project, Task } from "./profile.js";
 import { FileStore } from "./sync/node.js";
 
@@ -55,6 +55,67 @@ export class NoCompilableExportsError extends Schema.TaggedError<NoCompilableExp
   }
 ) {}
 
+/** The GitHub repository could not be determined for a Project compile */
+export class RepoDetectionError extends Schema.TaggedError<RepoDetectionError>()(
+  "RepoDetectionError",
+  {
+    message: Schema.String,
+  }
+) {}
+
+// =============================================================================
+// GitHub repo detection
+// =============================================================================
+
+/**
+ * Parse a GitHub remote URL into its owner/repo pair. Understands the
+ * `git@github.com:owner/repo.git`, `ssh://git@github.com/owner/repo.git` and
+ * `https://github.com/owner/repo(.git)` forms; anything else (including
+ * non-GitHub hosts) yields undefined.
+ */
+export const parseGitHubRepo = (url: string): RepoRef | undefined => {
+  const match =
+    /^(?:git@github\.com:|(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?github\.com\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(
+      url.trim()
+    );
+  if (match === null) return undefined;
+  return { owner: match[1]!, repo: match[2]! };
+};
+
+/**
+ * Detect the consumer repo from `git remote get-url origin` in the current
+ * working directory. Used when compiling a Project without `--repo`.
+ */
+export const detectRepoFromGit = Effect.fn("cli.detectRepoFromGit")(
+  function* () {
+    const remoteUrl = yield* Effect.tryPromise({
+      try: async () => {
+        const { execFile } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const { stdout } = await promisify(execFile)("git", [
+          "remote",
+          "get-url",
+          "origin",
+        ]);
+        return stdout.trim();
+      },
+      catch: (cause) =>
+        new RepoDetectionError({
+          message: `Could not run \`git remote get-url origin\`: ${String(cause)}`,
+        }),
+    });
+    const repo = parseGitHubRepo(remoteUrl);
+    if (repo === undefined) {
+      return yield* Effect.fail(
+        new RepoDetectionError({
+          message: `The origin remote "${remoteUrl}" is not a GitHub repository URL`,
+        })
+      );
+    }
+    return repo;
+  }
+);
+
 // =============================================================================
 // Argument parsing
 // =============================================================================
@@ -69,18 +130,22 @@ export type CliInvocation =
       readonly _tag: "Compile";
       readonly entry: string | undefined;
       readonly outDir: string;
+      readonly repo: RepoRef | undefined;
     };
 
 export const HELP_TEXT = `tasker-effect — compile Tasker DSL definitions to Tasker-executable JavaScript
 
 Usage:
-  tasker-effect compile [entry] [--out <dir>]
+  tasker-effect compile [entry] [--out <dir>] [--repo <owner>/<name>]
 
 Arguments:
   entry          Module whose exports (default and named) are scanned for
                  Project, Profile and Task instances.
                  Default: ${DEFAULT_ENTRIES[0]} (then ${DEFAULT_ENTRIES[1]})
   --out <dir>    Output directory. Default: ${DEFAULT_OUT_DIR}
+  --repo <o>/<n> GitHub repository embedded in the generated project XML's
+                 sync bootstrap. Default: detected from
+                 \`git remote get-url origin\`. Only needed for Projects.
   -h, --help     Show this help.
 
 Runtimes:
@@ -108,6 +173,7 @@ export const parseCliArgs = (
 
   let entry: string | undefined;
   let outDir = DEFAULT_OUT_DIR;
+  let repo: RepoRef | undefined;
   const rest = argv.slice(1);
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
@@ -125,6 +191,23 @@ export const parseCliArgs = (
       i++;
       continue;
     }
+    if (arg === "--repo") {
+      const value = rest[i + 1];
+      const match =
+        value === undefined
+          ? null
+          : /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(value);
+      if (match === null) {
+        return Either.left(
+          new CliUsageError({
+            message: "--repo requires a GitHub repository as <owner>/<name>",
+          })
+        );
+      }
+      repo = { owner: match[1]!, repo: match[2]! };
+      i++;
+      continue;
+    }
     if (arg.startsWith("-")) {
       return Either.left(new CliUsageError({ message: `Unknown option: ${arg}` }));
     }
@@ -137,7 +220,7 @@ export const parseCliArgs = (
     }
     entry = arg;
   }
-  return Either.right({ _tag: "Compile", entry, outDir });
+  return Either.right({ _tag: "Compile", entry, outDir, repo });
 };
 
 // =============================================================================
@@ -257,6 +340,7 @@ export interface CompileRunResult {
 export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
   readonly entry?: string | undefined;
   readonly outDir: string;
+  readonly repo?: RepoRef | undefined;
 }) {
   const compiler = yield* TaskerCompiler;
   const store = yield* FileStore;
@@ -275,12 +359,23 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
     );
   }
 
+  // Only Project compiles need the repo (for the sync bootstrap in the
+  // project XML); detect it lazily so Profile/Task-only entries never
+  // require git or --repo.
+  let repo = options.repo;
+  const resolveRepo = Effect.gen(function* () {
+    if (repo === undefined) {
+      repo = yield* detectRepoFromGit();
+    }
+    return repo;
+  });
+
   const written: Array<WrittenFile> = [];
   const seen = new Map<string, string>();
   for (const { exportName, value } of compilables) {
     const files =
       value instanceof Project
-        ? yield* compiler.compileProject(value)
+        ? yield* compiler.compileProject(value, { repo: yield* resolveRepo })
         : value instanceof Profile
           ? yield* compiler.compileProfile(value)
           : [yield* compiler.compileTask(value)];
@@ -309,6 +404,7 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
 const runCompile = Effect.fn("cli.runCompile")(function* (options: {
   readonly entry?: string | undefined;
   readonly outDir: string;
+  readonly repo?: RepoRef | undefined;
 }) {
   const result = yield* compileEntry(options);
   yield* Console.log(
@@ -339,7 +435,11 @@ export const runCli = (argv: ReadonlyArray<string>): Promise<number> => {
       yield* Console.log(HELP_TEXT);
       return 0;
     }
-    yield* runCompile({ entry: invocation.entry, outDir: invocation.outDir });
+    yield* runCompile({
+      entry: invocation.entry,
+      outDir: invocation.outDir,
+      repo: invocation.repo,
+    });
     return 0;
   }).pipe(
     Effect.catchTags({
@@ -351,6 +451,11 @@ export const runCli = (argv: ReadonlyArray<string>): Promise<number> => {
         Console.error(error.message).pipe(Effect.as(1)),
       NoCompilableExportsError: (error) =>
         Console.error(error.message).pipe(Effect.as(1)),
+      RepoDetectionError: (error) =>
+        Console.error(
+          `${error.message}\n` +
+            "Pass --repo <owner>/<name> to set the GitHub repository explicitly."
+        ).pipe(Effect.as(1)),
       CompileError: (error) =>
         Console.error(
           `Compilation failed: ${error.message}` +

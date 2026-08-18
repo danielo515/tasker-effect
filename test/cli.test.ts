@@ -11,6 +11,7 @@ import {
   collectCompilables,
   compileEntry,
   parseCliArgs,
+  parseGitHubRepo,
 } from "../src/cli.js";
 import * as fixture from "./fixtures/cli-entry.js";
 
@@ -41,13 +42,30 @@ describe("parseCliArgs", () => {
       _tag: "Compile",
       entry: undefined,
       outDir: "dist-tasker",
+      repo: undefined,
     });
   });
 
   test("compile with entry and --out", () => {
     expect(
       Either.getOrThrow(parseCliArgs(["compile", "my/entry.ts", "--out", "build"]))
-    ).toEqual({ _tag: "Compile", entry: "my/entry.ts", outDir: "build" });
+    ).toEqual({
+      _tag: "Compile",
+      entry: "my/entry.ts",
+      outDir: "build",
+      repo: undefined,
+    });
+  });
+
+  test("--repo overrides repo detection", () => {
+    expect(
+      Either.getOrThrow(parseCliArgs(["compile", "--repo", "acme/automations"]))
+    ).toEqual({
+      _tag: "Compile",
+      entry: undefined,
+      outDir: "dist-tasker",
+      repo: { owner: "acme", repo: "automations" },
+    });
   });
 
   test("rejects unknown commands and options", () => {
@@ -55,6 +73,42 @@ describe("parseCliArgs", () => {
     expect(Either.isLeft(parseCliArgs(["compile", "--wat"]))).toBe(true);
     expect(Either.isLeft(parseCliArgs(["compile", "--out"]))).toBe(true);
     expect(Either.isLeft(parseCliArgs(["compile", "a.ts", "b.ts"]))).toBe(true);
+    expect(Either.isLeft(parseCliArgs(["compile", "--repo"]))).toBe(true);
+    expect(Either.isLeft(parseCliArgs(["compile", "--repo", "not-a-slug"]))).toBe(
+      true
+    );
+    expect(
+      Either.isLeft(parseCliArgs(["compile", "--repo", "too/many/parts"]))
+    ).toBe(true);
+  });
+});
+
+describe("parseGitHubRepo", () => {
+  test.each([
+    ["git@github.com:acme/automations.git"],
+    ["git@github.com:acme/automations"],
+    ["https://github.com/acme/automations.git"],
+    ["https://github.com/acme/automations"],
+    ["https://github.com/acme/automations/"],
+    ["http://github.com/acme/automations"],
+    ["ssh://git@github.com/acme/automations.git"],
+    ["  https://github.com/acme/automations.git\n"],
+  ])("normalizes %s", (url) => {
+    expect(parseGitHubRepo(url)).toEqual({ owner: "acme", repo: "automations" });
+  });
+
+  test("keeps dots and dashes in names", () => {
+    expect(parseGitHubRepo("git@github.com:my-org/my.repo-2.git")).toEqual({
+      owner: "my-org",
+      repo: "my.repo-2",
+    });
+  });
+
+  test("rejects non-GitHub and malformed URLs", () => {
+    expect(parseGitHubRepo("git@gitlab.com:acme/automations.git")).toBeUndefined();
+    expect(parseGitHubRepo("https://example.com/acme/automations")).toBeUndefined();
+    expect(parseGitHubRepo("acme/automations")).toBeUndefined();
+    expect(parseGitHubRepo("")).toBeUndefined();
   });
 });
 
@@ -87,7 +141,13 @@ describe("compileEntry", () => {
 
   test("compiles every export of the fixture into the output dir", async () => {
     const outDir = makeTempDir();
-    const result = await run(compileEntry({ entry: FIXTURE_ENTRY, outDir }));
+    const result = await run(
+      compileEntry({
+        entry: FIXTURE_ENTRY,
+        outDir,
+        repo: { owner: "acme", repo: "automations" },
+      })
+    );
 
     expect(result.exports.sort()).toEqual(["default", "greet", "nightMode"]);
     const filenames = result.files.map((file) => file.filename).sort();
@@ -98,7 +158,8 @@ describe("compileEntry", () => {
       "night-mode.enter.js",
       "night-mode.exit.js",
       "project-task.js",
-      "tasker-effect.tsk.xml",
+      "secrets.json",
+      "tasker-effect.prj.xml",
     ]);
     for (const file of result.files) {
       expect(existsSync(join(outDir, file.filename))).toBe(true);
@@ -106,6 +167,10 @@ describe("compileEntry", () => {
     const greet = readFileSync(join(outDir, "greet.js"), "utf-8");
     expect(greet).toContain('flash("Hi");');
     expect(greet).toContain('"use strict";');
+    const projectXml = readFileSync(join(outDir, "tasker-effect.prj.xml"), "utf-8");
+    expect(projectXml).toContain(
+      "https://github.com/acme/automations/releases/download/"
+    );
   });
 
   test("fails with EntryNotFoundError for a missing entry", async () => {
@@ -154,11 +219,13 @@ describe("CLI end-to-end (spawned)", () => {
       FIXTURE_ENTRY,
       "--out",
       outDir,
+      "--repo",
+      "acme/automations",
     ]);
     expect(stderr).toBe("");
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Compiled 3 export(s)");
-    expect(stdout).toContain("7 file(s) written");
+    expect(stdout).toContain("8 file(s) written");
     expect(existsSync(join(outDir, "greet.js"))).toBe(true);
     expect(existsSync(join(outDir, "night-mode.enter.js"))).toBe(true);
     expect(existsSync(join(outDir, "README.md"))).toBe(true);

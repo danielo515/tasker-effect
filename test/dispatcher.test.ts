@@ -1,13 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { Action, Trigger, Task, Profile, Project } from "../src/profile.js";
+import { Action, Trigger, Task, Profile, Project, secret } from "../src/profile.js";
 import {
+  CONFIG_TASK_NAME,
   DISPATCHER_FILENAME,
   DISPATCH_TASK_NAME,
-  TASKER_IMPORT_XML_FILENAME,
+  ROLLING_RELEASE_TAG,
+  SECRETS_FILENAME,
+  SYNC_PROFILE_NAME,
+  SYNC_SCRIPT_FILENAME,
+  SYNC_TASK_NAME,
+  TASKER_PROJECT_XML_FILENAME,
   compileDispatcherJs,
   compileProjectFiles,
-  taskerImportXml,
+  configScanJs,
+  syncBootstrapJs,
+  taskerProjectXml,
 } from "../src/compiler.js";
+
+const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
 const expectValidJs = (code: string) => {
   expect(() => new Function(code)).not.toThrow();
@@ -85,69 +95,147 @@ describe("compileDispatcherJs", () => {
   });
 });
 
-describe("taskerImportXml", () => {
-  test("contains the file-based JavaScript action (code 131) with Auto Exit on", () => {
-    const xml = taskerImportXml();
+describe("taskerProjectXml", () => {
+  const xml = taskerProjectXml({ repo: TEST_REPO });
+  const expectValidSnippetJs = (code: string) => {
+    expect(() => new Function(code)).not.toThrow();
+  };
+
+  test("is a project export: Project element listing the profile and the three tasks", () => {
+    expect(xml).toContain('<TaskerData sr="" dvi="1"');
+    expect(xml).toContain('<Project sr="proj0" ve="2">');
+    expect(xml).toContain("<pids>4</pids>");
+    expect(xml).toContain("<tids>1,2,3</tids>");
+    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(3);
+    expect(xml.match(/<Profile sr="prof\d+" ve="2">/g)).toHaveLength(1);
+    for (const name of [DISPATCH_TASK_NAME, SYNC_TASK_NAME, CONFIG_TASK_NAME]) {
+      expect(xml).toContain(`<nme>${name}</nme>`);
+    }
+  });
+
+  test("TE Dispatch runs the dispatcher file (code 131, Auto Exit on)", () => {
     expect(xml).toContain("<code>131</code>");
     expect(xml).toContain(
       '<Str sr="arg0" ve="3">/sdcard/Tasker/js/dispatcher.js</Str>'
     );
     expect(xml).toContain('<Int sr="arg2" val="1"/>');
-    expect(xml).toContain(`<nme>${DISPATCH_TASK_NAME}</nme>`);
-    expect(xml).toContain('<TaskerData sr="" dvi="1"');
+  });
+
+  test("the TE Sync profile repeats every 6 hours and runs the TE Sync task", () => {
+    expect(xml).toContain(`<nme>${SYNC_PROFILE_NAME}</nme>`);
+    expect(xml).toContain("<mid0>2</mid0>");
+    expect(xml).toContain("<rep>1</rep>");
+    expect(xml).toContain("<repval>6</repval>");
+  });
+
+  test("the TE Sync bootstrap self-installs sync-profiles.js from the rolling release", () => {
+    const bootstrap = syncBootstrapJs(TEST_REPO);
+    expect(bootstrap).toContain(
+      `https://github.com/acme/automations/releases/download/${ROLLING_RELEASE_TAG}/${SYNC_SCRIPT_FILENAME}`
+    );
+    expect(bootstrap).toContain("readFile(path)");
+    expect(bootstrap).toContain("writeFile(path, source, false);");
+    expect(bootstrap).toContain("eval(source);");
+    expect(bootstrap).toContain(`performTask("${CONFIG_TASK_NAME}", 5);`);
+    // Token support: Authorization header from the %TE_GH_TOKEN global.
+    expect(bootstrap).toContain('global("TE_GH_TOKEN")');
+    expect(bootstrap).toContain('"Bearer " + token');
+    expectValidSnippetJs(bootstrap);
+    // And the snippet is embedded (XML-escaped) in the project XML.
+    expect(xml).toContain("releases/download/tasker-js-latest/sync-profiles.js");
+  });
+
+  test("TE Config scans secrets.json and prompts via For + Input Dialog", () => {
+    const scan = configScanJs();
+    expect(scan).toContain(SECRETS_FILENAME);
+    expect(scan).toContain('setLocal("te_missing", missing.join(","));');
+    expectValidSnippetJs(scan);
+
+    expect(xml).toContain("<code>37</code>"); // If %te_missing Set
+    expect(xml).toContain("<lhs>%te_missing</lhs>");
+    expect(xml).toContain("<op>12</op>");
+    expect(xml).toContain("<code>39</code>"); // For %te_secret in %te_missing
+    expect(xml).toContain('<Str sr="arg0" ve="3">%te_secret</Str>');
+    expect(xml).toContain("<code>360</code>"); // Input Dialog
+    expect(xml).toContain(
+      "setGlobal(local(&quot;te_secret&quot;), local(&quot;input&quot;));"
+    );
+    expect(xml).toContain("<code>40</code>"); // End For
+    expect(xml).toContain("<code>38</code>"); // End If
   });
 
   test("supports a custom dispatcher path, XML-escaped", () => {
-    const xml = taskerImportXml({ dispatcherPath: "/a/b & c/dispatcher.js" });
-    expect(xml).toContain('<Str sr="arg0" ve="3">/a/b &amp; c/dispatcher.js</Str>');
+    const custom = taskerProjectXml({
+      repo: TEST_REPO,
+      dispatcherPath: "/a/b & c/dispatcher.js",
+    });
+    expect(custom).toContain(
+      '<Str sr="arg0" ve="3">/a/b &amp; c/dispatcher.js</Str>'
+    );
   });
 
-  test("is static scaffolding: identical across projects and free of compiled content", () => {
+  test("is static scaffolding: identical across projects and free of user content", () => {
     const projectA = makeProject();
     const projectB = new Project({
       name: "Totally Different",
       tasks: [
-        new Task({ name: "Unique Marker Task", actions: [Action.flash("zz")] }),
+        new Task({
+          name: "Unique Marker Task",
+          actions: [Action.flash("zz")],
+          secrets: [secret("UNIQUE_MARKER_KEY", "marker secret")],
+        }),
       ],
     });
 
-    const xmlA = compileProjectFiles(projectA).find(
-      (file) => file.filename === TASKER_IMPORT_XML_FILENAME
+    const xmlA = compileProjectFiles(projectA, { repo: TEST_REPO }).find(
+      (file) => file.filename === TASKER_PROJECT_XML_FILENAME
     );
-    const xmlB = compileProjectFiles(projectB).find(
-      (file) => file.filename === TASKER_IMPORT_XML_FILENAME
+    const xmlB = compileProjectFiles(projectB, { repo: TEST_REPO }).find(
+      (file) => file.filename === TASKER_PROJECT_XML_FILENAME
     );
 
     expect(xmlA).toBeDefined();
     expect(xmlA!.content).toBe(xmlB!.content);
     expect(xmlA!.kind).toBe("tasker-xml");
-    // No per-task content: no names, no compiled JS, only the dispatcher pointer.
+    // No per-task content: user task/profile names, compiled JS and secret
+    // names must never leak into the XML — only the static scaffolding plus
+    // the dispatcher pointer and repo slug.
     for (const marker of [
       "Morning Routine",
       "Weather Check",
       "Unique Marker Task",
-      "flash(",
-      "JavaScriptlet",
-      "<code>129</code>",
+      "UNIQUE_MARKER_KEY",
+      "morning-routine.enter.js",
+      "weather-check.js",
+      'flash("up")',
     ]) {
       expect(xmlA!.content).not.toContain(marker);
     }
+    // Exactly the sanctioned scaffolding names appear as tasks.
+    const taskNames = [...xmlA!.content.matchAll(/<nme>([^<]*)<\/nme>/g)].map(
+      (match) => match[1]
+    );
+    expect(taskNames.sort()).toEqual(
+      [DISPATCH_TASK_NAME, SYNC_TASK_NAME, CONFIG_TASK_NAME, SYNC_PROFILE_NAME].sort()
+    );
   });
 });
 
 describe("compileProjectFiles with dispatcher", () => {
-  test("includes dispatcher.js and the import XML, and documents them in the README", () => {
-    const files = compileProjectFiles(makeProject());
+  test("includes dispatcher.js, secrets.json and the project XML, and documents them in the README", () => {
+    const files = compileProjectFiles(makeProject(), { repo: TEST_REPO });
     const names = files.map((file) => file.filename);
     expect(names).toContain(DISPATCHER_FILENAME);
-    expect(names).toContain(TASKER_IMPORT_XML_FILENAME);
+    expect(names).toContain(SECRETS_FILENAME);
+    expect(names).toContain(TASKER_PROJECT_XML_FILENAME);
 
     const dispatcher = files.find((file) => file.filename === DISPATCHER_FILENAME);
     expect(dispatcher?.kind).toBe("dispatcher-js");
 
     const readme = files.find((file) => file.filename === "README.md");
     expect(readme?.content).toContain(DISPATCH_TASK_NAME);
-    expect(readme?.content).toContain(TASKER_IMPORT_XML_FILENAME);
+    expect(readme?.content).toContain(TASKER_PROJECT_XML_FILENAME);
+    expect(readme?.content).toContain("Import Project");
     expect(readme?.content).toContain("%caller1");
   });
 });

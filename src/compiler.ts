@@ -16,6 +16,7 @@ import {
   Condition,
   Profile,
   Project,
+  Secret,
   Task,
   isGlobalVariable,
   variableName,
@@ -38,7 +39,23 @@ export class CompileError extends Schema.TaggedError<CompileError>()(
 export interface CompiledFile {
   readonly filename: string;
   readonly content: string;
-  readonly kind: "task-js" | "dispatcher-js" | "tasker-xml" | "doc";
+  readonly kind: "task-js" | "dispatcher-js" | "tasker-xml" | "secrets-json" | "doc";
+}
+
+/** A GitHub repository, used to embed release URLs in the bootstrap XML */
+export interface RepoRef {
+  readonly owner: string;
+  readonly repo: string;
+}
+
+/** Options for project compilation */
+export interface CompileProjectOptions {
+  /**
+   * The GitHub repository whose rolling release the on-device bootstrap
+   * downloads from. Detected from `git remote get-url origin` by the CLI, or
+   * passed explicitly with `--repo owner/name`.
+   */
+  readonly repo: RepoRef;
 }
 
 // =============================================================================
@@ -347,11 +364,20 @@ export const DEFAULT_DEVICE_JS_DIR = "/sdcard/Tasker/js/";
 /** Filename of the generated dispatcher */
 export const DISPATCHER_FILENAME = "dispatcher.js";
 
-/** Filename of the importable Tasker task XML */
-export const TASKER_IMPORT_XML_FILENAME = "tasker-effect.tsk.xml";
+/** Filename of the importable Tasker project XML */
+export const TASKER_PROJECT_XML_FILENAME = "tasker-effect.prj.xml";
 
-/** Name of the shared Tasker task created by the import XML */
+/** Name of the shared dispatch task created by the import XML */
 export const DISPATCH_TASK_NAME = "TE Dispatch";
+
+/** Name of the self-bootstrapping sync task created by the import XML */
+export const SYNC_TASK_NAME = "TE Sync";
+
+/** Name of the secrets-prompting task created by the import XML */
+export const CONFIG_TASK_NAME = "TE Config";
+
+/** Name of the periodic sync profile created by the import XML */
+export const SYNC_PROFILE_NAME = "TE Sync";
 
 /**
  * Compile the dispatcher: a single JS file that resolves which compiled file
@@ -458,48 +484,318 @@ const escapeXml = (value: string): string =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
 
+// --- Static XML scaffolding ---------------------------------------------------
+//
+// XML structure verified against real Tasker exports and the Taskomater
+// Tasker-XML-Info action code list. `.prj.xml` layout: <TaskerData> holds
+// <Profile>, <Project> and <Task> elements as siblings; <Project> lists its
+// member profile/task ids in comma-separated <pids>/<tids>. Action codes
+// used here: 131 JavaScript (file), 129 JavaScriptlet (inline), 37 If /
+// 38 End If (condition op 12 = "Is Set"), 39 For / 40 End For (items split
+// on commas), 360 Input Dialog (result lands in %input). A Time context
+// repeating every N hours is <rep>1</rep><repval>N</repval> with -1
+// from/to fields.
+
+/** Rolling GitHub release tag that CI keeps pointed at the newest build */
+export const ROLLING_RELEASE_TAG = "tasker-js-latest";
+
+/** Filename of the bundled on-device sync script */
+export const SYNC_SCRIPT_FILENAME = "sync-profiles.js";
+
+/** How often the TE Sync profile fires, in hours */
+export const SYNC_REPEAT_HOURS = 6;
+
 /**
- * Importable Tasker task XML containing the shared "TE Dispatch" task, whose
- * only action is a file-based JavaScript action (Tasker action code 131,
- * verified against real .tsk.xml exports and the Taskomater Tasker-XML-Info
- * action code list; the JavaScriptlet action is 129) pointing at the
- * dispatcher. Argument layout of action 131: arg0 = script path (Str),
- * arg1 = libraries (Str), arg2 = Auto Exit (Int, on), arg3 = timeout in
- * seconds (Int).
- *
- * This XML is static scaffolding for a one-time import: it never embeds
- * compiled logic, only the pointer to the dispatcher file.
+ * Shared preamble for the inline JavaScriptlets: resolve the device JS
+ * directory (same convention as the dispatcher: %TE_JS_DIR overrides the
+ * default).
  */
-export const taskerImportXml = (options?: {
+const jsDirPreamble = (jsDir: string): Array<string> => [
+  'var dir = global("TE_JS_DIR");',
+  `if (dir === undefined || dir === "") dir = ${js(jsDir)};`,
+  'if (dir.charAt(dir.length - 1) !== "/") dir = dir + "/";',
+];
+
+/**
+ * Bootstrap snippet inside the `TE Sync` task: run the synced
+ * sync-profiles.js if present, otherwise self-install it from the rolling
+ * GitHub release with a synchronous XHR first. Always queues `TE Config`
+ * so newly declared secrets get prompted for after every sync.
+ *
+ * A GitHub token in the Tasker global %TE_GH_TOKEN is sent as an
+ * Authorization header when set (not needed for public repos).
+ */
+export const syncBootstrapJs = (
+  repo: RepoRef,
+  jsDir: string = DEFAULT_DEVICE_JS_DIR
+): string => {
+  const url = `https://github.com/${repo.owner}/${repo.repo}/releases/download/${ROLLING_RELEASE_TAG}/${SYNC_SCRIPT_FILENAME}`;
+  return [
+    ...jsDirPreamble(jsDir),
+    `var path = dir + ${js(SYNC_SCRIPT_FILENAME)};`,
+    "var source = readFile(path);",
+    'if (source === undefined || source === "") {',
+    "  var xhr = new XMLHttpRequest();",
+    `  xhr.open("GET", ${js(url)}, false);`,
+    '  var token = global("TE_GH_TOKEN");',
+    '  if (token !== undefined && token !== "") xhr.setRequestHeader("Authorization", "Bearer " + token);',
+    "  xhr.send(null);",
+    '  if (xhr.status !== 200 || xhr.responseText === "") {',
+    `    flash("tasker-effect bootstrap: downloading ${SYNC_SCRIPT_FILENAME} failed (HTTP " + xhr.status + ")");`,
+    "    exit();",
+    "  }",
+    "  source = xhr.responseText;",
+    "  writeFile(path, source, false);",
+    "}",
+    // Queued before the eval: the sync script completes asynchronously (and
+    // calls exit() itself), so there is no "after sync" statement to hook.
+    // TE Config tolerates the race by waiting for secrets.json on first run.
+    `performTask(${js(CONFIG_TASK_NAME)}, 5);`,
+    "eval(source);",
+  ].join("\n");
+};
+
+/**
+ * First action of `TE Config`: read secrets.json (waiting up to 30s for the
+ * first sync to deliver it), collect the declared secrets whose Tasker
+ * global is unset or empty, and expose them to the following Tasker actions
+ * as the comma-separated local %te_missing (left unset when nothing is
+ * missing, so the If guard skips the prompt loop).
+ */
+export const configScanJs = (jsDir: string = DEFAULT_DEVICE_JS_DIR): string =>
+  [
+    ...jsDirPreamble(jsDir),
+    "var tries = 0;",
+    "function scan() {",
+    `  var raw = readFile(dir + ${js(SECRETS_FILENAME)});`,
+    '  if ((raw === undefined || raw === "") && tries < 15) {',
+    "    tries = tries + 1;",
+    "    setTimeout(scan, 2000);",
+    "    return;",
+    "  }",
+    "  var missing = [];",
+    "  try {",
+    "    var declared = JSON.parse(raw);",
+    "    for (var i = 0; i < declared.length; i++) {",
+    "      var value = global(declared[i].name);",
+    '      if (value === undefined || value === "") missing.push(declared[i].name);',
+    "    }",
+    "  } catch (err) {}",
+    '  if (missing.length > 0) setLocal("te_missing", missing.join(","));',
+    "  exit();",
+    "}",
+    "scan();",
+  ].join("\n");
+
+/**
+ * Loop body of `TE Config`: resolve the human-readable prompt label for the
+ * current secret (%te_secret) from secrets.json into %te_prompt.
+ */
+const configLabelJs = (jsDir: string): string =>
+  [
+    ...jsDirPreamble(jsDir),
+    'var label = local("te_secret");',
+    "try {",
+    `  var declared = JSON.parse(readFile(dir + ${js(SECRETS_FILENAME)}));`,
+    "  for (var i = 0; i < declared.length; i++) {",
+    "    if (declared[i].name === label && declared[i].description) {",
+    "      label = declared[i].description;",
+    "      break;",
+    "    }",
+    "  }",
+    "} catch (err) {}",
+    'setLocal("te_prompt", label);',
+  ].join("\n");
+
+/**
+ * Loop tail of `TE Config`: store the Input Dialog answer (%input) into the
+ * Tasker global named by the current secret. A JavaScriptlet because Tasker's
+ * Variable Set cannot target a dynamically named global.
+ */
+const configStoreJs = 'setGlobal(local("te_secret"), local("input"));';
+
+// --- XML emission helpers ---
+
+const strArg = (index: number, value: string): string =>
+  value === ""
+    ? `\t\t\t<Str sr="arg${index}" ve="3"/>`
+    : `\t\t\t<Str sr="arg${index}" ve="3">${escapeXml(value)}</Str>`;
+
+const intArg = (index: number, value: number): string =>
+  `\t\t\t<Int sr="arg${index}" val="${value}"/>`;
+
+const xmlAction = (
+  index: number,
+  code: number,
+  body: ReadonlyArray<string>
+): Array<string> => [
+  `\t\t<Action sr="act${index}" ve="7">`,
+  `\t\t\t<code>${code}</code>`,
+  ...body,
+  "\t\t</Action>",
+];
+
+/** Inline JavaScriptlet action (code 129) */
+const scriptletAction = (
+  index: number,
+  code: string,
+  options: { readonly autoExit: boolean; readonly timeoutSecs: number }
+): Array<string> =>
+  xmlAction(index, 129, [
+    strArg(0, code),
+    strArg(1, ""),
+    intArg(2, options.autoExit ? 1 : 0),
+    intArg(3, options.timeoutSecs),
+  ]);
+
+const xmlTask = (
+  id: number,
+  name: string,
+  actions: ReadonlyArray<string>
+): Array<string> => [
+  `\t<Task sr="task${id}">`,
+  "\t\t<cdate>1</cdate>",
+  `\t\t<id>${id}</id>`,
+  `\t\t<nme>${escapeXml(name)}</nme>`,
+  ...actions,
+  "\t</Task>",
+];
+
+const DISPATCH_TASK_ID = 1;
+const SYNC_TASK_ID = 2;
+const CONFIG_TASK_ID = 3;
+const SYNC_PROFILE_ID = 4;
+
+/** Options for the generated project XML */
+export interface TaskerProjectXmlOptions {
+  /** Repository whose rolling release the bootstrap downloads from */
+  readonly repo: RepoRef;
+  /** Path of the dispatcher file on the device */
   readonly dispatcherPath?: string;
-}): string => {
-  const path =
-    options?.dispatcherPath ?? `${DEFAULT_DEVICE_JS_DIR}${DISPATCHER_FILENAME}`;
+  /** Device directory holding the synced JS files */
+  readonly jsDir?: string;
+}
+
+/**
+ * Importable Tasker **project** XML (`.prj.xml`) holding the complete static
+ * scaffolding, so onboarding is: import once, enable, done.
+ *
+ * - Task `TE Dispatch`: file-based JavaScript action (131) running the
+ *   dispatcher.
+ * - Task `TE Sync`: inline JavaScriptlet (129) that runs the synced
+ *   sync-profiles.js, self-installing it from the rolling GitHub release on
+ *   first run, then queues `TE Config`.
+ * - Task `TE Config`: prompts (Input Dialog, 360) for every secret declared
+ *   in secrets.json whose Tasker global is still unset.
+ * - Profile `TE Sync`: Time context repeating every 6 hours, enter task
+ *   `TE Sync`.
+ *
+ * The XML is static scaffolding for a one-time import: it never embeds
+ * compiled logic, task names or secret names from the user's project — only
+ * the pointer to the dispatcher and the embedded repository slug.
+ */
+export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
+  const jsDir = options.jsDir ?? DEFAULT_DEVICE_JS_DIR;
+  const dispatcherPath =
+    options.dispatcherPath ?? `${jsDir}${DISPATCHER_FILENAME}`;
+
+  const isSetCondition = (variable: string): Array<string> => [
+    '\t\t\t<ConditionList sr="if">',
+    '\t\t\t\t<Condition sr="c0" ve="3">',
+    `\t\t\t\t\t<lhs>${escapeXml(variable)}</lhs>`,
+    "\t\t\t\t\t<op>12</op>",
+    "\t\t\t\t\t<rhs></rhs>",
+    "\t\t\t\t</Condition>",
+    "\t\t\t</ConditionList>",
+  ];
+
   return [
     '<TaskerData sr="" dvi="1" tv="6.3.13">',
-    '\t<Task sr="task1">',
+    // Profile: periodic sync trigger → TE Sync task.
+    `\t<Profile sr="prof${SYNC_PROFILE_ID}" ve="2">`,
     "\t\t<cdate>1</cdate>",
-    "\t\t<id>1</id>",
-    `\t\t<nme>${escapeXml(DISPATCH_TASK_NAME)}</nme>`,
-    '\t\t<Action sr="act0" ve="7">',
-    "\t\t\t<code>131</code>",
-    `\t\t\t<Str sr="arg0" ve="3">${escapeXml(path)}</Str>`,
-    '\t\t\t<Str sr="arg1" ve="3"/>',
-    '\t\t\t<Int sr="arg2" val="1"/>',
-    '\t\t\t<Int sr="arg3" val="45"/>',
-    "\t\t</Action>",
-    "\t</Task>",
+    `\t\t<id>${SYNC_PROFILE_ID}</id>`,
+    `\t\t<mid0>${SYNC_TASK_ID}</mid0>`,
+    `\t\t<nme>${escapeXml(SYNC_PROFILE_NAME)}</nme>`,
+    '\t\t<Time sr="con0">',
+    "\t\t\t<fh>-1</fh>",
+    "\t\t\t<fm>-1</fm>",
+    `\t\t\t<rep>1</rep>`,
+    `\t\t\t<repval>${SYNC_REPEAT_HOURS}</repval>`,
+    "\t\t\t<th>-1</th>",
+    "\t\t\t<tm>-1</tm>",
+    "\t\t</Time>",
+    "\t</Profile>",
+    // Project element tying the pieces together.
+    '\t<Project sr="proj0" ve="2">',
+    "\t\t<cdate>1</cdate>",
+    "\t\t<name>Tasker Effect</name>",
+    `\t\t<pids>${SYNC_PROFILE_ID}</pids>`,
+    `\t\t<tids>${DISPATCH_TASK_ID},${SYNC_TASK_ID},${CONFIG_TASK_ID}</tids>`,
+    "\t</Project>",
+    // TE Dispatch: run the dispatcher file (Auto Exit on).
+    ...xmlTask(DISPATCH_TASK_ID, DISPATCH_TASK_NAME, [
+      ...xmlAction(0, 131, [
+        strArg(0, dispatcherPath),
+        strArg(1, ""),
+        intArg(2, 1),
+        intArg(3, 45),
+      ]),
+    ]),
+    // TE Sync: self-bootstrapping sync (Auto Exit off — the evaluated sync
+    // script finishes asynchronously and calls exit() itself).
+    ...xmlTask(SYNC_TASK_ID, SYNC_TASK_NAME, [
+      ...scriptletAction(0, syncBootstrapJs(options.repo, jsDir), {
+        autoExit: false,
+        timeoutSecs: 180,
+      }),
+    ]),
+    // TE Config: prompt for declared-but-unset secrets.
+    ...xmlTask(CONFIG_TASK_ID, CONFIG_TASK_NAME, [
+      ...scriptletAction(0, configScanJs(jsDir), {
+        autoExit: false,
+        timeoutSecs: 120,
+      }),
+      ...xmlAction(1, 37, isSetCondition("%te_missing")),
+      ...xmlAction(2, 39, [
+        strArg(0, "%te_secret"),
+        strArg(1, "%te_missing"),
+        intArg(2, 0),
+      ]),
+      ...scriptletAction(3, configLabelJs(jsDir), {
+        autoExit: true,
+        timeoutSecs: 45,
+      }),
+      ...xmlAction(4, 360, [
+        strArg(1, "%te_secret"),
+        strArg(2, "%te_prompt"),
+        strArg(3, ""),
+        intArg(4, 999),
+        strArg(5, "229457"),
+        intArg(6, 0),
+        intArg(7, 0),
+      ]),
+      ...scriptletAction(5, configStoreJs, {
+        autoExit: true,
+        timeoutSecs: 45,
+      }),
+      ...xmlAction(6, 40, []),
+      ...xmlAction(7, 38, []),
+    ]),
     "</TaskerData>",
     "",
   ].join("\n");
 };
 
 const dispatcherReadmeSection = (project: Project): Array<string> => [
-  "## One-time setup with the dispatcher",
+  "## One-time setup",
   "",
-  `1. Import \`${TASKER_IMPORT_XML_FILENAME}\` once in Tasker (long-press the`,
-  `   Tasks tab → Import Task). This creates the shared task \`${DISPATCH_TASK_NAME}\`,`,
-  `   whose only action runs \`${DEFAULT_DEVICE_JS_DIR}${DISPATCHER_FILENAME}\`.`,
+  `1. Import \`${TASKER_PROJECT_XML_FILENAME}\` once in Tasker (long-press the home`,
+  "   icon at the bottom left → Import Project). This creates the shared task",
+  `   \`${DISPATCH_TASK_NAME}\`, the self-bootstrapping \`${SYNC_TASK_NAME}\` task with its periodic`,
+  `   profile, and the \`${CONFIG_TASK_NAME}\` secrets prompter. Enable the \`${SYNC_PROFILE_NAME}\``,
+  "   profile (or run the task once) and it downloads everything else by",
+  "   itself — no files need to be copied manually.",
   "2. For each profile below, configure its trigger(s) in the Tasker UI and",
   `   set both the enter and the exit task to \`${DISPATCH_TASK_NAME}\`. The dispatcher`,
   "   detects the calling profile from `%caller1` (`profile=enter:<name>` /",
@@ -517,6 +813,66 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
   "task).",
   "",
 ];
+
+// =============================================================================
+// Secrets manifest
+// =============================================================================
+
+/** Filename of the aggregated secrets manifest */
+export const SECRETS_FILENAME = "secrets.json";
+
+/**
+ * Aggregate every secret declared on the project, its tasks and its
+ * profiles' enter/exit tasks, deduplicated by name. Two declarations of the
+ * same name with different descriptions are a conflict and fail compilation.
+ */
+export const collectProjectSecrets = (project: Project): Array<Secret> => {
+  const byName = new Map<string, Secret>();
+  const add = (owner: string, secret: Secret): void => {
+    const existing = byName.get(secret.name);
+    if (existing === undefined) {
+      byName.set(secret.name, secret);
+      return;
+    }
+    if (existing.description !== secret.description) {
+      throw new CompileError({
+        message:
+          `Secret "${secret.name}" is declared twice with different descriptions: ` +
+          `"${existing.description}" vs "${secret.description}" (${owner})`,
+        source: project.name,
+      });
+    }
+  };
+  for (const secret of project.secrets) add(`project "${project.name}"`, secret);
+  for (const profile of project.profiles) {
+    for (const secret of profile.enter.secrets) {
+      add(`profile "${profile.name}" enter task`, secret);
+    }
+    for (const secret of profile.exit?.secrets ?? []) {
+      add(`profile "${profile.name}" exit task`, secret);
+    }
+  }
+  for (const task of project.tasks) {
+    for (const secret of task.secrets) add(`task "${task.name}"`, secret);
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+};
+
+/**
+ * The secrets manifest shipped with the release assets and synced to the
+ * device. `TE Config` reads it after every sync and prompts only for entries
+ * whose Tasker global is still unset. Always emitted (even when empty) so
+ * the on-device state can converge after secrets are removed.
+ */
+export const compileSecretsJson = (project: Project): string =>
+  `${JSON.stringify(
+    collectProjectSecrets(project).map(({ name, description }) => ({
+      name,
+      description,
+    })),
+    null,
+    2
+  )}\n`;
 
 // =============================================================================
 // Linker check (Project-level)
@@ -569,7 +925,10 @@ const checkTaskReferences = (project: Project): void => {
 };
 
 /** Compile a whole project to JS files plus a setup README */
-export const compileProjectFiles = (project: Project): Array<CompiledFile> => {
+export const compileProjectFiles = (
+  project: Project,
+  options: CompileProjectOptions
+): Array<CompiledFile> => {
   checkTaskReferences(project);
   const files: Array<CompiledFile> = [];
   for (const profile of project.profiles) {
@@ -588,8 +947,13 @@ export const compileProjectFiles = (project: Project): Array<CompiledFile> => {
     kind: "dispatcher-js",
   });
   files.push({
-    filename: TASKER_IMPORT_XML_FILENAME,
-    content: taskerImportXml(),
+    filename: SECRETS_FILENAME,
+    content: compileSecretsJson(project),
+    kind: "secrets-json",
+  });
+  files.push({
+    filename: TASKER_PROJECT_XML_FILENAME,
+    content: taskerProjectXml({ repo: options.repo }),
     kind: "tasker-xml",
   });
 
@@ -660,9 +1024,10 @@ export class TaskerCompiler extends Effect.Service<TaskerCompiler>()(
       ): Effect.Effect<Array<CompiledFile>, CompileError> =>
         tryCompile(() => compileProfileFiles(profile), profile.name),
       compileProject: (
-        project: Project
+        project: Project,
+        options: CompileProjectOptions
       ): Effect.Effect<Array<CompiledFile>, CompileError> =>
-        tryCompile(() => compileProjectFiles(project), project.name),
+        tryCompile(() => compileProjectFiles(project, options), project.name),
     }),
   }
 ) {}
