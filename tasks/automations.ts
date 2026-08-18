@@ -13,6 +13,10 @@ import {
   Project,
   cond,
 } from "../src/index.js";
+import { quietProfiles } from "./popular/quiet.js";
+import { drivingProfiles } from "./popular/driving.js";
+import { mediaProfiles } from "./popular/media.js";
+import { powerProfiles } from "./popular/power.js";
 
 /** Standalone task: fetch weather and warn conditionally */
 const weatherCheck = new Task({
@@ -118,6 +122,14 @@ const homeWifi = new Profile({
 export const automations = new Project({
   name: "tasker-effect automations",
   description: "Example automations managed as TypeScript",
-  profiles: [morningRoutine, lowBattery, homeWifi],
+  profiles: [
+    morningRoutine,
+    lowBattery,
+    homeWifi,
+    ...quietProfiles,
+    ...drivingProfiles,
+    ...mediaProfiles,
+    ...powerProfiles,
+  ],
   tasks: [weatherCheck],
 });
