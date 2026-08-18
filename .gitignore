@@ -35,3 +35,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # compiled tasker JS
 dist-tasker
+
+# Claude Code personal overrides
+.claude/settings.local.json
