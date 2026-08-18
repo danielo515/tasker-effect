@@ -5,8 +5,9 @@ TypeScript with [Effect](https://effect.website/), and compile them to plain
 JavaScript that Tasker executes directly.
 
 **The approach:** Tasker can run JavaScript natively via its JavaScript /
-JavaScriptlet actions. So there is no XML to generate — you write TypeScript,
-CI compiles it to JS, and your device pulls the latest build and runs it.
+JavaScriptlet actions, so compiled logic ships as plain JS files rather than
+Tasker's XML task format — you write TypeScript, CI compiles it to JS, and
+your device pulls the latest build and runs it.
 
 ```mermaid
 flowchart LR
