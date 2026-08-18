@@ -8,14 +8,25 @@ JavaScript that Tasker executes directly.
 JavaScriptlet actions. So there is no XML to generate — you write TypeScript,
 CI compiles it to JS, and your device pulls the latest build and runs it.
 
-```
-TypeScript (DSL or Effect programs)
-        │  bun run compile
-        ▼
-dist-tasker/*.js  ──►  GitHub CI artifact + rolling release
-        │
-        ▼  sync-profiles.js (runs on-device)
-/sdcard/Tasker/js/*.js  ──►  Tasker JavaScript actions
+```mermaid
+flowchart LR
+    subgraph repo ["Your repo"]
+        TS["TypeScript<br/>(DSL + Effect programs)"]
+    end
+    subgraph ci ["GitHub CI"]
+        JS["dist-tasker/*.js"]
+        REL["rolling release<br/>tasker-js-latest"]
+    end
+    subgraph device ["Android device"]
+        SYNC["sync-profiles.js<br/>(runs inside Tasker)"]
+        DISK["/sdcard/Tasker/js/*.js"]
+        ACT["Tasker JavaScript actions"]
+    end
+    TS -- "bun run compile" --> JS
+    JS -- "upload assets" --> REL
+    REL -- "download newest" --> SYNC
+    SYNC -- "writeFile" --> DISK
+    DISK -- "read on every trigger" --> ACT
 ```
 
 ## Modules
@@ -152,6 +163,19 @@ How the dispatcher picks the file:
    tasks is `profile=enter:<name>` or `profile=exit:<name>` — so a new
    profile only needs its trigger plus `TE Dispatch` as both its enter and
    its exit task. No per-task file paths, no per-task UI work.
+
+```mermaid
+flowchart TD
+    START["TE Dispatch fires<br/>(runs dispatcher.js)"] --> PAR{"%par1 set?"}
+    PAR -- "yes (Perform Task, widget, …)" --> EXPL["target = %par1<br/>%par2 = exit selects the exit file"]
+    PAR -- no --> CALLER{"%caller1 is<br/>profile=enter:name or<br/>profile=exit:name?"}
+    CALLER -- yes --> PROF["target = that profile's<br/>enter / exit file"]
+    CALLER -- no --> ERR["flash() error"]
+    EXPL --> MAP{"name in the<br/>name→file map?"}
+    PROF --> MAP
+    MAP -- yes --> RUN["eval(readFile('/sdcard/Tasker/js/&lt;file&gt;'))"]
+    MAP -- "no / unreadable" --> ERR
+```
 
 Unknown names or unreadable files `flash()` a clear error. The JS directory
 defaults to `/sdcard/Tasker/js/` and can be overridden with the Tasker
