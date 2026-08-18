@@ -84,6 +84,28 @@ export const isGlobalVariable = (name: string): boolean => {
 export const variableName = percentLess;
 
 // =============================================================================
+// Secrets
+// =============================================================================
+
+/**
+ * A secret a task or script needs at runtime, stored as a Tasker **global**
+ * variable of the same name. Declaring secrets on tasks/projects lets the
+ * compiler aggregate them into `secrets.json`, which the static `TE Config`
+ * task reads on-device to prompt for any values that are still unset.
+ *
+ * The name must be an ALL-CAPS Tasker global name (letters, digits,
+ * underscores); the description is the human-readable prompt label.
+ */
+export class Secret extends Schema.Class<Secret>("Secret")({
+  name: Schema.NonEmptyString.pipe(Schema.pattern(/^[A-Z][A-Z0-9_]*$/)),
+  description: Schema.NonEmptyString,
+}) {}
+
+/** Declare a secret (Tasker global) with its human-readable prompt label */
+export const secret = (name: string, description: string): Secret =>
+  new Secret({ name: variableName(name), description });
+
+// =============================================================================
 // Actions
 // =============================================================================
 
@@ -609,6 +631,8 @@ export class Task extends Schema.Class<Task>("Task")({
   name: Schema.NonEmptyString,
   actions: Schema.NonEmptyArray(ActionSchema),
   description: Schema.optional(Schema.String),
+  /** Secrets (Tasker globals) this task reads at runtime */
+  secrets: Schema.optionalWith(Schema.Array(Secret), { default: () => [] }),
 }) {}
 
 /**
@@ -631,6 +655,12 @@ export class Project extends Schema.Class<Project>("Project")({
   profiles: Schema.optionalWith(Schema.Array(Profile), { default: () => [] }),
   tasks: Schema.optionalWith(Schema.Array(Task), { default: () => [] }),
   description: Schema.optional(Schema.String),
+  /**
+   * Project-level secrets, e.g. for bundled Effect scripts that are not DSL
+   * tasks. Merged with every task's secrets into `secrets.json` at compile
+   * time.
+   */
+  secrets: Schema.optionalWith(Schema.Array(Secret), { default: () => [] }),
 }) {}
 
 /** Decode an unknown value into a Task */
