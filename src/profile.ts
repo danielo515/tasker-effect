@@ -388,6 +388,59 @@ export class GetLocation extends Schema.TaggedClass<GetLocation>()(
   }
 ) {}
 
+/** Enable/disable Android car mode */
+export class SetCarMode extends Schema.TaggedClass<SetCarMode>()("SetCarMode", {
+  on: Schema.Boolean,
+}) {}
+
+/** Enable/disable Android night mode */
+export class SetNightMode extends Schema.TaggedClass<SetNightMode>()(
+  "SetNightMode",
+  {
+    on: Schema.Boolean,
+  }
+) {}
+
+/** Keep the display on while powered from the given source */
+export class SetStayOn extends Schema.TaggedClass<SetStayOn>()("SetStayOn", {
+  mode: Schema.Literal("never", "ac", "usb", "any"),
+}) {}
+
+/** Enable/disable display auto-rotation */
+export class SetAutoRotate extends Schema.TaggedClass<SetAutoRotate>()(
+  "SetAutoRotate",
+  {
+    on: Schema.Boolean,
+  }
+) {}
+
+/** Enable/disable automatic brightness */
+export class SetAutoBrightness extends Schema.TaggedClass<SetAutoBrightness>()(
+  "SetAutoBrightness",
+  {
+    on: Schema.Boolean,
+  }
+) {}
+
+/** Set the display auto-off timeout */
+export class SetDisplayTimeout extends Schema.TaggedClass<SetDisplayTimeout>()(
+  "SetDisplayTimeout",
+  {
+    hours: Schema.optionalWith(
+      Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+      { default: () => 0 }
+    ),
+    minutes: Schema.optionalWith(
+      Schema.Number.pipe(Schema.int(), Schema.between(0, 59)),
+      { default: () => 0 }
+    ),
+    seconds: Schema.optionalWith(
+      Schema.Number.pipe(Schema.int(), Schema.between(0, 59)),
+      { default: () => 0 }
+    ),
+  }
+) {}
+
 /** Raw JavaScript escape hatch, inserted verbatim into the compiled output */
 export class JavaScript extends Schema.TaggedClass<JavaScript>()("JavaScript", {
   code: Schema.NonEmptyString,
@@ -442,6 +495,12 @@ export type Action =
   | SetSilentMode
   | GoHome
   | GetLocation
+  | SetCarMode
+  | SetNightMode
+  | SetStayOn
+  | SetAutoRotate
+  | SetAutoBrightness
+  | SetDisplayTimeout
   | JavaScript
   | If;
 
@@ -482,6 +541,12 @@ const actionMembers = [
   SetSilentMode,
   GoHome,
   GetLocation,
+  SetCarMode,
+  SetNightMode,
+  SetStayOn,
+  SetAutoRotate,
+  SetAutoBrightness,
+  SetDisplayTimeout,
   JavaScript,
   If,
 ] as const;
@@ -549,6 +614,47 @@ export class BatteryLevelTrigger extends Schema.TaggedClass<BatteryLevelTrigger>
   }
 ) {}
 
+/** Active while a wired or Bluetooth headset is plugged in */
+export class HeadsetPluggedTrigger extends Schema.TaggedClass<HeadsetPluggedTrigger>()(
+  "HeadsetPluggedTrigger",
+  {
+    kind: Schema.optionalWith(Schema.Literal("any", "mic", "no-mic"), {
+      default: () => "any" as const,
+    }),
+  }
+) {}
+
+/** Active while the device is on external power */
+export class PowerTrigger extends Schema.TaggedClass<PowerTrigger>()(
+  "PowerTrigger",
+  {
+    source: Schema.optionalWith(
+      Schema.Literal("any", "ac", "usb", "wireless"),
+      { default: () => "any" as const }
+    ),
+  }
+) {}
+
+/** Active during a calendar entry, optionally filtered by calendar/title */
+export class CalendarEntryTrigger extends Schema.TaggedClass<CalendarEntryTrigger>()(
+  "CalendarEntryTrigger",
+  {
+    calendar: Schema.optional(Schema.String),
+    title: Schema.optional(Schema.String),
+  }
+) {}
+
+/** Fires when a text message arrives, optionally filtered by sender */
+export class ReceivedTextTrigger extends Schema.TaggedClass<ReceivedTextTrigger>()(
+  "ReceivedTextTrigger",
+  {
+    kind: Schema.optionalWith(Schema.Literal("any", "sms", "mms"), {
+      default: () => "any" as const,
+    }),
+    sender: Schema.optional(Schema.String),
+  }
+) {}
+
 /** Active while a Tasker variable satisfies a condition */
 export class VariableTrigger extends Schema.TaggedClass<VariableTrigger>()(
   "VariableTrigger",
@@ -583,6 +689,10 @@ export type Trigger =
   | BluetoothConnectedTrigger
   | AppOpenedTrigger
   | BatteryLevelTrigger
+  | HeadsetPluggedTrigger
+  | PowerTrigger
+  | CalendarEntryTrigger
+  | ReceivedTextTrigger
   | VariableTrigger
   | EventTrigger
   | StateTrigger;
@@ -595,6 +705,10 @@ export const TriggerSchema = Schema.Union(
   BluetoothConnectedTrigger,
   AppOpenedTrigger,
   BatteryLevelTrigger,
+  HeadsetPluggedTrigger,
+  PowerTrigger,
+  CalendarEntryTrigger,
+  ReceivedTextTrigger,
   VariableTrigger,
   EventTrigger,
   StateTrigger
@@ -843,6 +957,21 @@ export const Action = {
       keepTracking: options?.keepTracking ?? false,
       timeoutSecs: options?.timeoutSecs ?? 100,
     }),
+  setCarMode: (on: boolean) => new SetCarMode({ on }),
+  setNightMode: (on: boolean) => new SetNightMode({ on }),
+  stayOn: (mode: SetStayOn["mode"]) => new SetStayOn({ mode }),
+  setAutoRotate: (on: boolean) => new SetAutoRotate({ on }),
+  setAutoBrightness: (on: boolean) => new SetAutoBrightness({ on }),
+  displayTimeout: (timeout: {
+    readonly hours?: number;
+    readonly minutes?: number;
+    readonly seconds?: number;
+  }) =>
+    new SetDisplayTimeout({
+      hours: timeout.hours ?? 0,
+      minutes: timeout.minutes ?? 0,
+      seconds: timeout.seconds ?? 0,
+    }),
   js: (code: string) => new JavaScript({ code }),
   when: (
     condition: Condition,
@@ -887,6 +1016,26 @@ export const Trigger = {
   bluetoothConnected: (name = "*") => new BluetoothConnectedTrigger({ name }),
   appOpened: (app: string) => new AppOpenedTrigger({ app }),
   batteryLevel: (from: number, to: number) => new BatteryLevelTrigger({ from, to }),
+  headsetPlugged: (kind: HeadsetPluggedTrigger["kind"] = "any") =>
+    new HeadsetPluggedTrigger({ kind }),
+  power: (source: PowerTrigger["source"] = "any") =>
+    new PowerTrigger({ source }),
+  calendarEntry: (options?: {
+    readonly calendar?: string;
+    readonly title?: string;
+  }) =>
+    new CalendarEntryTrigger({
+      ...(options?.calendar !== undefined ? { calendar: options.calendar } : {}),
+      ...(options?.title !== undefined ? { title: options.title } : {}),
+    }),
+  receivedText: (options?: {
+    readonly kind?: ReceivedTextTrigger["kind"];
+    readonly sender?: string;
+  }) =>
+    new ReceivedTextTrigger({
+      kind: options?.kind ?? "any",
+      ...(options?.sender !== undefined ? { sender: options.sender } : {}),
+    }),
   variable: (condition: Condition) => new VariableTrigger({ condition }),
   event: (event: string, parameter?: string) =>
     new EventTrigger({

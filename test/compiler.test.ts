@@ -108,6 +108,28 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
+  test("display and mode actions map to their Tasker functions", () => {
+    const task = new Task({
+      name: "Context Setup",
+      actions: [
+        Action.setCarMode(true),
+        Action.setNightMode(false),
+        Action.stayOn("any"),
+        Action.setAutoRotate(true),
+        Action.setAutoBrightness(false),
+        Action.displayTimeout({ minutes: 30, seconds: 15 }),
+      ],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain("carMode(true);");
+    expect(jsSource).toContain("nightMode(false);");
+    expect(jsSource).toContain('stayOn("any");');
+    expect(jsSource).toContain("displayAutoRotate(true);");
+    expect(jsSource).toContain("displayAutoBright(false);");
+    expect(jsSource).toContain("displayTimeout(0, 30, 15);");
+    expectValidJs(jsSource);
+  });
+
   test("raw JavaScript is inserted verbatim", () => {
     const task = new Task({
       name: "Custom",
@@ -323,6 +345,12 @@ describe("Match coverage", () => {
     Action.silentMode("on"),
     Action.goHome(),
     Action.getLocation("gps"),
+    Action.setCarMode(true),
+    Action.setNightMode(true),
+    Action.stayOn("ac"),
+    Action.setAutoRotate(true),
+    Action.setAutoBrightness(false),
+    Action.displayTimeout({ minutes: 10 }),
     Action.js("flash('x')"),
     Action.when(cond("%A", "isSet"), [Action.flash("y")]),
   ];
@@ -341,6 +369,10 @@ describe("Match coverage", () => {
     Trigger.bluetoothConnected(),
     Trigger.appOpened("app"),
     Trigger.batteryLevel(0, 20),
+    Trigger.headsetPlugged("mic"),
+    Trigger.power("wireless"),
+    Trigger.calendarEntry({ title: "Meeting" }),
+    Trigger.receivedText({ kind: "sms" }),
     Trigger.variable(cond("%A", "eq", "1")),
     Trigger.event("Display On"),
     Trigger.state("Power"),
@@ -380,6 +412,21 @@ describe("helpers", () => {
   test("slugify produces safe file names", () => {
     expect(slugify("Morning Routine!")).toBe("morning-routine");
     expect(slugify("  ")).toBe("task");
+  });
+
+  test("describeTrigger formats the popular-profile triggers", () => {
+    expect(describeTrigger(Trigger.headsetPlugged())).toBe(
+      "State > Hardware > Headset Plugged (Type: Any)"
+    );
+    expect(describeTrigger(Trigger.power("ac"))).toBe(
+      "State > Power > Power (Source: ac)"
+    );
+    expect(
+      describeTrigger(Trigger.calendarEntry({ calendar: "Work", title: "1:1" }))
+    ).toBe("State > App > Calendar Entry (Calendar: Work, Title: 1:1)");
+    expect(describeTrigger(Trigger.receivedText({ sender: "Boss" }))).toBe(
+      "Event > Phone > Received Text (Type: Any, Sender: Boss)"
+    );
   });
 
   test("describeTrigger formats times", () => {
