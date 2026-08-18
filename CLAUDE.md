@@ -44,7 +44,8 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 
 - CI (`.github/workflows/ci.yml`): typecheck + test → `bun run compile` → uploads `dist-tasker/` as the `tasker-js` artifact → refreshes the rolling release `tasker-js-latest`.
 - On-device, `sync-profiles.js` (a bundled script from `tasks/scripts/`) downloads the newest release assets to `/sdcard/Tasker/js/` via Tasker's own `writeFile`. Tasker reads JS files from disk on every action run, so overwriting a file updates behavior on the next trigger — including sync-profiles.js itself.
-- Tasker profiles/triggers cannot be created from JS, but the dispatcher minimizes the manual work: `compileProjectFiles` emits `dispatcher.js` (name→file map; resolves via `%par1`/`%par2` or `%caller1` = `profile=enter|exit:<name>`, then `eval(readFile(...))`) plus `tasker-effect.tsk.xml`, an import-once XML holding the shared `TE Dispatch` task. New profiles then only need their trigger + `TE Dispatch` as enter/exit task. The XML is downloaded manually once (sync pulls `.js` only); the compiler README describes the triggers to configure.
+- Tasker profiles/triggers cannot be created from JS, but the dispatcher minimizes the manual work: `compileProjectFiles` emits `dispatcher.js` (name→file map; resolves via `%par1`/`%par2` or `%caller1` = `profile=enter|exit:<name>`, then `eval(readFile(...))`) plus `tasker-effect.prj.xml`, an import-once **project** XML holding all static scaffolding: `TE Dispatch`, the self-bootstrapping `TE Sync` task (runs the synced `sync-profiles.js`, downloading it from the rolling release via sync XHR on first run — no manual file copies), the `TE Config` secrets prompter, and a `TE Sync` profile (Time trigger every 6h). Onboarding = import the XML once, enable, done. New profiles then only need their trigger + `TE Dispatch` as enter/exit task. The XML is downloaded manually once (sync pulls `.js`/`.json` only); the compiler README describes the triggers to configure. The embedded repo slug comes from `git remote get-url origin` or the CLI's `--repo owner/name`.
+- **Secrets**: tasks/projects declare `Secret`s (`secret("NAME", "prompt label")` in `profile.ts`); the compiler aggregates them into `secrets.json` (a release asset synced to the device). `TE Config` runs after every sync and prompts (Input Dialog → Tasker global) only for declared secrets that are unset. Effect programs read them with `requireSecret` (`tasker-api.ts`), failing with `MissingSecretError` when unset.
 
 ## Effect Patterns
 
@@ -68,7 +69,7 @@ bun run compile      # Compile tasks/ to dist-tasker/ (Tasker-ready JS)
 
 ## What NOT to do
 
-- ❌ No XML for *compiled logic* — tasks/profiles compile to JS only, never to `.tsk.xml`/`.prf.xml`. The one sanctioned exception is static import-once scaffolding: the generated `tasker-effect.tsk.xml` contains only the shared `TE Dispatch` task pointing at `dispatcher.js` (JavaScript action, code 131) and must never embed per-task content — there is a test enforcing this
+- ❌ No XML for *compiled logic* — tasks/profiles compile to JS only, never to per-task `.tsk.xml`/`.prf.xml`. The one sanctioned exception is static import-once scaffolding: the generated `tasker-effect.prj.xml` contains exactly the tasks `TE Dispatch` (JavaScript action, code 131 → `dispatcher.js`), `TE Sync` (bootstrap JavaScriptlet), `TE Config` (secrets prompter) and the `TE Sync` profile — never per-task content: user task/profile names, compiled JS and secret names must not appear in the XML (secret names live in `secrets.json`). There is a test enforcing this
 - ❌ No bundling in the CLI — consumers bring their own bundler
 - ❌ No Node APIs in code that runs on-device (`compiler.ts` output, `tasks/scripts/`)
 - ❌ Don't upgrade to Effect 4 beta unless explicitly requested
