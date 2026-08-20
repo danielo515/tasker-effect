@@ -37,6 +37,7 @@ flowchart LR
 | `profile` | Schema-validated DSL: tasks are sequences of tagged actions, profiles add trigger metadata |
 | `compiler` | Compiles DSL definitions to standalone JS using only Tasker globals (no runtime deps), plus a dispatcher, a `secrets.json` manifest and an import-once project XML |
 | `runtime` | `runInTasker` for Effect programs bundled to a single file |
+| `config` | Tasker-backed `ConfigProvider`: scripts read secrets/config via `Config`, with lazy on-device prompting |
 | `sync/core` + `sync/contract` | Platform-free sync program (`ProfileSync`) and its error/capability contract — exported from the package root |
 | `sync/node` | Desktop layers (`tasker-effect/sync/node` entry point; @effect/platform-node) |
 | `sync/tasker` | On-device layers (`tasker-effect/sync/tasker` entry point; Tasker builtins) |
@@ -156,8 +157,9 @@ Compiling a `Project` also emits extra files:
 - **`dispatcher.js`** — generated from your project: it embeds a map of
   profile/task names to compiled files and runs the right one with
   `eval(readFile(...))`.
-- **`secrets.json`** — the aggregated secret declarations (name +
-  description) that `TE Config` prompts for on-device.
+- **`secrets.json`** — every secret used inline in your tasks (name +
+  description), aggregated by the compiler; `TE Config` prompts for the
+  unset ones on-device.
 
 How the dispatcher picks the file:
 
@@ -196,32 +198,63 @@ The repo embedded in the XML's sync bootstrap is detected from
 `git remote get-url origin`; override it with
 `bunx tasker-effect compile --repo owner/name`.
 
-### Secrets
+### Secrets and interpolation
 
-Tasks and projects can declare the secrets they need; declarations compile
-into `secrets.json`, and after every sync the imported `TE Config` task
-prompts on-device — only for declared secrets whose Tasker global is still
-unset (it stays invisible when nothing is missing). Answers are stored in
-Tasker **global** variables named after the secret.
+Declare a secret once, then use it **inline** anywhere a string value or a
+variable name goes — the compiler detects every use site by walking the
+action tree and aggregates them into `secrets.json`. After every sync the
+imported `TE Config` task prompts on-device — only for used secrets whose
+Tasker global is still unset (it stays invisible when nothing is missing).
+Answers are stored in Tasker **global** variables named after the secret.
 
 ```typescript
-import { Effect } from "effect";
-import { Task, secret, requireSecret, Tasker } from "tasker-effect";
+import { Task, secret, fmt, v, cond, Action } from "tasker-effect";
 
 const OPENWEATHER_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
 
 const weather = new Task({
   name: "Weather Check",
-  actions: [/* … */],
-  secrets: [OPENWEATHER_KEY],   // also: Project({ secrets: [...] })
+  actions: [
+    Action.http("GET", fmt`https://api.example.com/weather?key=${OPENWEATHER_KEY}`, {
+      outputGlobal: "%WEATHER_JSON",
+    }),
+    // Bare secrets work as whole values and in variable positions too:
+    Action.when(cond(OPENWEATHER_KEY, "isSet"), [
+      Action.flash(fmt`Temp: ${v("TEMPERATURE")} °C`),
+    ]),
+  ],
+});
+```
+
+The `fmt` template exists because Tasker performs **no** `%var` replacement
+inside JavaScript — `"key=%OPENWEATHER_KEY"` in a plain string stays
+literal on-device. `fmt` compiles references to
+`"key=" + global("OPENWEATHER_KEY")`, and `v()` does the same for ordinary
+Tasker variables (ALL-CAPS → `global`, lowercase → `local`). It also works
+inside `Action.js`, where references are spliced in as expressions.
+
+**Effect scripts** read secrets (and any other config) with the idiomatic
+`Config` API, backed by a Tasker `ConfigProvider`. Config paths map to
+globals (`_`-joined, uppercased). On a missing key the provider performs
+`TE Config` in a one-off mode that shows an Input Dialog, waits for the
+answer (which is cached in the global), and fails with a regular
+`ConfigError` if unanswered — so `Config.withDefault`/`Config.option`
+compose as usual.
+
+```typescript
+import { Config, Effect } from "effect";
+import { runInTasker, secret, taskerConfigLayer } from "tasker-effect";
+
+const OPENWEATHER_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+
+const program = Effect.gen(function* () {
+  const key = yield* Config.string("OPENWEATHER_KEY"); // prompts on first use
+  // ...
 });
 
-// In an Effect script: read it, with a typed failure when unset.
-const program = Effect.gen(function* () {
-  const key = yield* requireSecret(OPENWEATHER_KEY); // MissingSecretError if unset
-  const tasker = yield* Tasker;
-  yield* tasker.flash(`key ends with ${key.slice(-4)}`);
-});
+void runInTasker(
+  program.pipe(Effect.provide(taskerConfigLayer({ secrets: [OPENWEATHER_KEY] })))
+);
 ```
 
 ### Effect programs on-device
@@ -272,8 +305,8 @@ artifact and refreshes a rolling GitHub release (`tasker-js-latest`).
    `sync-profiles.js` from the rolling release with a synchronous XHR,
    writes it to `/sdcard/Tasker/js/`, and runs it — which then pulls every
    other compiled file. No files need to be copied to the device by hand.
-   After each sync, **TE Config** prompts for any declared secrets that are
-   still unset.
+   After each sync, **TE Config** prompts for any secrets your tasks use
+   that are still unset.
 3. For each of your profiles, configure its trigger in the Tasker UI (the
    generated `README.md` asset lists them) and set `TE Dispatch` as the
    enter and exit task. Standalone tasks run via Perform Task →
