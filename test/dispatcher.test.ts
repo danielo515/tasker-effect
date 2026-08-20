@@ -153,6 +153,19 @@ describe("taskerProjectXml", () => {
     expect(xml).toContain("releases/download/tasker-js-latest/sync-profiles.js");
   });
 
+  test("TE Config has a one-off mode driven by %par1/%par2", () => {
+    const scan = configScanJs();
+    // One-off mode: prompt for exactly the named global, label from %par2.
+    expect(scan).toContain('var par1 = local("par1");');
+    expect(scan).toContain('setLocal("te_missing", par1);');
+    expect(scan).toContain('if (par2 !== undefined && par2 !== "") setLocal("te_label", par2);');
+    expectValidSnippetJs(scan);
+    // The label lookup prefers the one-off %te_label over secrets.json.
+    expect(xml).toContain("local(&quot;te_label&quot;)");
+    // Still exactly the three sanctioned tasks.
+    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(3);
+  });
+
   test("TE Config scans secrets.json and prompts via For + Input Dialog", () => {
     const scan = configScanJs();
     expect(scan).toContain(SECRETS_FILENAME);

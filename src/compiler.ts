@@ -608,15 +608,32 @@ export const syncBootstrapJs = (
 };
 
 /**
- * First action of `TE Config`: read secrets.json (waiting up to 30s for the
- * first sync to deliver it), collect the declared secrets whose Tasker
- * global is unset or empty, and expose them to the following Tasker actions
- * as the comma-separated local %te_missing (left unset when nothing is
- * missing, so the If guard skips the prompt loop).
+ * First action of `TE Config`, two modes:
+ *
+ * - **One-off** (`%par1` set, e.g. performed by the Tasker ConfigProvider):
+ *   prompt for exactly that global when it is unset, using `%par2` as the
+ *   dialog label when given.
+ * - **Scan** (no `%par1`, after every sync): read secrets.json (waiting up
+ *   to 30s for the first sync to deliver it) and collect the declared
+ *   secrets whose Tasker global is unset or empty.
+ *
+ * Either way the names to prompt for land in the comma-separated local
+ * %te_missing (left unset when nothing is missing, so the If guard skips
+ * the prompt loop).
  */
 export const configScanJs = (jsDir: string = DEFAULT_DEVICE_JS_DIR): string =>
   [
     ...jsDirPreamble(jsDir),
+    'var par1 = local("par1");',
+    'if (par1 !== undefined && par1 !== "") {',
+    "  var current = global(par1);",
+    '  if (current === undefined || current === "") {',
+    '    setLocal("te_missing", par1);',
+    '    var par2 = local("par2");',
+    '    if (par2 !== undefined && par2 !== "") setLocal("te_label", par2);',
+    "  }",
+    "  exit();",
+    "}",
     "var tries = 0;",
     "function scan() {",
     `  var raw = readFile(dir + ${js(SECRETS_FILENAME)});`,
@@ -641,21 +658,26 @@ export const configScanJs = (jsDir: string = DEFAULT_DEVICE_JS_DIR): string =>
 
 /**
  * Loop body of `TE Config`: resolve the human-readable prompt label for the
- * current secret (%te_secret) from secrets.json into %te_prompt.
+ * current secret (%te_secret) into %te_prompt — an explicit %te_label (set
+ * by the one-off mode) wins, else the secrets.json description, else the
+ * name itself.
  */
 const configLabelJs = (jsDir: string): string =>
   [
     ...jsDirPreamble(jsDir),
-    'var label = local("te_secret");',
-    "try {",
-    `  var declared = JSON.parse(readFile(dir + ${js(SECRETS_FILENAME)}));`,
-    "  for (var i = 0; i < declared.length; i++) {",
-    "    if (declared[i].name === label && declared[i].description) {",
-    "      label = declared[i].description;",
-    "      break;",
+    'var label = local("te_label");',
+    'if (label === undefined || label === "") {',
+    '  label = local("te_secret");',
+    "  try {",
+    `    var declared = JSON.parse(readFile(dir + ${js(SECRETS_FILENAME)}));`,
+    "    for (var i = 0; i < declared.length; i++) {",
+    "      if (declared[i].name === label && declared[i].description) {",
+    "        label = declared[i].description;",
+    "        break;",
+    "      }",
     "    }",
-    "  }",
-    "} catch (err) {}",
+    "  } catch (err) {}",
+    "}",
     'setLocal("te_prompt", label);',
   ].join("\n");
 
