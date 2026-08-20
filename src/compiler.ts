@@ -352,7 +352,7 @@ export const describeTrigger = (trigger: Trigger): string =>
     Match.tag(
       "VariableTrigger",
       (t) =>
-        `State > Variables > Variable Value: %${t.condition.variable} ${t.condition.op} ${t.condition.value ?? ""}`
+        `State > Variables > Variable Value: %${varNameOf(t.condition.variable)} ${t.condition.op} ${t.condition.value ?? ""}`
     ),
     Match.tag(
       "EventTrigger",
@@ -921,17 +921,17 @@ const walkSecrets = (
 };
 
 /**
- * Collect every secret *used* anywhere in the project's action trees
- * (profiles' enter/exit tasks and standalone tasks), deduplicated by name.
+ * Collect every secret *used* anywhere in the project (profiles' enter/exit
+ * tasks, standalone tasks, and trigger conditions), deduplicated by name.
  * Secrets are detected at their use sites — a declared but unused secret is
  * not emitted. The same name with two different descriptions is a conflict
  * and fails compilation.
  */
 export const collectProjectSecrets = (project: Project): Array<Secret> => {
   const byName = new Map<string, Secret>();
-  const addFrom = (owner: string, task: Task): void => {
+  const addFrom = (owner: string, node: unknown): void => {
     walkSecrets(
-      task.actions,
+      node,
       (secret) => {
         const existing = byName.get(secret.name);
         if (existing === undefined) {
@@ -951,13 +951,14 @@ export const collectProjectSecrets = (project: Project): Array<Secret> => {
     );
   };
   for (const profile of project.profiles) {
-    addFrom(`profile "${profile.name}" enter task`, profile.enter);
+    addFrom(`profile "${profile.name}" triggers`, profile.triggers);
+    addFrom(`profile "${profile.name}" enter task`, profile.enter.actions);
     if (profile.exit !== undefined) {
-      addFrom(`profile "${profile.name}" exit task`, profile.exit);
+      addFrom(`profile "${profile.name}" exit task`, profile.exit.actions);
     }
   }
   for (const task of project.tasks) {
-    addFrom(`task "${task.name}"`, task);
+    addFrom(`task "${task.name}"`, task.actions);
   }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 };

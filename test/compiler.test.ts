@@ -355,6 +355,29 @@ describe("secrets", () => {
     expect(JSON.parse(manifest!.content)).toEqual([]);
   });
 
+  test("a secret used only in a trigger condition is collected and described by name", () => {
+    const KEY = secret("TRIGGER_ONLY_KEY", "only used in a trigger");
+    const trigger = Trigger.variable(cond(KEY, "isSet"));
+    const project = new Project({
+      name: "P",
+      profiles: [
+        new Profile({
+          name: "Prof",
+          triggers: [trigger],
+          enter: new Task({ name: "Enter", actions: [Action.flash("x")] }),
+        }),
+      ],
+    });
+
+    expect(collectProjectSecrets(project).map((s) => s.name)).toEqual([
+      "TRIGGER_ONLY_KEY",
+    ]);
+
+    const description = describeTrigger(trigger);
+    expect(description).toContain("%TRIGGER_ONLY_KEY");
+    expect(description).not.toContain("_tag");
+  });
+
   test("compileSecretsJson output is stable and sorted by name", () => {
     const project = new Project({
       name: "P",

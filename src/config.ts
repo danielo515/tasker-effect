@@ -137,28 +137,57 @@ export const makeTaskerConfigProvider = (
           );
         });
 
-        const result: Exit.Exit<string, ConfigError.ConfigError> =
-          yield* Effect.exit(attempt);
-        yield* Deferred.done(deferred, result);
-        yield* Ref.update(inFlight, (map) => {
+        // Owner fiber: whatever happens to `attempt` — success, failure, or
+        // the owner being interrupted mid-poll — the Deferred must be
+        // completed and the in-flight entry removed, or every deduped waiter
+        // hangs forever and the stale entry wedges all future reads of the
+        // key. Interruption is only observable inside restore(), so the
+        // completion + cleanup below are guaranteed to run.
+        const cleanup = Ref.update(inFlight, (map) => {
           const next = new Map(map);
           next.delete(name);
           return next;
         });
+        const result: Exit.Exit<string, ConfigError.ConfigError> =
+          yield* Effect.uninterruptibleMask((restore) =>
+            restore(attempt).pipe(
+              Effect.exit,
+              Effect.tap((exit) =>
+                Deferred.done(
+                  deferred,
+                  Exit.isInterrupted(exit)
+                    ? Exit.fail(
+                        ConfigError.MissingData(
+                          [...path],
+                          `The prompt for Tasker global %${name} was interrupted before an answer arrived`
+                        )
+                      )
+                    : exit
+                )
+              ),
+              Effect.tap(() => cleanup)
+            )
+          );
         return yield* result;
       });
 
     const load = <A>(
       path: ReadonlyArray<string>,
       config: Config.Config.Primitive<A>,
-      _split: boolean
+      split: boolean
     ): Effect.Effect<Array<A>, ConfigError.ConfigError> =>
       Effect.gen(function* () {
         const name = globalNameOf(path);
         const current = yield* readGlobal(path, name);
         const text = current !== undefined ? current : yield* promptFor(path, name);
-        const parsed = yield* config.parse(text);
-        return [parsed];
+        // `split` is set for sequence configs (Config.array & co.): a single
+        // global then holds a comma-separated list, like env-based providers.
+        const texts = split ? text.split(",").map((part) => part.trim()) : [text];
+        return yield* Effect.forEach(texts, (part) =>
+          config
+            .parse(part)
+            .pipe(Effect.mapError((error) => ConfigError.prefixed(error, [...path])))
+        );
       });
 
     return ConfigProvider.fromFlat(

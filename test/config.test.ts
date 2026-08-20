@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Config, ConfigError, Effect } from "effect";
+import { Config, ConfigError, Effect, Fiber } from "effect";
 import { CONFIG_TASK_NAME } from "../src/compiler.js";
 import { makeTaskerConfigProvider } from "../src/config.js";
 import { secret } from "../src/profile.js";
@@ -158,5 +158,88 @@ describe("makeTaskerConfigProvider", () => {
       })
     );
     expect(value).toBe(3);
+  });
+
+  test("sequence configs split the global on commas", async () => {
+    const { api } = makePromptingTasker({ globals: { HOSTS: "a.local, b.local,c.local" } });
+    const value = await run(
+      Effect.gen(function* () {
+        const provider = yield* makeTaskerConfigProvider(api, FAST);
+        return yield* Effect.withConfigProvider(
+          Config.array(Config.string(), "HOSTS"),
+          provider
+        );
+      })
+    );
+    expect(value).toEqual(["a.local", "b.local", "c.local"]);
+  });
+
+  test("parse failures carry the config path", async () => {
+    const { api } = makePromptingTasker({ globals: { RETRIES: "not-a-number" } });
+    const error = await run(
+      Effect.gen(function* () {
+        const provider = yield* makeTaskerConfigProvider(api, FAST);
+        return yield* Effect.withConfigProvider(Config.integer("RETRIES"), provider);
+      }).pipe(Effect.flip)
+    );
+    expect(ConfigError.isConfigError(error)).toBe(true);
+    expect(String(error)).toContain("RETRIES");
+  });
+
+  test("interrupting the prompting fiber fails waiters instead of hanging them, and clears the in-flight entry", async () => {
+    // Prompts go unanswered until we flip `answer` after the interruption.
+    let answer: string | undefined;
+    const globals = new Map<string, string>();
+    const { api, calls } = makeTestTasker({
+      global: (name) => Effect.succeed(globals.get(name) ?? ""),
+      performTask: (_task, _priority, par1) =>
+        Effect.sync(() => {
+          if (answer !== undefined && par1 !== undefined) globals.set(par1, answer);
+          return true;
+        }),
+    });
+
+    const outcome = await run(
+      Effect.gen(function* () {
+        const provider = yield* makeTaskerConfigProvider(api, {
+          pollIntervalMillis: 10,
+          promptTimeoutMillis: 5_000,
+        });
+        const readKey = Effect.withConfigProvider(
+          Config.string("OPENWEATHER_KEY"),
+          provider
+        );
+
+        const owner = yield* Effect.fork(readKey);
+        yield* Effect.sleep("30 millis"); // owner has prompted and is polling
+        const waiter = yield* Effect.fork(readKey.pipe(Effect.flip));
+        yield* Effect.sleep("10 millis"); // waiter deduped onto the owner
+        yield* Fiber.interrupt(owner);
+
+        // The waiter must fail with a ConfigError promptly — not hang on a
+        // Deferred nobody will ever complete.
+        const waiterError = yield* Fiber.join(waiter).pipe(
+          Effect.timeoutFail({
+            duration: "1 second",
+            onTimeout: () => "waiter hung" as const,
+          })
+        );
+
+        // The in-flight entry must be gone: a later read goes through the
+        // prompt path again (global still unset) and now succeeds.
+        answer = "late-answer";
+        const later = yield* readKey.pipe(
+          Effect.timeoutFail({
+            duration: "1 second",
+            onTimeout: () => "stale in-flight entry wedged the retry" as const,
+          })
+        );
+        return { waiterError, later };
+      })
+    );
+    expect(ConfigError.isConfigError(outcome.waiterError as unknown)).toBe(true);
+    expect(String(outcome.waiterError)).toContain("interrupted");
+    expect(outcome.later).toBe("late-answer");
+    expect(calls.filter((call) => call.name === "performTask")).toHaveLength(2);
   });
 });
