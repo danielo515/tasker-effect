@@ -11,15 +11,19 @@
 import { Effect, Match, Schema } from "effect";
 import {
   type Action,
+  type Text,
   type Trigger,
   type VolumeStream,
   Condition,
+  Interpolated,
   Profile,
   Project,
   Secret,
   Task,
+  VariableRef,
   isGlobalVariable,
   variableName,
+  varNameOf,
 } from "./profile.js";
 
 // =============================================================================
@@ -83,9 +87,53 @@ const readVarExpr = (name: string): string =>
     ? `global(${js(variableName(name))})`
     : `local(${js(variableName(name))})`;
 
+/**
+ * Compile a text value to a JavaScript *expression*. Plain strings become
+ * literals; secrets and variable references become `global()`/`local()`
+ * reads; interpolations become concatenations. Never emits `%NAME` string
+ * patterns — Tasker performs no variable replacement inside JavaScript.
+ */
+export const emitText = (value: Text): string => {
+  if (typeof value === "string") return js(value);
+  if (value instanceof Secret) return `global(${js(value.name)})`;
+  if (value instanceof VariableRef) return readVarExpr(value.name);
+  if (value.parts.length === 0) return '""';
+  return value.parts
+    .map((part) =>
+      typeof part === "string"
+        ? js(part)
+        : part instanceof Secret
+          ? `global(${js(part.name)})`
+          : readVarExpr(part.name)
+    )
+    .join(" + ");
+};
+
+/**
+ * Compile raw JavaScript code: literal parts are inserted verbatim; secret
+ * and variable references are spliced in as `global()`/`local()`
+ * expressions.
+ */
+const emitJsCode = (code: Text): Array<string> => {
+  if (typeof code === "string") return code.split("\n");
+  if (code instanceof Interpolated) {
+    return code.parts
+      .map((part) =>
+        typeof part === "string"
+          ? part
+          : part instanceof Secret
+            ? `global(${js(part.name)})`
+            : readVarExpr(part.name)
+      )
+      .join("")
+      .split("\n");
+  }
+  return [`${emitText(code)};`];
+};
+
 /** Compile a Condition to a JavaScript boolean expression */
 export const conditionExpr = (condition: Condition): string => {
-  const v = readVarExpr(condition.variable);
+  const v = readVarExpr(varNameOf(condition.variable));
   const value = condition.value ?? "";
   return Match.value(condition.op).pipe(
     Match.when("eq", () => `${v} === ${js(value)}`),
@@ -115,25 +163,29 @@ const VOLUME_FN: Record<VolumeStream, string> = {
   btvoice: "btVoiceVol",
 };
 
-const opt = (value: string | undefined): string =>
-  value === undefined ? "undefined" : js(value);
+const opt = (value: Text | undefined): string =>
+  value === undefined ? "undefined" : emitText(value);
 
 /** Compile one action to JavaScript source lines (unindented) */
 export const emitAction = (action: Action): Array<string> =>
   Match.value(action).pipe(
     Match.tag("Flash", (a) => [
-      `${a.long ? "flashLong" : "flash"}(${js(a.text)});`,
+      `${a.long ? "flashLong" : "flash"}(${emitText(a.text)});`,
     ]),
     Match.tag("Popup", (a) => [
-      `popup(${js(a.title)}, ${js(a.text)}, ${a.showOverKeyguard}, "", "", ${a.timeoutSecs});`,
+      `popup(${emitText(a.title)}, ${emitText(a.text)}, ${a.showOverKeyguard}, "", "", ${a.timeoutSecs});`,
     ]),
     Match.tag("Say", (a) => [
-      `say(${js(a.text)}, ${opt(a.engine)}, ${opt(a.voice)}, ${js(a.stream)}, ${a.pitch}, ${a.speed});`,
+      `say(${emitText(a.text)}, ${opt(a.engine)}, ${opt(a.voice)}, ${js(a.stream)}, ${a.pitch}, ${a.speed});`,
     ]),
     Match.tag("Vibrate", (a) => [`vibrate(${a.milliseconds});`]),
     Match.tag("VibratePattern", (a) => [`vibratePattern(${js(a.pattern)});`]),
-    Match.tag("SetGlobal", (a) => [`setGlobal(${js(a.name)}, ${js(a.value)});`]),
-    Match.tag("SetLocal", (a) => [`setLocal(${js(a.name)}, ${js(a.value)});`]),
+    Match.tag("SetGlobal", (a) => [
+      `setGlobal(${js(varNameOf(a.name))}, ${emitText(a.value)});`,
+    ]),
+    Match.tag("SetLocal", (a) => [
+      `setLocal(${js(a.name)}, ${emitText(a.value)});`,
+    ]),
     // DSL task references route through the shared dispatcher: %par1 carries
     // the target task name (%par2 stays free for its exit switch), so this
     // variant cannot forward custom parameters.
@@ -148,44 +200,44 @@ export const emitAction = (action: Action): Array<string> =>
     ]),
     Match.tag("Wait", (a) => [`wait(${a.milliseconds});`]),
     Match.tag("Shell", (a) => {
-      const call = `shell(${js(a.command)}, ${a.asRoot}, ${a.timeoutSecs})`;
+      const call = `shell(${emitText(a.command)}, ${a.asRoot}, ${a.timeoutSecs})`;
       if (a.outputGlobal === undefined) {
         return [`${call};`];
       }
       return [
         `__out = ${call};`,
-        `setGlobal(${js(a.outputGlobal)}, __out === undefined ? "" : String(__out));`,
+        `setGlobal(${js(varNameOf(a.outputGlobal))}, __out === undefined ? "" : String(__out));`,
       ];
     }),
     Match.tag("ReadFile", (a) => [
-      `__out = readFile(${js(a.path)});`,
-      `setGlobal(${js(a.outputGlobal)}, __out === undefined ? "" : String(__out));`,
+      `__out = readFile(${emitText(a.path)});`,
+      `setGlobal(${js(varNameOf(a.outputGlobal))}, __out === undefined ? "" : String(__out));`,
     ]),
     Match.tag("WriteFile", (a) => [
-      `writeFile(${js(a.path)}, ${js(a.text)}, ${a.append});`,
+      `writeFile(${emitText(a.path)}, ${emitText(a.text)}, ${a.append});`,
     ]),
     Match.tag("HttpRequest", (a) => {
       const lines = [
         "__out = (function () {",
         "  var xhr = new XMLHttpRequest();",
-        `  xhr.open(${js(a.method)}, ${js(a.url)}, false);`,
+        `  xhr.open(${js(a.method)}, ${emitText(a.url)}, false);`,
       ];
       for (const [key, value] of Object.entries(a.headers)) {
-        lines.push(`  xhr.setRequestHeader(${js(key)}, ${js(value)});`);
+        lines.push(`  xhr.setRequestHeader(${js(key)}, ${emitText(value)});`);
       }
       lines.push(
-        `  xhr.send(${a.body === undefined ? "null" : js(a.body)});`,
+        `  xhr.send(${a.body === undefined ? "null" : emitText(a.body)});`,
         "  return xhr.responseText;",
         "})();"
       );
       if (a.outputGlobal !== undefined) {
-        lines.push(`setGlobal(${js(a.outputGlobal)}, __out);`);
+        lines.push(`setGlobal(${js(varNameOf(a.outputGlobal))}, __out);`);
       }
       return lines;
     }),
-    Match.tag("BrowseUrl", (a) => [`browseURL(${js(a.url)});`]),
+    Match.tag("BrowseUrl", (a) => [`browseURL(${emitText(a.url)});`]),
     Match.tag("SendSms", (a) => [
-      `sendSMS(${js(a.number)}, ${js(a.text)}, ${a.storeInMessagingApp});`,
+      `sendSMS(${emitText(a.number)}, ${emitText(a.text)}, ${a.storeInMessagingApp});`,
     ]),
     Match.tag("SetWifi", (a) => [`setWifi(${a.on});`])
   ).pipe(
@@ -198,16 +250,16 @@ export const emitAction = (action: Action): Array<string> =>
     ]),
     Match.tag("MediaControl", (a) => [`mediaControl(${js(a.action)});`]),
     Match.tag("MusicPlay", (a) => [
-      `musicPlay(${js(a.path)}, ${a.offsetSecs}, ${a.loop}, ${js(a.stream)});`,
+      `musicPlay(${emitText(a.path)}, ${a.offsetSecs}, ${a.loop}, ${js(a.stream)});`,
     ]),
     Match.tag("MusicStop", () => ["musicStop();"]),
-    Match.tag("SetClip", (a) => [`setClip(${js(a.text)}, ${a.append});`]),
-    Match.tag("SetWallpaper", (a) => [`setWallpaper(${js(a.path)});`]),
+    Match.tag("SetClip", (a) => [`setClip(${emitText(a.text)}, ${a.append});`]),
+    Match.tag("SetWallpaper", (a) => [`setWallpaper(${emitText(a.path)});`]),
     Match.tag("LaunchApp", (a) => [
-      `loadApp(${js(a.app)}, ${opt(a.data)}, ${a.excludeFromRecents});`,
+      `loadApp(${emitText(a.app)}, ${opt(a.data)}, ${a.excludeFromRecents});`,
     ]),
     Match.tag("SendIntent", (a) => {
-      const extras = `[${a.extras.map((extra) => js(extra)).join(", ")}]`;
+      const extras = `[${a.extras.map((extra) => emitText(extra)).join(", ")}]`;
       return [
         `sendIntent(${js(a.action)}, ${js(a.targetComp)}, ${opt(a.pkg)}, ${opt(a.cls)}, ${opt(a.category)}, ${opt(a.data)}, ${opt(a.mimeType)}, ${extras});`,
       ];
@@ -217,7 +269,7 @@ export const emitAction = (action: Action): Array<string> =>
     Match.tag("GetLocation", (a) => [
       `getLocation(${js(a.source)}, ${a.keepTracking}, ${a.timeoutSecs});`,
     ]),
-    Match.tag("JavaScript", (a) => a.code.split("\n")),
+    Match.tag("JavaScript", (a) => emitJsCode(a.code)),
     Match.tag("If", (a) => {
       const lines = [`if (${conditionExpr(a.condition)}) {`];
       for (const inner of a.then) {
@@ -822,38 +874,68 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
 export const SECRETS_FILENAME = "secrets.json";
 
 /**
- * Aggregate every secret declared on the project, its tasks and its
- * profiles' enter/exit tasks, deduplicated by name. Two declarations of the
- * same name with different descriptions are a conflict and fail compilation.
+ * Recursively find every {@link Secret} referenced inside a value: whole
+ * field values, interpolation parts, condition variables, header records,
+ * extras arrays and nested `If` branches are all reached by walking the
+ * plain data of the action tree.
+ */
+const walkSecrets = (
+  node: unknown,
+  visit: (secret: Secret) => void,
+  seen: Set<object>
+): void => {
+  if (node instanceof Secret) {
+    visit(node);
+    return;
+  }
+  if (typeof node !== "object" || node === null) return;
+  if (seen.has(node)) return;
+  seen.add(node);
+  if (Array.isArray(node)) {
+    for (const item of node) walkSecrets(item, visit, seen);
+    return;
+  }
+  for (const value of Object.values(node)) walkSecrets(value, visit, seen);
+};
+
+/**
+ * Collect every secret *used* anywhere in the project's action trees
+ * (profiles' enter/exit tasks and standalone tasks), deduplicated by name.
+ * Secrets are detected at their use sites — a declared but unused secret is
+ * not emitted. The same name with two different descriptions is a conflict
+ * and fails compilation.
  */
 export const collectProjectSecrets = (project: Project): Array<Secret> => {
   const byName = new Map<string, Secret>();
-  const add = (owner: string, secret: Secret): void => {
-    const existing = byName.get(secret.name);
-    if (existing === undefined) {
-      byName.set(secret.name, secret);
-      return;
-    }
-    if (existing.description !== secret.description) {
-      throw new CompileError({
-        message:
-          `Secret "${secret.name}" is declared twice with different descriptions: ` +
-          `"${existing.description}" vs "${secret.description}" (${owner})`,
-        source: project.name,
-      });
-    }
+  const addFrom = (owner: string, task: Task): void => {
+    walkSecrets(
+      task.actions,
+      (secret) => {
+        const existing = byName.get(secret.name);
+        if (existing === undefined) {
+          byName.set(secret.name, secret);
+          return;
+        }
+        if (existing.description !== secret.description) {
+          throw new CompileError({
+            message:
+              `Secret "${secret.name}" is used with two different descriptions: ` +
+              `"${existing.description}" vs "${secret.description}" (${owner})`,
+            source: project.name,
+          });
+        }
+      },
+      new Set()
+    );
   };
-  for (const secret of project.secrets) add(`project "${project.name}"`, secret);
   for (const profile of project.profiles) {
-    for (const secret of profile.enter.secrets) {
-      add(`profile "${profile.name}" enter task`, secret);
-    }
-    for (const secret of profile.exit?.secrets ?? []) {
-      add(`profile "${profile.name}" exit task`, secret);
+    addFrom(`profile "${profile.name}" enter task`, profile.enter);
+    if (profile.exit !== undefined) {
+      addFrom(`profile "${profile.name}" exit task`, profile.exit);
     }
   }
   for (const task of project.tasks) {
-    for (const secret of task.secrets) add(`task "${task.name}"`, secret);
+    addFrom(`task "${task.name}"`, task);
   }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 };

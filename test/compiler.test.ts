@@ -11,7 +11,7 @@ import {
   Project,
   cond,
 } from "../src/profile.js";
-import { Secret, secret } from "../src/profile.js";
+import { Interpolated, Secret, fmt, secret, v } from "../src/profile.js";
 import {
   CompileError,
   SECRETS_FILENAME,
@@ -24,6 +24,7 @@ import {
   conditionExpr,
   describeTrigger,
   emitAction,
+  emitText,
   slugify,
 } from "../src/compiler.js";
 
@@ -181,11 +182,85 @@ describe("compileProjectFiles", () => {
   });
 });
 
+describe("interpolation", () => {
+  const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+
+  test("fmt merges literals, flattens nesting and returns plain strings without refs", () => {
+    expect(fmt`plain ${"text"} only`).toBe("plain text only");
+    const inner = fmt`k=${API_KEY}`;
+    const outer = fmt`pre ${inner} post ${1}${2}`;
+    expect(outer).toBeInstanceOf(Interpolated);
+    expect((outer as Interpolated).parts).toEqual(["pre k=", API_KEY, " post 12"]);
+  });
+
+  test("emitText compiles literals, secrets, variables and interpolations", () => {
+    expect(emitText("hi")).toBe('"hi"');
+    expect(emitText(API_KEY)).toBe('global("OPENWEATHER_KEY")');
+    expect(emitText(v("%TEMPERATURE"))).toBe('global("TEMPERATURE")');
+    expect(emitText(v("myvar"))).toBe('local("myvar")');
+    expect(emitText(fmt`Temp: ${v("TEMPERATURE")} °C`)).toBe(
+      '"Temp: " + global("TEMPERATURE") + " °C"'
+    );
+  });
+
+  test("interpolated action fields compile to concatenations, not %NAME literals", () => {
+    const task = new Task({
+      name: "Weather",
+      actions: [
+        Action.flash(fmt`Temp: ${v("TEMPERATURE")} °C`),
+        Action.http("GET", fmt`https://api.example.com?key=${API_KEY}`, {
+          headers: { Authorization: fmt`Bearer ${API_KEY}` },
+        }),
+      ],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('flash("Temp: " + global("TEMPERATURE") + " °C");');
+    expect(jsSource).toContain(
+      'xhr.open("GET", "https://api.example.com?key=" + global("OPENWEATHER_KEY"), false);'
+    );
+    expect(jsSource).toContain(
+      'xhr.setRequestHeader("Authorization", "Bearer " + global("OPENWEATHER_KEY"));'
+    );
+    expect(jsSource).not.toContain("%TEMPERATURE");
+    expectValidJs(jsSource);
+  });
+
+  test("a bare Secret is a whole field value and a condition variable", () => {
+    const task = new Task({
+      name: "Copy",
+      actions: [
+        Action.setGlobal("COPY", API_KEY),
+        Action.when(cond(API_KEY, "isSet"), [Action.flash("have key")]),
+      ],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('setGlobal("COPY", global("OPENWEATHER_KEY"));');
+    expect(jsSource).toContain(
+      'if ((global("OPENWEATHER_KEY") !== undefined && global("OPENWEATHER_KEY") !== "")) {'
+    );
+    expectValidJs(jsSource);
+  });
+
+  test("Action.js splices refs as expressions", () => {
+    const task = new Task({
+      name: "Raw",
+      actions: [Action.js(fmt`var key = ${API_KEY};\nflash(key);`)],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('var key = global("OPENWEATHER_KEY");');
+    expectValidJs(jsSource);
+  });
+});
+
 describe("secrets", () => {
+  const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
   const weatherTask = new Task({
     name: "Weather",
-    actions: [Action.flash("w")],
-    secrets: [secret("OPENWEATHER_KEY", "OpenWeather API key")],
+    actions: [
+      Action.http("GET", fmt`https://api.example.com?key=${API_KEY}`, {
+        outputGlobal: "%WEATHER_JSON",
+      }),
+    ],
   });
 
   test("secret() normalizes the leading % and validates the name", () => {
@@ -193,18 +268,24 @@ describe("secrets", () => {
     expect(() => secret("lowercase", "key")).toThrow();
   });
 
-  test("collectProjectSecrets merges project, profile and task declarations", () => {
+  test("collectProjectSecrets finds inline uses across profiles and tasks", () => {
+    const HA_TOKEN = secret("HOME_ASSISTANT_TOKEN", "HA long-lived token");
     const project = new Project({
       name: "P",
-      secrets: [secret("GH_TOKEN", "GitHub token for private syncs")],
       profiles: [
         new Profile({
           name: "Prof",
           triggers: [Trigger.time({ hour: 7, minute: 0 })],
           enter: new Task({
             name: "Enter",
-            actions: [Action.flash("x")],
-            secrets: [secret("HOME_ASSISTANT_TOKEN", "HA long-lived token")],
+            // Nested inside If and a header record — the walk must reach both.
+            actions: [
+              Action.when(cond("%READY", "isSet"), [
+                Action.http("POST", "https://ha.local/api", {
+                  headers: { Authorization: fmt`Bearer ${HA_TOKEN}` },
+                }),
+              ]),
+            ],
           }),
         }),
       ],
@@ -213,48 +294,48 @@ describe("secrets", () => {
 
     const secrets = collectProjectSecrets(project);
     expect(secrets.map((s) => s.name)).toEqual([
-      "GH_TOKEN",
       "HOME_ASSISTANT_TOKEN",
       "OPENWEATHER_KEY",
     ]);
   });
 
-  test("duplicate declarations with the same description deduplicate", () => {
-    const shared = secret("API_KEY", "Shared API key");
+  test("declared but unused secrets are not emitted", () => {
+    // UNUSED_KEY is constructed but never referenced by any action.
+    secret("UNUSED_KEY", "never referenced");
+    const project = new Project({ name: "P", tasks: [weatherTask] });
+    expect(collectProjectSecrets(project).map((s) => s.name)).toEqual([
+      "OPENWEATHER_KEY",
+    ]);
+  });
+
+  test("the same name used with the same description deduplicates", () => {
+    const again = new Secret({
+      name: "OPENWEATHER_KEY",
+      description: "OpenWeather API key",
+    });
     const project = new Project({
       name: "P",
       tasks: [
-        new Task({ name: "A", actions: [Action.flash("a")], secrets: [shared] }),
-        new Task({
-          name: "B",
-          actions: [Action.flash("b")],
-          secrets: [new Secret({ name: "API_KEY", description: "Shared API key" })],
-        }),
+        weatherTask,
+        new Task({ name: "B", actions: [Action.setGlobal("K", again)] }),
       ],
     });
     expect(collectProjectSecrets(project)).toHaveLength(1);
   });
 
   test("conflicting descriptions for the same secret fail compilation", () => {
+    const conflicting = secret("OPENWEATHER_KEY", "something else entirely");
     const project = new Project({
       name: "P",
       tasks: [
-        new Task({
-          name: "A",
-          actions: [Action.flash("a")],
-          secrets: [secret("API_KEY", "one thing")],
-        }),
-        new Task({
-          name: "B",
-          actions: [Action.flash("b")],
-          secrets: [secret("API_KEY", "another thing")],
-        }),
+        weatherTask,
+        new Task({ name: "B", actions: [Action.flash(fmt`${conflicting}`)] }),
       ],
     });
     expect(() => collectProjectSecrets(project)).toThrow(CompileError);
   });
 
-  test("compileProjectFiles emits secrets.json with name and description", () => {
+  test("compileProjectFiles emits secrets.json from inline uses", () => {
     const project = new Project({ name: "P", tasks: [weatherTask] });
     const files = compileProjectFiles(project, { repo: TEST_REPO });
     const manifest = files.find((f) => f.filename === SECRETS_FILENAME);
@@ -264,7 +345,7 @@ describe("secrets", () => {
     ]);
   });
 
-  test("secrets.json is emitted even when no secrets are declared", () => {
+  test("secrets.json is emitted even when no secrets are used", () => {
     const project = new Project({
       name: "Empty",
       tasks: [new Task({ name: "T", actions: [Action.flash("x")] })],
@@ -277,12 +358,18 @@ describe("secrets", () => {
   test("compileSecretsJson output is stable and sorted by name", () => {
     const project = new Project({
       name: "P",
-      secrets: [secret("ZEBRA", "z"), secret("ALPHA", "a")],
+      tasks: [
+        new Task({
+          name: "T",
+          actions: [
+            Action.flash(fmt`${secret("ZEBRA", "z")}${secret("ALPHA", "a")}`),
+          ],
+        }),
+      ],
     });
-    expect(JSON.parse(compileSecretsJson(project)).map((s: Secret) => s.name)).toEqual([
-      "ALPHA",
-      "ZEBRA",
-    ]);
+    expect(
+      JSON.parse(compileSecretsJson(project)).map((s: Secret) => s.name)
+    ).toEqual(["ALPHA", "ZEBRA"]);
   });
 });
 

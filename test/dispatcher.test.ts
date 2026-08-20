@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { Action, Trigger, Task, Profile, Project, secret } from "../src/profile.js";
+import {
+  Action,
+  Trigger,
+  Task,
+  Profile,
+  Project,
+  fmt,
+  secret,
+} from "../src/profile.js";
 import {
   CONFIG_TASK_NAME,
   DISPATCHER_FILENAME,
@@ -181,8 +189,9 @@ describe("taskerProjectXml", () => {
       tasks: [
         new Task({
           name: "Unique Marker Task",
-          actions: [Action.flash("zz")],
-          secrets: [secret("UNIQUE_MARKER_KEY", "marker secret")],
+          actions: [
+            Action.flash(fmt`zz ${secret("UNIQUE_MARKER_KEY", "marker secret")}`),
+          ],
         }),
       ],
     });

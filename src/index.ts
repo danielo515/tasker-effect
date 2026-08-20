@@ -67,9 +67,19 @@ export {
   Condition,
   isGlobalVariable,
   variableName,
-  // Secrets
+  // Secrets, variable references and interpolation
   Secret,
   secret,
+  VariableRef,
+  v,
+  Interpolated,
+  TextPart,
+  type FmtValue,
+  fmt,
+  Text,
+  NonEmptyText,
+  VarName,
+  varNameOf,
   // Action classes
   Flash,
   Popup,
@@ -144,6 +154,7 @@ export {
   slugify,
   conditionExpr,
   emitAction,
+  emitText,
   compileTaskToJs,
   describeTrigger,
   compileProfileFiles,
