@@ -187,15 +187,6 @@ export class TaskerNotAvailableError extends Schema.TaggedError<TaskerNotAvailab
 /** Union of errors any Tasker binding can fail with */
 export type TaskerApiError = TaskerCallError | TaskerNotAvailableError;
 
-/** A declared secret has no value in its Tasker global variable */
-export class MissingSecretError extends Schema.TaggedError<MissingSecretError>()(
-  "MissingSecretError",
-  {
-    name: Schema.String,
-    description: Schema.optional(Schema.String),
-  }
-) {}
-
 // =============================================================================
 // Raw API surface — single source of truth for every documented function
 // =============================================================================
@@ -657,45 +648,6 @@ export class Tasker extends Effect.Service<Tasker>()("Tasker", {
     isAvailable: Effect.sync(() => lookupRaw("flash") !== undefined),
   }),
 }) {}
-
-// =============================================================================
-// Secrets
-// =============================================================================
-
-/**
- * Reference to a declared secret — structurally compatible with the DSL
- * `Secret` class, so a declaration can be shared between a task definition
- * and the script that consumes it.
- */
-export interface SecretRef {
-  readonly name: string;
-  readonly description?: string;
-}
-
-/**
- * Read a secret from its Tasker global variable, failing with
- * `MissingSecretError` when it is unset or empty. On-device, missing secrets
- * are normally filled in by the static `TE Config` task, which prompts for
- * every entry of `secrets.json` that has no value yet.
- */
-export const requireSecret = (
-  secret: SecretRef
-): Effect.Effect<string, MissingSecretError | TaskerApiError, Tasker> =>
-  Effect.gen(function* () {
-    const tasker = yield* Tasker;
-    const value: string | undefined = yield* tasker.global(secret.name);
-    if (value === undefined || value === "") {
-      return yield* Effect.fail(
-        new MissingSecretError({
-          name: secret.name,
-          ...(secret.description !== undefined
-            ? { description: secret.description }
-            : {}),
-        })
-      );
-    }
-    return value;
-  });
 
 // =============================================================================
 // Test implementation

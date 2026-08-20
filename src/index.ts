@@ -35,10 +35,6 @@ export {
   TaskerCallError,
   TaskerNotAvailableError,
   type TaskerApiError,
-  MissingSecretError,
-  // Secrets runtime helper
-  type SecretRef,
-  requireSecret,
   // Raw surface
   type TaskerRawApi,
   TASKER_FUNCTION_NAMES,
@@ -179,6 +175,17 @@ export {
 // =============================================================================
 
 export { runInTasker } from "./runtime.js";
+
+// =============================================================================
+// Tasker-backed ConfigProvider (secrets & config for Effect scripts)
+// =============================================================================
+
+export {
+  type TaskerConfigApi,
+  type TaskerConfigOptions,
+  makeTaskerConfigProvider,
+  taskerConfigLayer,
+} from "./config.js";
 
 // =============================================================================
 // Sync (pull compiled JS from CI) — platform-free surface only

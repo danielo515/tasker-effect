@@ -4,56 +4,10 @@ import {
   Tasker,
   TaskerTest,
   makeTaskerTestLayer,
-  MissingSecretError,
   TaskerNotAvailableError,
   TASKER_FUNCTION_NAMES,
   raw,
-  requireSecret,
 } from "../src/tasker-api.js";
-
-describe("requireSecret", () => {
-  const secret = { name: "OPENWEATHER_KEY", description: "OpenWeather API key" };
-
-  test("returns the value of the Tasker global when set", async () => {
-    const { layer } = makeTaskerTestLayer({
-      global: (name) => Effect.succeed(name === "OPENWEATHER_KEY" ? "abc123" : ""),
-    });
-    const value = await Effect.runPromise(
-      requireSecret(secret).pipe(Effect.provide(layer))
-    );
-    expect(value).toBe("abc123");
-  });
-
-  test("fails with MissingSecretError when the global is unset or empty", async () => {
-    const { layer } = makeTaskerTestLayer({
-      global: () => Effect.succeed(""),
-    });
-    const error = await Effect.runPromise(
-      requireSecret(secret).pipe(Effect.flip, Effect.provide(layer))
-    );
-    expect(error).toBeInstanceOf(MissingSecretError);
-    expect(error).toMatchObject({
-      _tag: "MissingSecretError",
-      name: "OPENWEATHER_KEY",
-      description: "OpenWeather API key",
-    });
-  });
-
-  test("is catchable by tag", async () => {
-    const { layer } = makeTaskerTestLayer({
-      global: () => Effect.succeed(""),
-    });
-    const fallback = await Effect.runPromise(
-      requireSecret(secret).pipe(
-        Effect.catchTag("MissingSecretError", (error) =>
-          Effect.succeed(`missing:${error.name}`)
-        ),
-        Effect.provide(layer)
-      )
-    );
-    expect(fallback).toBe("missing:OPENWEATHER_KEY");
-  });
-});
 
 describe("Tasker service (test layer)", () => {
   test("flash succeeds and global returns empty string", async () => {
