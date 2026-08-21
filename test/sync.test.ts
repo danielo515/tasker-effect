@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it } from "@effect/vitest";
 import { HttpClient, HttpClientResponse } from "@effect/platform";
 import { Effect, Layer } from "effect";
 import {
@@ -123,159 +123,159 @@ const baseOptions: SyncOptions = {
 };
 
 describe("ProfileSync.pullLatestProfiles (release source)", () => {
-  test("downloads .js assets and writes them to the target dir", async () => {
-    const { layer, written } = makeStubs();
+  it.effect("downloads .js assets and writes them to the target dir", () =>
+    Effect.gen(function* () {
+      const { layer, written } = makeStubs();
 
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.pullLatestProfiles(baseOptions);
-      }).pipe(Effect.provide(layer))
-    );
+      }).pipe(Effect.provide(layer));
 
-    expect(result.source).toBe("release");
-    expect(result.version).toBe("v1.2.0");
-    expect(result.files).toEqual(["morning-routine.js"]);
-    expect(written.get("/tmp/tasker-js/morning-routine.js")).toContain(
-      "morning-routine.js"
-    );
-    expect(written.has("/tmp/tasker-js/README.md")).toBe(false);
-  });
+      expect(result.source).toBe("release");
+      expect(result.version).toBe("v1.2.0");
+      expect(result.files).toEqual(["morning-routine.js"]);
+      expect(written.get("/tmp/tasker-js/morning-routine.js")).toContain(
+        "morning-routine.js"
+      );
+      expect(written.has("/tmp/tasker-js/README.md")).toBe(false);
+    })
+  );
 
-  test("syncs .json assets (the secrets manifest) by default", async () => {
-    const { layer, written } = makeStubs({
-      releaseJson: {
-        tag_name: "v1.3.0",
-        assets: [
-          ...release.assets,
-          {
-            name: "secrets.json",
-            browser_download_url: "https://example.com/secrets.json",
-            size: 20,
-          },
-        ],
-      },
-    });
+  it.effect("syncs .json assets (the secrets manifest) by default", () =>
+    Effect.gen(function* () {
+      const { layer, written } = makeStubs({
+        releaseJson: {
+          tag_name: "v1.3.0",
+          assets: [
+            ...release.assets,
+            {
+              name: "secrets.json",
+              browser_download_url: "https://example.com/secrets.json",
+              size: 20,
+            },
+          ],
+        },
+      });
 
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.pullLatestProfiles(baseOptions);
-      }).pipe(Effect.provide(layer))
-    );
+      }).pipe(Effect.provide(layer));
 
-    expect(result.files.sort()).toEqual(["morning-routine.js", "secrets.json"]);
-    expect(written.has("/tmp/tasker-js/secrets.json")).toBe(true);
-    expect(written.has("/tmp/tasker-js/README.md")).toBe(false);
-  });
+      expect(result.files.sort()).toEqual(["morning-routine.js", "secrets.json"]);
+      expect(written.has("/tmp/tasker-js/secrets.json")).toBe(true);
+      expect(written.has("/tmp/tasker-js/README.md")).toBe(false);
+    })
+  );
 
-  test("honours custom asset suffixes", async () => {
-    const { layer, written } = makeStubs();
+  it.effect("honours custom asset suffixes", () =>
+    Effect.gen(function* () {
+      const { layer, written } = makeStubs();
 
-    await Effect.runPromise(
-      Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.pullLatestProfiles({
           ...baseOptions,
           assetSuffixes: [".js", ".md"],
         });
-      }).pipe(Effect.provide(layer))
-    );
+      }).pipe(Effect.provide(layer));
 
-    expect(written.has("/tmp/tasker-js/README.md")).toBe(true);
-  });
+      expect(written.has("/tmp/tasker-js/README.md")).toBe(true);
+    })
+  );
 
-  test("fails with NothingToSyncError when no assets match", async () => {
-    const { layer } = makeStubs({
-      releaseJson: { tag_name: "v0.0.1", assets: [] },
-    });
+  it.effect("fails with NothingToSyncError when no assets match", () =>
+    Effect.gen(function* () {
+      const { layer } = makeStubs({
+        releaseJson: { tag_name: "v0.0.1", assets: [] },
+      });
 
-    const error = await Effect.runPromise(
-      Effect.gen(function* () {
+      const error = yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.pullLatestProfiles(baseOptions);
-      }).pipe(Effect.provide(layer), Effect.flip)
-    );
+      }).pipe(Effect.provide(layer), Effect.flip);
 
-    expect(error._tag).toBe("NothingToSyncError");
-  });
+      expect(error._tag).toBe("NothingToSyncError");
+    })
+  );
 
-  test("fails with GitHubApiError on malformed payloads", async () => {
-    const { layer } = makeStubs({ releaseJson: { nope: true } });
+  it.effect("fails with GitHubApiError on malformed payloads", () =>
+    Effect.gen(function* () {
+      const { layer } = makeStubs({ releaseJson: { nope: true } });
 
-    const error = await Effect.runPromise(
-      Effect.gen(function* () {
+      const error = yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.pullLatestProfiles(baseOptions);
-      }).pipe(Effect.provide(layer), Effect.flip)
-    );
+      }).pipe(Effect.provide(layer), Effect.flip);
 
-    expect(error._tag).toBe("GitHubApiError");
-  });
+      expect(error._tag).toBe("GitHubApiError");
+    })
+  );
 
-  test("maps non-2xx API responses to GitHubApiError with the status", async () => {
-    const { layer } = makeStubs({ releaseStatus: 500 });
+  it.effect("maps non-2xx API responses to GitHubApiError with the status", () =>
+    Effect.gen(function* () {
+      const { layer } = makeStubs({ releaseStatus: 500 });
 
-    const error = await Effect.runPromise(
-      Effect.gen(function* () {
+      const error = yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.pullLatestProfiles(baseOptions);
-      }).pipe(Effect.provide(layer), Effect.flip)
-    );
+      }).pipe(Effect.provide(layer), Effect.flip);
 
-    expect(error._tag).toBe("GitHubApiError");
-    expect(error._tag === "GitHubApiError" && error.status).toBe(500);
-  });
+      expect(error._tag).toBe("GitHubApiError");
+      expect(error._tag === "GitHubApiError" && error.status).toBe(500);
+    })
+  );
 });
 
 describe("ProfileSync artifacts source", () => {
-  test("latestArtifact picks the newest non-expired artifact", async () => {
-    const { layer } = makeStubs();
+  it.effect("latestArtifact picks the newest non-expired artifact", () =>
+    Effect.gen(function* () {
+      const { layer } = makeStubs();
 
-    const artifact = await Effect.runPromise(
-      Effect.gen(function* () {
+      const artifact = yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.latestArtifact({ ...baseOptions, token: "t" });
-      }).pipe(Effect.provide(layer))
-    );
+      }).pipe(Effect.provide(layer));
 
-    expect(artifact.id).toBe(2);
-  });
+      expect(artifact.id).toBe(2);
+    })
+  );
 
-  test("pullFromArtifacts requires a token", async () => {
-    const { layer } = makeStubs();
+  it.effect("pullFromArtifacts requires a token", () =>
+    Effect.gen(function* () {
+      const { layer } = makeStubs();
 
-    const error = await Effect.runPromise(
-      Effect.gen(function* () {
+      const error = yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.pullFromArtifacts(baseOptions);
-      }).pipe(Effect.provide(layer), Effect.flip)
-    );
+      }).pipe(Effect.provide(layer), Effect.flip);
 
-    expect(error._tag).toBe("GitHubApiError");
-  });
+      expect(error._tag).toBe("GitHubApiError");
+    })
+  );
 
-  test("pullFromArtifacts downloads the zip and extracts it", async () => {
-    const { layer, written, extractedInto } = makeStubs();
+  it.effect("pullFromArtifacts downloads the zip and extracts it", () =>
+    Effect.gen(function* () {
+      const { layer, written, extractedInto } = makeStubs();
 
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const sync = yield* ProfileSync;
         return yield* sync.pullFromArtifacts({ ...baseOptions, token: "t" });
-      }).pipe(Effect.provide(layer))
-    );
+      }).pipe(Effect.provide(layer));
 
-    expect(result.source).toBe("artifact");
-    expect(result.files).toEqual(["a.js", "b.js"]);
-    expect(written.has("/tmp/tasker-js/tasker-js.zip")).toBe(true);
-    expect(extractedInto).toEqual([
-      "/tmp/tasker-js/tasker-js.zip -> /tmp/tasker-js",
-    ]);
-  });
+      expect(result.source).toBe("artifact");
+      expect(result.files).toEqual(["a.js", "b.js"]);
+      expect(written.has("/tmp/tasker-js/tasker-js.zip")).toBe(true);
+      expect(extractedInto).toEqual([
+        "/tmp/tasker-js/tasker-js.zip -> /tmp/tasker-js",
+      ]);
+    })
+  );
 });
 
 describe("error types", () => {
-  test("StorageWriteError carries the failing path", () => {
+  it("StorageWriteError carries the failing path", () => {
     const error = new StorageWriteError({ message: "disk full", path: "/x" });
     expect(error._tag).toBe("StorageWriteError");
     expect(error.path).toBe("/x");

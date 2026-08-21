@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
   type Action as ActionType,
@@ -31,12 +31,13 @@ import {
 const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
 const expectValidJs = (code: string) => {
-  // Throws SyntaxError if the emitted code does not parse.
+  // Throws SyntaxError if the emitted code does not parse (never invoked).
+  // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
   expect(() => new Function(code)).not.toThrow();
 };
 
 describe("compileTaskToJs", () => {
-  test("emits Tasker API calls for each action", () => {
+  it("emits Tasker API calls for each action", () => {
     const task = new Task({
       name: "Morning Routine",
       actions: [
@@ -57,7 +58,7 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
-  test("escapes quotes and newlines in strings", () => {
+  it("escapes quotes and newlines in strings", () => {
     const task = new Task({
       name: "Escapes",
       actions: [Action.flash('He said "hi"\nand left')],
@@ -67,7 +68,7 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
-  test("compiles conditionals with else branches", () => {
+  it("compiles conditionals with else branches", () => {
     const task = new Task({
       name: "Battery Check",
       actions: [
@@ -86,7 +87,7 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
-  test("compiles HTTP requests to synchronous XHR", () => {
+  it("compiles HTTP requests to synchronous XHR", () => {
     const task = new Task({
       name: "Fetch Weather",
       actions: [
@@ -104,7 +105,7 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
-  test("shell output lands in a global variable", () => {
+  it("shell output lands in a global variable", () => {
     const task = new Task({
       name: "Uptime",
       actions: [Action.shell("uptime", { outputGlobal: "%UPTIME" })],
@@ -115,7 +116,7 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
-  test("raw JavaScript is inserted verbatim", () => {
+  it("raw JavaScript is inserted verbatim", () => {
     const task = new Task({
       name: "Custom",
       actions: [Action.js("var x = 1;\nflash(String(x));")],
@@ -125,7 +126,7 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
-  test("wraps everything in an error handler that flashes", () => {
+  it("wraps everything in an error handler that flashes", () => {
     const task = new Task({ name: "T", actions: [Action.flash("x")] });
     const jsSource = compileTaskToJs(task);
     expect(jsSource).toContain("catch (err)");
@@ -134,7 +135,7 @@ describe("compileTaskToJs", () => {
 });
 
 describe("compileProfileFiles", () => {
-  test("emits enter and exit files", () => {
+  it("emits enter and exit files", () => {
     const profile = new Profile({
       name: "Home WiFi",
       triggers: [Trigger.wifiConnected("MyNetwork")],
@@ -152,7 +153,7 @@ describe("compileProfileFiles", () => {
 });
 
 describe("compileProjectFiles", () => {
-  test("bundles profiles, tasks and a setup README", () => {
+  it("bundles profiles, tasks and a setup README", () => {
     const project = new Project({
       name: "My Automations",
       profiles: [
@@ -185,7 +186,7 @@ describe("compileProjectFiles", () => {
 describe("interpolation", () => {
   const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
 
-  test("fmt merges literals, flattens nesting and returns plain strings without refs", () => {
+  it("fmt merges literals, flattens nesting and returns plain strings without refs", () => {
     expect(fmt`plain ${"text"} only`).toBe("plain text only");
     const inner = fmt`k=${API_KEY}`;
     const outer = fmt`pre ${inner} post ${1}${2}`;
@@ -193,7 +194,7 @@ describe("interpolation", () => {
     expect((outer as Interpolated).parts).toEqual(["pre k=", API_KEY, " post 12"]);
   });
 
-  test("emitText compiles literals, secrets, variables and interpolations", () => {
+  it("emitText compiles literals, secrets, variables and interpolations", () => {
     expect(emitText("hi")).toBe('"hi"');
     expect(emitText(API_KEY)).toBe('global("OPENWEATHER_KEY")');
     expect(emitText(v("%TEMPERATURE"))).toBe('global("TEMPERATURE")');
@@ -203,7 +204,7 @@ describe("interpolation", () => {
     );
   });
 
-  test("interpolated action fields compile to concatenations, not %NAME literals", () => {
+  it("interpolated action fields compile to concatenations, not %NAME literals", () => {
     const task = new Task({
       name: "Weather",
       actions: [
@@ -225,7 +226,7 @@ describe("interpolation", () => {
     expectValidJs(jsSource);
   });
 
-  test("a bare Secret is a whole field value and a condition variable", () => {
+  it("a bare Secret is a whole field value and a condition variable", () => {
     const task = new Task({
       name: "Copy",
       actions: [
@@ -241,7 +242,7 @@ describe("interpolation", () => {
     expectValidJs(jsSource);
   });
 
-  test("Action.js splices refs as expressions", () => {
+  it("Action.js splices refs as expressions", () => {
     const task = new Task({
       name: "Raw",
       actions: [Action.js(fmt`var key = ${API_KEY};\nflash(key);`)],
@@ -263,12 +264,12 @@ describe("secrets", () => {
     ],
   });
 
-  test("secret() normalizes the leading % and validates the name", () => {
+  it("secret() normalizes the leading % and validates the name", () => {
     expect(secret("%API_KEY", "key").name).toBe("API_KEY");
     expect(() => secret("lowercase", "key")).toThrow();
   });
 
-  test("collectProjectSecrets finds inline uses across profiles and tasks", () => {
+  it("collectProjectSecrets finds inline uses across profiles and tasks", () => {
     const HA_TOKEN = secret("HOME_ASSISTANT_TOKEN", "HA long-lived token");
     const project = new Project({
       name: "P",
@@ -299,7 +300,7 @@ describe("secrets", () => {
     ]);
   });
 
-  test("declared but unused secrets are not emitted", () => {
+  it("declared but unused secrets are not emitted", () => {
     // UNUSED_KEY is constructed but never referenced by any action.
     secret("UNUSED_KEY", "never referenced");
     const project = new Project({ name: "P", tasks: [weatherTask] });
@@ -308,7 +309,7 @@ describe("secrets", () => {
     ]);
   });
 
-  test("the same name used with the same description deduplicates", () => {
+  it("the same name used with the same description deduplicates", () => {
     const again = new Secret({
       name: "OPENWEATHER_KEY",
       description: "OpenWeather API key",
@@ -323,7 +324,7 @@ describe("secrets", () => {
     expect(collectProjectSecrets(project)).toHaveLength(1);
   });
 
-  test("conflicting descriptions for the same secret fail compilation", () => {
+  it("conflicting descriptions for the same secret fail compilation", () => {
     const conflicting = secret("OPENWEATHER_KEY", "something else entirely");
     const project = new Project({
       name: "P",
@@ -335,7 +336,7 @@ describe("secrets", () => {
     expect(() => collectProjectSecrets(project)).toThrow(CompileError);
   });
 
-  test("compileProjectFiles emits secrets.json from inline uses", () => {
+  it("compileProjectFiles emits secrets.json from inline uses", () => {
     const project = new Project({ name: "P", tasks: [weatherTask] });
     const files = compileProjectFiles(project, { repo: TEST_REPO });
     const manifest = files.find((f) => f.filename === SECRETS_FILENAME);
@@ -345,7 +346,7 @@ describe("secrets", () => {
     ]);
   });
 
-  test("secrets.json is emitted even when no secrets are used", () => {
+  it("secrets.json is emitted even when no secrets are used", () => {
     const project = new Project({
       name: "Empty",
       tasks: [new Task({ name: "T", actions: [Action.flash("x")] })],
@@ -355,7 +356,7 @@ describe("secrets", () => {
     expect(JSON.parse(manifest!.content)).toEqual([]);
   });
 
-  test("a secret used only in a trigger condition is collected and described by name", () => {
+  it("a secret used only in a trigger condition is collected and described by name", () => {
     const KEY = secret("TRIGGER_ONLY_KEY", "only used in a trigger");
     const trigger = Trigger.variable(cond(KEY, "isSet"));
     const project = new Project({
@@ -378,7 +379,7 @@ describe("secrets", () => {
     expect(description).not.toContain("_tag");
   });
 
-  test("compileSecretsJson output is stable and sorted by name", () => {
+  it("compileSecretsJson output is stable and sorted by name", () => {
     const project = new Project({
       name: "P",
       tasks: [
@@ -402,7 +403,7 @@ describe("task references", () => {
     actions: [Action.flash("weather")],
   });
 
-  test("DSL performTask routes through the dispatcher", () => {
+  it("DSL performTask routes through the dispatcher", () => {
     const caller = new Task({
       name: "Caller",
       actions: [Action.performTask(weather, { priority: 9 })],
@@ -414,7 +415,7 @@ describe("task references", () => {
     expectValidJs(jsSource);
   });
 
-  test("performTaskerTask compiles to a direct call with parameters", () => {
+  it("performTaskerTask compiles to a direct call with parameters", () => {
     const caller = new Task({
       name: "Caller",
       actions: [
@@ -429,7 +430,7 @@ describe("task references", () => {
     expectValidJs(jsSource);
   });
 
-  test("project compilation fails on dangling DSL task references", () => {
+  it("project compilation fails on dangling DSL task references", () => {
     const project = new Project({
       name: "Broken",
       profiles: [
@@ -463,28 +464,31 @@ describe("task references", () => {
     expect(message).toContain('Valid targets: "Other Task"');
   });
 
-  test("TaskerCompiler.compileProject surfaces the linker CompileError", async () => {
-    const project = new Project({
-      name: "Broken",
-      tasks: [
-        new Task({
-          name: "Caller",
-          actions: [Action.performTask(weather)],
-        }),
-      ],
-    });
-    const program = Effect.gen(function* () {
-      const compiler = yield* TaskerCompiler;
-      return yield* compiler.compileProject(project, { repo: TEST_REPO });
-    });
-    const error = await Effect.runPromise(
-      program.pipe(Effect.flip, Effect.provide(TaskerCompiler.Default))
-    );
-    expect(error).toBeInstanceOf(CompileError);
-    expect(error.message).toContain('unknown task "Weather Check"');
-  });
+  it.effect("TaskerCompiler.compileProject surfaces the linker CompileError", () =>
+    Effect.gen(function* () {
+      const project = new Project({
+        name: "Broken",
+        tasks: [
+          new Task({
+            name: "Caller",
+            actions: [Action.performTask(weather)],
+          }),
+        ],
+      });
+      const program = Effect.gen(function* () {
+        const compiler = yield* TaskerCompiler;
+        return yield* compiler.compileProject(project, { repo: TEST_REPO });
+      });
+      const error = yield* program.pipe(
+        Effect.flip,
+        Effect.provide(TaskerCompiler.Default)
+      );
+      expect(error).toBeInstanceOf(CompileError);
+      expect(error.message).toContain('unknown task "Weather Check"');
+    })
+  );
 
-  test("valid DSL references compile, including UI-task escape hatches", () => {
+  it("valid DSL references compile, including UI-task escape hatches", () => {
     const project = new Project({
       name: "Linked",
       profiles: [
@@ -548,7 +552,7 @@ describe("Match coverage", () => {
     Action.when(cond("%A", "isSet"), [Action.flash("y")]),
   ];
 
-  test("emitAction handles every action tag", () => {
+  it("emitAction handles every action tag", () => {
     for (const action of oneOfEveryAction) {
       const lines = emitAction(action);
       expect(lines.length).toBeGreaterThan(0);
@@ -567,13 +571,13 @@ describe("Match coverage", () => {
     Trigger.state("Power"),
   ];
 
-  test("describeTrigger handles every trigger tag", () => {
+  it("describeTrigger handles every trigger tag", () => {
     for (const trigger of oneOfEveryTrigger) {
       expect(describeTrigger(trigger).length).toBeGreaterThan(0);
     }
   });
 
-  test("conditionExpr handles every operator", () => {
+  it("conditionExpr handles every operator", () => {
     for (const op of ConditionOp.literals) {
       expect(conditionExpr(cond("%A", op, "1")).length).toBeGreaterThan(0);
     }
@@ -581,29 +585,25 @@ describe("Match coverage", () => {
 });
 
 describe("TaskerCompiler service", () => {
-  test("compileTask returns a CompiledFile", async () => {
-    const program = Effect.gen(function* () {
+  it.effect("compileTask returns a CompiledFile", () =>
+    Effect.gen(function* () {
       const compiler = yield* TaskerCompiler;
-      return yield* compiler.compileTask(
+      const file = yield* compiler.compileTask(
         new Task({ name: "Service Task", actions: [Action.flash("via service")] })
       );
-    });
-
-    const file = await Effect.runPromise(
-      program.pipe(Effect.provide(TaskerCompiler.Default))
-    );
-    expect(file.filename).toBe("service-task.js");
-    expect(file.content).toContain('flash("via service");');
-  });
+      expect(file.filename).toBe("service-task.js");
+      expect(file.content).toContain('flash("via service");');
+    }).pipe(Effect.provide(TaskerCompiler.Default))
+  );
 });
 
 describe("helpers", () => {
-  test("slugify produces safe file names", () => {
+  it("slugify produces safe file names", () => {
     expect(slugify("Morning Routine!")).toBe("morning-routine");
     expect(slugify("  ")).toBe("task");
   });
 
-  test("describeTrigger formats times", () => {
+  it("describeTrigger formats times", () => {
     const description = describeTrigger(
       Trigger.time({ hour: 7, minute: 5 }, { to: { hour: 9, minute: 0 } })
     );

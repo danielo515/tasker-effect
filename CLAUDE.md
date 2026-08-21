@@ -56,17 +56,29 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 - `Layer` composition to swap Node vs on-device implementations (`SyncNodeLive` vs `SyncTaskerLive`); HTTP goes through `@effect/platform`'s `HttpClient` (`FetchHttpClient.layer` on both platforms). `@effect/platform-node` may only be imported from `src/sync/node.ts` and `src/cli.ts` — the two sanctioned Node edges, neither exported from the package root — plus `scripts/` and tests. Everywhere else, write against `@effect/platform` interfaces (`FileSystem`, `Path`, `Command`, `HttpClient`) and provide `NodeContext.layer` only at the edge
 - **Sync entry points are structural, not tree-shaken**: there is deliberately no barrel mixing node and tasker layers. The package root exports only the platform-free pieces (`sync/contract.ts` + `sync/core.ts`); platform layers live behind the `tasker-effect/sync/node` / `tasker-effect/sync/tasker` subpath exports so a browser/device bundle can never accidentally pull @effect/platform-node's node:* graph (tree-shaking must not be relied on to remove it). Guard tests bundle both the index and sync-profiles for browser and assert no `node:` specifiers
 - `Effect.runPromise` only at edges (scripts, CLI, runtime entry)
-- Tests provide the recording test layer from `makeTaskerTestLayer` — no device needed
+- Tests run under vitest with `@effect/vitest`: `it.effect` by default, `it.live` where real Clock timing matters (the config prompt-polling tests), `it.scoped` for scoped resources like temp dirs; they provide the recording test layer from `makeTaskerTestLayer` — no device needed
 
 ## Development Commands
 
 ```bash
-bun install          # Install deps
-bun run typecheck    # Type check (src/ only)
-bun test             # Run tests
+bun install          # Install deps (prepare patches tsc + oxlint via @effect/tsgo)
+bun run typecheck    # Type check (src/ only; emits Effect LSP diagnostics too)
+bun run lint         # oxlint incl. type-aware Effect LSP rules; warnings fail
+bun run test         # Run tests (vitest + @effect/vitest — NOT `bun test`)
 bun run build        # Compile library to dist/ (npm publish surface)
 bun run compile      # Compile tasks/ to dist-tasker/ (Tasker-ready JS)
 ```
+
+Linting runs on every PR (CI `verify` job) as ONE command: `bun run lint`.
+The Effect language service is `@effect/tsgo` (TS 7 native build); the
+`prepare` script patches the local `typescript` install (so `tsc`/editors
+get Effect diagnostics) and the local `oxlint`/`oxlint-tsgolint` installs
+(so oxlint runs the Effect rules type-aware — `.oxlintrc.json` extends the
+`recommended` preset from `@effect/tsgo/oxlint-presets`). `@effect/tsgo`,
+`oxlint` and `oxlint-tsgolint` are pinned to patch-matched versions —
+upgrade them together via `effect-tsgo setup`. Suppress a false positive
+with `// @effect-diagnostics-next-line <rule>:off` plus a reason (works in
+both tsc and oxlint), or a scoped override in `.oxlintrc.json`.
 
 ## What NOT to do
 

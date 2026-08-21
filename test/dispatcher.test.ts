@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it } from "@effect/vitest";
 import {
   Action,
   Trigger,
@@ -28,6 +28,8 @@ import {
 const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
 const expectValidJs = (code: string) => {
+  // Parses without executing: new Function only compiles the body.
+  // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
   expect(() => new Function(code)).not.toThrow();
 };
 
@@ -53,7 +55,7 @@ const makeProject = () =>
   });
 
 describe("compileDispatcherJs", () => {
-  test("embeds the profile and task maps with slug filenames", () => {
+  it("embeds the profile and task maps with slug filenames", () => {
     const source = compileDispatcherJs(makeProject());
 
     expect(source).toContain(
@@ -65,7 +67,7 @@ describe("compileDispatcherJs", () => {
     expectValidJs(source);
   });
 
-  test("resolves via %par1/%par2 and falls back to %caller1 profile detection", () => {
+  it("resolves via %par1/%par2 and falls back to %caller1 profile detection", () => {
     const source = compileDispatcherJs(makeProject());
     expect(source).toContain('local("par1")');
     expect(source).toContain('local("par2")');
@@ -75,13 +77,13 @@ describe("compileDispatcherJs", () => {
     expect(source).toContain("readFile(path)");
   });
 
-  test("uses %TE_JS_DIR with the documented default", () => {
+  it("uses %TE_JS_DIR with the documented default", () => {
     const source = compileDispatcherJs(makeProject());
     expect(source).toContain('global("TE_JS_DIR")');
     expect(source).toContain('"/sdcard/Tasker/js/"');
   });
 
-  test("escapes names that would break the emitted source", () => {
+  it("escapes names that would break the emitted source", () => {
     const project = new Project({
       name: "Escapes",
       tasks: [
@@ -96,7 +98,7 @@ describe("compileDispatcherJs", () => {
     expectValidJs(source);
   });
 
-  test("flashes clear errors for unknown names", () => {
+  it("flashes clear errors for unknown names", () => {
     const source = compileDispatcherJs(makeProject());
     expect(source).toContain("unknown profile or task");
     expect(source).toContain("could not read");
@@ -106,10 +108,11 @@ describe("compileDispatcherJs", () => {
 describe("taskerProjectXml", () => {
   const xml = taskerProjectXml({ repo: TEST_REPO });
   const expectValidSnippetJs = (code: string) => {
+    // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
     expect(() => new Function(code)).not.toThrow();
   };
 
-  test("is a project export: Project element listing the profile and the three tasks", () => {
+  it("is a project export: Project element listing the profile and the three tasks", () => {
     expect(xml).toContain('<TaskerData sr="" dvi="1"');
     expect(xml).toContain('<Project sr="proj0" ve="2">');
     expect(xml).toContain("<pids>4</pids>");
@@ -121,7 +124,7 @@ describe("taskerProjectXml", () => {
     }
   });
 
-  test("TE Dispatch runs the dispatcher file (code 131, Auto Exit on)", () => {
+  it("TE Dispatch runs the dispatcher file (code 131, Auto Exit on)", () => {
     expect(xml).toContain("<code>131</code>");
     expect(xml).toContain(
       '<Str sr="arg0" ve="3">/sdcard/Tasker/js/dispatcher.js</Str>'
@@ -129,14 +132,14 @@ describe("taskerProjectXml", () => {
     expect(xml).toContain('<Int sr="arg2" val="1"/>');
   });
 
-  test("the TE Sync profile repeats every 6 hours and runs the TE Sync task", () => {
+  it("the TE Sync profile repeats every 6 hours and runs the TE Sync task", () => {
     expect(xml).toContain(`<nme>${SYNC_PROFILE_NAME}</nme>`);
     expect(xml).toContain("<mid0>2</mid0>");
     expect(xml).toContain("<rep>1</rep>");
     expect(xml).toContain("<repval>6</repval>");
   });
 
-  test("the TE Sync bootstrap self-installs sync-profiles.js from the rolling release", () => {
+  it("the TE Sync bootstrap self-installs sync-profiles.js from the rolling release", () => {
     const bootstrap = syncBootstrapJs(TEST_REPO);
     expect(bootstrap).toContain(
       `https://github.com/acme/automations/releases/download/${ROLLING_RELEASE_TAG}/${SYNC_SCRIPT_FILENAME}`
@@ -153,7 +156,7 @@ describe("taskerProjectXml", () => {
     expect(xml).toContain("releases/download/tasker-js-latest/sync-profiles.js");
   });
 
-  test("TE Config has a one-off mode driven by %par1/%par2", () => {
+  it("TE Config has a one-off mode driven by %par1/%par2", () => {
     const scan = configScanJs();
     // One-off mode: prompt for exactly the named global, label from %par2.
     expect(scan).toContain('var par1 = local("par1");');
@@ -166,7 +169,7 @@ describe("taskerProjectXml", () => {
     expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(3);
   });
 
-  test("TE Config scans secrets.json and prompts via For + Input Dialog", () => {
+  it("TE Config scans secrets.json and prompts via For + Input Dialog", () => {
     const scan = configScanJs();
     expect(scan).toContain(SECRETS_FILENAME);
     expect(scan).toContain('setLocal("te_missing", missing.join(","));');
@@ -185,7 +188,7 @@ describe("taskerProjectXml", () => {
     expect(xml).toContain("<code>38</code>"); // End If
   });
 
-  test("supports a custom dispatcher path, XML-escaped", () => {
+  it("supports a custom dispatcher path, XML-escaped", () => {
     const custom = taskerProjectXml({
       repo: TEST_REPO,
       dispatcherPath: "/a/b & c/dispatcher.js",
@@ -195,7 +198,7 @@ describe("taskerProjectXml", () => {
     );
   });
 
-  test("is static scaffolding: identical across projects and free of user content", () => {
+  it("is static scaffolding: identical across projects and free of user content", () => {
     const projectA = makeProject();
     const projectB = new Project({
       name: "Totally Different",
@@ -244,7 +247,7 @@ describe("taskerProjectXml", () => {
 });
 
 describe("compileProjectFiles with dispatcher", () => {
-  test("includes dispatcher.js, secrets.json and the project XML, and documents them in the README", () => {
+  it("includes dispatcher.js, secrets.json and the project XML, and documents them in the README", () => {
     const files = compileProjectFiles(makeProject(), { repo: TEST_REPO });
     const names = files.map((file) => file.filename);
     expect(names).toContain(DISPATCHER_FILENAME);

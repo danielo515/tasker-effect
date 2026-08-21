@@ -46,8 +46,9 @@ flowchart LR
 
 ```bash
 bun install
-bun run typecheck   # type check
-bun test            # run tests
+bun run typecheck   # type check (Effect-aware: tsc is patched by @effect/tsgo)
+bun run lint        # oxlint, including type-aware Effect language service rules
+bun run test        # run tests (vitest + @effect/vitest)
 bun run compile     # compile tasks/ to dist-tasker/
 ```
 

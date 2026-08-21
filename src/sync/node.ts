@@ -80,12 +80,10 @@ export const ZipExtractorNodeLive: Layer.Layer<ZipExtractorTag> = Layer.effect(
             Command.make("unzip", "-o", zipPath, "-d", targetDir)
           );
           if (exitCode !== 0) {
-            return yield* Effect.fail(
-              new ZipExtractError({
-                message: `unzip exited with code ${exitCode}`,
-                path: zipPath,
-              })
-            );
+            return yield* new ZipExtractError({
+              message: `unzip exited with code ${exitCode}`,
+              path: zipPath,
+            });
           }
           return (yield* fs.readDirectory(targetDir)) as ReadonlyArray<string>;
         }).pipe(

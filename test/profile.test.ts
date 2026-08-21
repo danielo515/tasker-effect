@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it } from "@effect/vitest";
 import { Either, Schema } from "effect";
 import {
   Action,
@@ -21,7 +21,7 @@ import {
 import { Effect } from "effect";
 
 describe("interpolation values", () => {
-  test("interpolated actions survive a JSON encode/decode round-trip", () => {
+  it("interpolated actions survive a JSON encode/decode round-trip", () => {
     const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
     const action = Action.flash(fmt`key=${API_KEY} temp=${v("TEMPERATURE")}`);
 
@@ -34,7 +34,7 @@ describe("interpolation values", () => {
     expect((decoded as { text: Interpolated }).text).toBeInstanceOf(Interpolated);
   });
 
-  test("a bare Secret field value round-trips", () => {
+  it("a bare Secret field value round-trips", () => {
     const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
     const action = Action.setGlobal("COPY", API_KEY);
     const encoded = JSON.parse(
@@ -46,25 +46,25 @@ describe("interpolation values", () => {
 });
 
 describe("Action builders", () => {
-  test("flash creates a tagged action with defaults", () => {
+  it("flash creates a tagged action with defaults", () => {
     const action = Action.flash("Hello");
     expect(action._tag).toBe("Flash");
     expect(action.text).toBe("Hello");
     expect(action.long).toBe(false);
   });
 
-  test("setGlobal strips the % prefix", () => {
+  it("setGlobal strips the % prefix", () => {
     const action = Action.setGlobal("%MODE", "night");
     expect(action.name).toBe("MODE");
   });
 
-  test("http defaults headers to an empty record", () => {
+  it("http defaults headers to an empty record", () => {
     const action = Action.http("GET", "https://example.com");
     expect(action.headers).toEqual({});
     expect(action.outputGlobal).toBeUndefined();
   });
 
-  test("when nests actions recursively", () => {
+  it("when nests actions recursively", () => {
     const action = Action.when(
       cond("%BATT", "lt", "20"),
       [Action.flash("Low battery"), Action.setWifi(false)],
@@ -76,7 +76,7 @@ describe("Action builders", () => {
     expect(action.condition.variable).toBe("BATT");
   });
 
-  test("validation rejects invalid values at construction", () => {
+  it("validation rejects invalid values at construction", () => {
     expect(() => Action.vibrate(-5)).toThrow();
     expect(() => Action.flash("")).toThrow();
     expect(() => Action.vibratePattern("abc")).toThrow();
@@ -89,7 +89,7 @@ describe("typed task and profile references", () => {
     actions: [Action.flash("weather")],
   });
 
-  test("performTask takes a Task object and stores only its name", () => {
+  it("performTask takes a Task object and stores only its name", () => {
     const action = Action.performTask(weather, { priority: 10 });
     expect(action._tag).toBe("PerformTask");
     expect(action.taskName).toBe("Weather Check");
@@ -98,7 +98,7 @@ describe("typed task and profile references", () => {
     expect(Object.keys(action)).not.toContain("task");
   });
 
-  test("performTaskerTask references UI-created tasks by name with parameters", () => {
+  it("performTaskerTask references UI-created tasks by name with parameters", () => {
     const action = Action.performTaskerTask("Hand Made", {
       priority: 7,
       parameterOne: "now",
@@ -110,7 +110,7 @@ describe("typed task and profile references", () => {
     expect(action.parameterTwo).toBe("fast");
   });
 
-  test("enableProfile takes a Profile object; enableTaskerProfile a name", () => {
+  it("enableProfile takes a Profile object; enableTaskerProfile a name", () => {
     const profile = new Profile({
       name: "Night Mode",
       triggers: [Trigger.time({ hour: 22, minute: 0 })],
@@ -129,7 +129,7 @@ describe("typed task and profile references", () => {
 });
 
 describe("Trigger builders", () => {
-  test("time trigger validates hours and minutes", () => {
+  it("time trigger validates hours and minutes", () => {
     const trigger = Trigger.time(
       { hour: 7, minute: 0 },
       { to: { hour: 9, minute: 30 }, days: ["monday", "friday"] }
@@ -139,11 +139,11 @@ describe("Trigger builders", () => {
     expect(() => Trigger.time({ hour: 25, minute: 0 })).toThrow();
   });
 
-  test("battery trigger validates range", () => {
+  it("battery trigger validates range", () => {
     expect(() => Trigger.batteryLevel(0, 150)).toThrow();
   });
 
-  test("location trigger validates coordinates", () => {
+  it("location trigger validates coordinates", () => {
     expect(() => Trigger.location(200, 0, 100)).toThrow();
   });
 });
@@ -158,7 +158,7 @@ describe("Task / Profile / Project", () => {
     ],
   });
 
-  test("Task.make works as advertised", () => {
+  it("Task.make works as advertised", () => {
     const t = Task.make({
       name: "T",
       actions: [Action.flash("x")],
@@ -166,7 +166,7 @@ describe("Task / Profile / Project", () => {
     expect(t.name).toBe("T");
   });
 
-  test("requires at least one action", () => {
+  it("requires at least one action", () => {
     const result = Schema.decodeUnknownEither(Task)({
       name: "Empty",
       actions: [],
@@ -174,7 +174,7 @@ describe("Task / Profile / Project", () => {
     expect(Either.isLeft(result)).toBe(true);
   });
 
-  test("profile bundles triggers with tasks", () => {
+  it("profile bundles triggers with tasks", () => {
     const profile = new Profile({
       name: "Weekday mornings",
       triggers: [Trigger.time({ hour: 7, minute: 0 })],
@@ -184,30 +184,32 @@ describe("Task / Profile / Project", () => {
     expect(profile.exit).toBeUndefined();
   });
 
-  test("project defaults to empty collections", () => {
+  it("project defaults to empty collections", () => {
     const project = new Project({ name: "My Automations" });
     expect(project.profiles).toEqual([]);
     expect(project.tasks).toEqual([]);
   });
 
-  test("decodeTask round-trips encoded data including nested If", async () => {
-    const original = new Task({
-      name: "Nested",
-      actions: [
-        Action.when(cond("BATT", "lt", "20"), [Action.flash("low")]),
-      ],
-    });
-    const encoded = Schema.encodeSync(Task)(original);
-    const decoded = await Effect.runPromise(decodeTask(encoded));
-    expect(decoded.name).toBe("Nested");
-    const first = decoded.actions[0];
-    expect(first._tag).toBe("If");
-    expect((first as If).then[0]?._tag).toBe("Flash");
-  });
+  it.effect("decodeTask round-trips encoded data including nested If", () =>
+    Effect.gen(function* () {
+      const original = new Task({
+        name: "Nested",
+        actions: [
+          Action.when(cond("BATT", "lt", "20"), [Action.flash("low")]),
+        ],
+      });
+      const encoded = yield* Schema.encode(Task)(original);
+      const decoded = yield* decodeTask(encoded);
+      expect(decoded.name).toBe("Nested");
+      const first = decoded.actions[0];
+      expect(first._tag).toBe("If");
+      expect((first as If).then[0]?._tag).toBe("Flash");
+    })
+  );
 });
 
 describe("variable helpers", () => {
-  test("distinguishes global from local names", () => {
+  it("distinguishes global from local names", () => {
     expect(isGlobalVariable("%BATT")).toBe(true);
     expect(isGlobalVariable("counter")).toBe(false);
     expect(variableName("%WIFI")).toBe("WIFI");
