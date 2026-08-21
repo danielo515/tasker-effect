@@ -293,7 +293,11 @@ const { layer, calls } = makeTaskerTestLayer({
 ## Keeping devices up to date
 
 CI compiles `tasks/` on every push, uploads the result as the `tasker-js`
-artifact and refreshes a rolling GitHub release (`tasker-js-latest`).
+artifact and publishes two kinds of GitHub release: a rolling one
+(`tasker-js-latest`) whose assets always mirror the newest green commit —
+stale assets are pruned, so it contains exactly what the build produces —
+and an immutable per-push snapshot (`tasker-js-vN`, marked "not latest" so
+devices ignore it).
 
 **One-time device setup:**
 
@@ -318,6 +322,14 @@ an action runs — nothing is cached. Each **TE Sync** run overwrites
 `writeFile`), so the next time any profile fires it executes the new code.
 This applies to DSL-generated files, Effect bundles, `secrets.json`, and
 `sync-profiles.js` itself, which updates its own file too.
+
+**Rolling back a bad build:** every master push also publishes an immutable
+snapshot release (`tasker-js-vN`). If a build misbehaves on-device, run the
+**Rollback rolling release** workflow (Actions tab) with the snapshot tag to
+restore — it repoints the rolling release's assets at that snapshot, and
+devices pick it up on their next **TE Sync** run (run the task manually to
+apply immediately). The next push to master ships a fresh build over the
+rolling release again, so a rollback is a stopgap until a fix lands.
 
 **The one manual step that remains:** Tasker's JS API cannot create
 profiles or triggers, so a *brand-new* profile still needs its trigger
