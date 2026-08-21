@@ -13,6 +13,7 @@
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
+import { NodeContext } from "@effect/platform-node";
 import { Effect, Layer } from "effect";
 import { detectRepoFromGit } from "../src/cli.js";
 import { TaskerCompiler } from "../src/compiler.js";
@@ -79,7 +80,9 @@ const main = Effect.gen(function* () {
 
 void Effect.runPromise(
   main.pipe(
-    Effect.provide(Layer.mergeAll(TaskerCompiler.Default, FileStore.Default))
+    Effect.provide(
+      Layer.mergeAll(TaskerCompiler.Default, FileStore.Default, NodeContext.layer)
+    )
   )
 ).catch((error) => {
   console.error(error);

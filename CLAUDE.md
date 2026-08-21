@@ -27,7 +27,7 @@ src/
 │   ├── core.ts       # ProfileSync program against @effect/platform HttpClient (platform-free)
 │   ├── node.ts       # Desktop layers — entry point `tasker-effect/sync/node` (@effect/platform-node)
 │   └── tasker.ts     # On-device layers — entry point `tasker-effect/sync/tasker` (Tasker builtins)
-└── cli.ts            # `tasker-effect compile` for consumer repos
+└── cli.ts            # `tasker-effect compile` for consumer repos (@effect/cli + NodeContext edge)
 tasks/
 ├── automations.ts    # DSL definitions compiled by CI
 └── scripts/*.ts      # Effect programs, each bundled to a single JS file
@@ -53,7 +53,7 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 - `Effect.Service` for services (`Tasker`, `TaskerCompiler`, `ProfileSync`, …); plain `Context.Tag` for the platform-injected sync capabilities (`FileStore`, `ZipExtractor`)
 - `Schema.TaggedError` for every error; handle with `Effect.catchTag`/`catchTags`
 - `Schema.TaggedClass` for DSL actions/triggers; validation happens at construction
-- `Layer` composition to swap Node vs on-device implementations (`SyncNodeLive` vs `SyncTaskerLive`); HTTP goes through `@effect/platform`'s `HttpClient` (`FetchHttpClient.layer` on both platforms). `@effect/platform-node` may only be imported from `src/sync/node.ts` (and tests)
+- `Layer` composition to swap Node vs on-device implementations (`SyncNodeLive` vs `SyncTaskerLive`); HTTP goes through `@effect/platform`'s `HttpClient` (`FetchHttpClient.layer` on both platforms). `@effect/platform-node` may only be imported from `src/sync/node.ts` and `src/cli.ts` — the two sanctioned Node edges, neither exported from the package root — plus `scripts/` and tests. Everywhere else, write against `@effect/platform` interfaces (`FileSystem`, `Path`, `Command`, `HttpClient`) and provide `NodeContext.layer` only at the edge
 - **Sync entry points are structural, not tree-shaken**: there is deliberately no barrel mixing node and tasker layers. The package root exports only the platform-free pieces (`sync/contract.ts` + `sync/core.ts`); platform layers live behind the `tasker-effect/sync/node` / `tasker-effect/sync/tasker` subpath exports so a browser/device bundle can never accidentally pull @effect/platform-node's node:* graph (tree-shaking must not be relied on to remove it). Guard tests bundle both the index and sync-profiles for browser and assert no `node:` specifiers
 - `Effect.runPromise` only at edges (scripts, CLI, runtime entry)
 - Tests provide the recording test layer from `makeTaskerTestLayer` — no device needed

@@ -2,7 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, Either, Layer } from "effect";
+import { Effect, Layer } from "effect";
+import { NodeContext } from "@effect/platform-node";
 import { Action, Task } from "../src/profile.js";
 import { TaskerCompiler } from "../src/compiler.js";
 import { FileStore } from "../src/sync/node.js";
@@ -10,7 +11,6 @@ import {
   asCompilable,
   collectCompilables,
   compileEntry,
-  parseCliArgs,
   parseGitHubRepo,
 } from "../src/cli.js";
 import * as fixture from "./fixtures/cli-entry.js";
@@ -19,7 +19,11 @@ const REPO_ROOT = join(import.meta.dir, "..");
 const FIXTURE_ENTRY = join(import.meta.dir, "fixtures", "cli-entry.ts");
 const EMPTY_ENTRY = join(import.meta.dir, "fixtures", "cli-empty.ts");
 
-const CliTestLayer = Layer.mergeAll(TaskerCompiler.Default, FileStore.Default);
+const CliTestLayer = Layer.mergeAll(
+  TaskerCompiler.Default,
+  FileStore.Default,
+  NodeContext.layer
+);
 
 const tempDirs: Array<string> = [];
 const makeTempDir = () => {
@@ -29,58 +33,6 @@ const makeTempDir = () => {
 };
 afterAll(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
-});
-
-describe("parseCliArgs", () => {
-  test("no args means help", () => {
-    expect(Either.getOrThrow(parseCliArgs([]))).toEqual({ _tag: "Help" });
-    expect(Either.getOrThrow(parseCliArgs(["--help"]))).toEqual({ _tag: "Help" });
-  });
-
-  test("compile with defaults", () => {
-    expect(Either.getOrThrow(parseCliArgs(["compile"]))).toEqual({
-      _tag: "Compile",
-      entry: undefined,
-      outDir: "dist-tasker",
-      repo: undefined,
-    });
-  });
-
-  test("compile with entry and --out", () => {
-    expect(
-      Either.getOrThrow(parseCliArgs(["compile", "my/entry.ts", "--out", "build"]))
-    ).toEqual({
-      _tag: "Compile",
-      entry: "my/entry.ts",
-      outDir: "build",
-      repo: undefined,
-    });
-  });
-
-  test("--repo overrides repo detection", () => {
-    expect(
-      Either.getOrThrow(parseCliArgs(["compile", "--repo", "acme/automations"]))
-    ).toEqual({
-      _tag: "Compile",
-      entry: undefined,
-      outDir: "dist-tasker",
-      repo: { owner: "acme", repo: "automations" },
-    });
-  });
-
-  test("rejects unknown commands and options", () => {
-    expect(Either.isLeft(parseCliArgs(["frobnicate"]))).toBe(true);
-    expect(Either.isLeft(parseCliArgs(["compile", "--wat"]))).toBe(true);
-    expect(Either.isLeft(parseCliArgs(["compile", "--out"]))).toBe(true);
-    expect(Either.isLeft(parseCliArgs(["compile", "a.ts", "b.ts"]))).toBe(true);
-    expect(Either.isLeft(parseCliArgs(["compile", "--repo"]))).toBe(true);
-    expect(Either.isLeft(parseCliArgs(["compile", "--repo", "not-a-slug"]))).toBe(
-      true
-    );
-    expect(
-      Either.isLeft(parseCliArgs(["compile", "--repo", "too/many/parts"]))
-    ).toBe(true);
-  });
 });
 
 describe("parseGitHubRepo", () => {
@@ -136,7 +88,13 @@ describe("export scanning", () => {
 });
 
 describe("compileEntry", () => {
-  const run = <A, E>(effect: Effect.Effect<A, E, TaskerCompiler | FileStore>) =>
+  const run = <A, E>(
+    effect: Effect.Effect<
+      A,
+      E,
+      TaskerCompiler | FileStore | NodeContext.NodeContext
+    >
+  ) =>
     Effect.runPromise(effect.pipe(Effect.provide(CliTestLayer)) as Effect.Effect<A, E>);
 
   test("compiles every export of the fixture into the output dir", async () => {
@@ -208,8 +166,34 @@ describe("CLI end-to-end (spawned)", () => {
   test("--help prints usage and exits 0", async () => {
     const { stdout, exitCode } = await runCliProcess(["--help"]);
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("tasker-effect compile [entry] [--out <dir>]");
+    expect(stdout).toContain("compile");
     expect(stdout).toContain("esbuild");
+  });
+
+  test("no arguments prints help and exits 0", async () => {
+    const { stdout, exitCode } = await runCliProcess([]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("compile");
+  });
+
+  test("compile --help documents the options", async () => {
+    const { stdout, exitCode } = await runCliProcess(["compile", "--help"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("--out");
+    expect(stdout).toContain("--repo");
+    expect(stdout).toContain("tasks/automations.ts");
+  });
+
+  test("rejects a malformed --repo with exit code 1", async () => {
+    const { stderr, exitCode } = await runCliProcess([
+      "compile",
+      "--repo",
+      "not-a-slug",
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain(
+      "--repo requires a GitHub repository as <owner>/<name>"
+    );
   });
 
   test("compiles a fixture entry to the requested output dir", async () => {
