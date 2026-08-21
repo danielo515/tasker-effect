@@ -17,16 +17,13 @@ jobs:
         with:
           bun-version: latest
 
-      # Also runs the `prepare` script, which patches the local TypeScript
-      # install with @effect/tsgo so tsc emits Effect diagnostics.
+      # Also runs the `prepare` script, which patches the local TypeScript and
+      # oxlint installs with @effect/tsgo so both emit Effect diagnostics.
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Lint (oxlint)
+      - name: Lint (oxlint + Effect language service rules)
         run: bun run lint --format=github
-
-      - name: Effect language service diagnostics
-        run: bun run lint:effect --format github-actions
 
       - name: Type check
         run: bun run typecheck

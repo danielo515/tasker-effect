@@ -14,7 +14,7 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { NodeContext } from "@effect/platform-node";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Schema } from "effect";
 import { detectRepoFromGit } from "../src/cli.js";
 import { TaskerCompiler } from "../src/compiler.js";
 import { FileStore } from "../src/sync/node.js";
@@ -22,6 +22,10 @@ import { automations } from "../tasks/automations.js";
 
 const OUTPUT_DIR = "dist-tasker";
 const SCRIPTS_DIR = "tasks/scripts";
+
+class BundleError extends Schema.TaggedError<BundleError>()("BundleError", {
+  message: Schema.String,
+}) {}
 
 const compileDslProject = Effect.gen(function* () {
   const compiler = yield* TaskerCompiler;
@@ -53,13 +57,14 @@ const bundleEffectScripts = Effect.gen(function* () {
         minify: true,
         sourcemap: "none",
       }),
-    catch: (cause) => new Error(`Bun.build failed: ${String(cause)}`),
+    catch: (cause) =>
+      new BundleError({ message: `Bun.build failed: ${String(cause)}` }),
   });
 
   if (!result.success) {
-    return yield* Effect.fail(
-      new Error(result.logs.map((log) => log.message).join("\n"))
-    );
+    return yield* new BundleError({
+      message: result.logs.map((log) => log.message).join("\n"),
+    });
   }
 
   for (const entry of entrypoints) {

@@ -1,6 +1,13 @@
 {
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "$schema": "./node_modules/@effect/tsgo/oxlint-schema.json",
+  "extends": ["./node_modules/@effect/tsgo/oxlint-presets/recommended.json"],
   "ignorePatterns": ["dist", "dist-tasker", "coverage"],
+  "rules": {
+    // DSL values are Schema.TaggedClass instances validated at construction;
+    // `instanceof Task`/`Profile`/... in the compiler and CLI is the intended
+    // nominal identity check, not a structural one.
+    "effecttsgo/instance-of-schema": "off"
+  },
   "overrides": [
     {
       "files": ["src/profile.ts"],
@@ -8,6 +15,30 @@
         // The If action intentionally models if/then/else: `then` is an array
         // of actions, never a function, so it cannot be mistaken for a promise.
         "unicorn/no-thenable": "off"
+      }
+    },
+    {
+      // scripts/ and bin/ are sanctioned Node/Bun edges (see CLAUDE.md):
+      // node builtins and console at the runPromise boundary are fine there.
+      "files": ["scripts/**", "bin/**"],
+      "rules": {
+        "effecttsgo/node-builtin-import": "off",
+        "effecttsgo/global-console": "off"
+      }
+    },
+    {
+      // Tests run under bun test on Node: async callbacks around
+      // Effect.runPromise, node builtins, fixtures that log, eval of
+      // generated compiler output, and String(error) assertions (runtime
+      // toString exists even where the type does not declare it) are all
+      // deliberate.
+      "files": ["test/**"],
+      "rules": {
+        "effecttsgo/async-function": "off",
+        "effecttsgo/node-builtin-import": "off",
+        "effecttsgo/global-console": "off",
+        "typescript/no-implied-eval": "off",
+        "typescript/no-base-to-string": "off"
       }
     }
   ]
