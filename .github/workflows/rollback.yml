@@ -1,0 +1,35 @@
+name: Rollback rolling release
+
+# Repoint the rolling release (what devices sync from) at the assets of a
+# versioned snapshot (tasker-js-vN). Devices pick it up on their next
+# TE Sync run (or run the TE Sync task manually to apply it immediately).
+# Note the next push to master publishes a fresh build over the rolling
+# release again — a rollback is a stopgap until a fix lands.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Snapshot tag to roll back to (e.g. tasker-js-v42)"
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    name: Point rolling release at snapshot
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download snapshot assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: gh release download "$TAG" --dir rollback-assets
+
+      - name: Update rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/update-rolling-release.sh rollback-assets
