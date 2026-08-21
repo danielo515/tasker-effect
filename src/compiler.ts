@@ -97,7 +97,6 @@ export const emitText = (value: Text): string => {
   if (typeof value === "string") return js(value);
   if (value instanceof Secret) return `global(${js(value.name)})`;
   if (value instanceof VariableRef) return readVarExpr(value.name);
-  if (value.parts.length === 0) return '""';
   return value.parts
     .map((part) =>
       typeof part === "string"

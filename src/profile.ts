@@ -120,12 +120,14 @@ export type TextPart = typeof TextPart.Type;
 /**
  * An interpolated string: literal parts mixed with secret/variable
  * references. Built with the {@link fmt} tagged template; compiles to a JS
- * concatenation (`"lit" + global("NAME") + …`).
+ * concatenation (`"lit" + global("NAME") + …`). At least one part is
+ * required — {@link fmt} returns a plain string for reference-free templates,
+ * and the compiler relies on the parts producing a non-empty expression.
  */
 export class Interpolated extends Schema.TaggedClass<Interpolated>()(
   "Interpolated",
   {
-    parts: Schema.Array(TextPart),
+    parts: Schema.Array(TextPart).pipe(Schema.minItems(1)),
   }
 ) {}
 
