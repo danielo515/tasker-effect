@@ -10,14 +10,6 @@
   },
   "overrides": [
     {
-      "files": ["src/profile.ts"],
-      "rules": {
-        // The If action intentionally models if/then/else: `then` is an array
-        // of actions, never a function, so it cannot be mistaken for a promise.
-        "unicorn/no-thenable": "off"
-      }
-    },
-    {
       // scripts/ and bin/ are sanctioned Node/Bun edges (see CLAUDE.md):
       // node builtins and console at the runPromise boundary are fine there.
       "files": ["scripts/**", "bin/**"],

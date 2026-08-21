@@ -538,6 +538,9 @@ export class JavaScript extends Schema.TaggedClass<JavaScript>()("JavaScript", {
 /** Conditional block over a Tasker variable */
 export class If extends Schema.TaggedClass<If>()("If", {
   condition: Condition,
+  // If intentionally models if/then/else: `then` is an array of actions,
+  // never a function, so it cannot be mistaken for a promise.
+  // oxlint-disable-next-line unicorn/no-thenable
   then: Schema.Array(
     Schema.suspend((): Schema.Schema<Action, ActionEncoded> => ActionSchema)
   ),
@@ -994,6 +997,7 @@ export const Action = {
     condition: Condition,
     then: ReadonlyArray<Action>,
     orElse: ReadonlyArray<Action> = []
+    // oxlint-disable-next-line unicorn/no-thenable -- If's then/else branches
   ) => new If({ condition, then, orElse }),
 } as const;
 
