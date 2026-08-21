@@ -5,4 +5,6 @@
  */
 import * as taskerEffect from "../../src/index.js";
 
-console.log(Object.keys(taskerEffect).length);
+// Reference the whole namespace so the bundler keeps the full index graph.
+(globalThis as { __taskerEffectIndexGuard?: number }).__taskerEffectIndexGuard =
+  Object.keys(taskerEffect).length;

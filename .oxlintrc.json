@@ -7,22 +7,5 @@
     // `instanceof Task`/`Profile`/... in the compiler and CLI is the intended
     // nominal identity check, not a structural one.
     "effecttsgo/instance-of-schema": "off"
-  },
-  "overrides": [
-    {
-      // Tests run under bun test on Node: async callbacks around
-      // Effect.runPromise, node builtins, fixtures that log, eval of
-      // generated compiler output, and String(error) assertions (runtime
-      // toString exists even where the type does not declare it) are all
-      // deliberate.
-      "files": ["test/**"],
-      "rules": {
-        "effecttsgo/async-function": "off",
-        "effecttsgo/node-builtin-import": "off",
-        "effecttsgo/global-console": "off",
-        "typescript/no-implied-eval": "off",
-        "typescript/no-base-to-string": "off"
-      }
-    }
-  ]
+  }
 }

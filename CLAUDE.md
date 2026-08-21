@@ -56,7 +56,7 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 - `Layer` composition to swap Node vs on-device implementations (`SyncNodeLive` vs `SyncTaskerLive`); HTTP goes through `@effect/platform`'s `HttpClient` (`FetchHttpClient.layer` on both platforms). `@effect/platform-node` may only be imported from `src/sync/node.ts` and `src/cli.ts` — the two sanctioned Node edges, neither exported from the package root — plus `scripts/` and tests. Everywhere else, write against `@effect/platform` interfaces (`FileSystem`, `Path`, `Command`, `HttpClient`) and provide `NodeContext.layer` only at the edge
 - **Sync entry points are structural, not tree-shaken**: there is deliberately no barrel mixing node and tasker layers. The package root exports only the platform-free pieces (`sync/contract.ts` + `sync/core.ts`); platform layers live behind the `tasker-effect/sync/node` / `tasker-effect/sync/tasker` subpath exports so a browser/device bundle can never accidentally pull @effect/platform-node's node:* graph (tree-shaking must not be relied on to remove it). Guard tests bundle both the index and sync-profiles for browser and assert no `node:` specifiers
 - `Effect.runPromise` only at edges (scripts, CLI, runtime entry)
-- Tests provide the recording test layer from `makeTaskerTestLayer` — no device needed
+- Tests run under vitest with `@effect/vitest`: `it.effect` by default, `it.live` where real Clock timing matters (the config prompt-polling tests), `it.scoped` for scoped resources like temp dirs; they provide the recording test layer from `makeTaskerTestLayer` — no device needed
 
 ## Development Commands
 
@@ -64,7 +64,7 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 bun install          # Install deps (prepare patches tsc + oxlint via @effect/tsgo)
 bun run typecheck    # Type check (src/ only; emits Effect LSP diagnostics too)
 bun run lint         # oxlint incl. type-aware Effect LSP rules; warnings fail
-bun test             # Run tests
+bun run test         # Run tests (vitest + @effect/vitest — NOT `bun test`)
 bun run build        # Compile library to dist/ (npm publish surface)
 bun run compile      # Compile tasks/ to dist-tasker/ (Tasker-ready JS)
 ```

@@ -48,7 +48,7 @@ flowchart LR
 bun install
 bun run typecheck   # type check (Effect-aware: tsc is patched by @effect/tsgo)
 bun run lint        # oxlint, including type-aware Effect language service rules
-bun test            # run tests
+bun run test        # run tests (vitest + @effect/vitest)
 bun run compile     # compile tasks/ to dist-tasker/
 ```
 
