@@ -116,19 +116,15 @@ export const detectRepoFromGit = Effect.fn("cli.detectRepoFromGit")(
       )
     );
     if (exitCode !== 0) {
-      return yield* Effect.fail(
-        new RepoDetectionError({
-          message: `\`git remote get-url origin\` failed with exit code ${exitCode}`,
-        })
-      );
+      return yield* new RepoDetectionError({
+        message: `\`git remote get-url origin\` failed with exit code ${exitCode}`,
+      });
     }
     const repo = parseGitHubRepo(output);
     if (repo === undefined) {
-      return yield* Effect.fail(
-        new RepoDetectionError({
-          message: `The origin remote "${output.trim()}" is not a GitHub repository URL`,
-        })
-      );
+      return yield* new RepoDetectionError({
+        message: `The origin remote "${output.trim()}" is not a GitHub repository URL`,
+      });
     }
     return repo;
   }
@@ -203,12 +199,10 @@ const resolveEntry = Effect.fn("cli.resolveEntry")(function* (
       .pipe(Effect.orElseSucceed(() => false));
     if (exists) return path.resolve(candidate);
   }
-  return yield* Effect.fail(
-    new EntryNotFoundError({
-      message: `Entry module not found. Tried: ${candidates.join(", ")}`,
-      tried: candidates,
-    })
-  );
+  return yield* new EntryNotFoundError({
+    message: `Entry module not found. Tried: ${candidates.join(", ")}`,
+    tried: candidates,
+  });
 });
 
 const importEntry = Effect.fn("cli.importEntry")(function* (entryPath: string) {
@@ -261,14 +255,12 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
   const module = yield* importEntry(entryPath);
   const compilables = collectCompilables(module);
   if (compilables.length === 0) {
-    return yield* Effect.fail(
-      new NoCompilableExportsError({
-        message:
-          `${entryPath} has no compilable exports. ` +
-          "Export (default or named) Project, Profile or Task instances from tasker-effect.",
-        entry: entryPath,
-      })
-    );
+    return yield* new NoCompilableExportsError({
+      message:
+        `${entryPath} has no compilable exports. ` +
+        "Export (default or named) Project, Profile or Task instances from tasker-effect.",
+      entry: entryPath,
+    });
   }
 
   // Only Project compiles need the repo (for the sync bootstrap in the

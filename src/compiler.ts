@@ -167,6 +167,9 @@ const opt = (value: Text | undefined): string =>
 
 /** Compile one action to JavaScript source lines (unindented) */
 export const emitAction = (action: Action): Array<string> =>
+  // The chain is split across two .pipe calls because a single call would
+  // exceed pipe's typed overload arity.
+  // @effect-diagnostics-next-line unnecessaryPipeChain:off
   Match.value(action).pipe(
     Match.tag("Flash", (a) => [
       `${a.long ? "flashLong" : "flash"}(${emitText(a.text)});`,
