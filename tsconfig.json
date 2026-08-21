@@ -1,4 +1,5 @@
 {
+  "$schema": "./node_modules/@effect/tsgo/schema.json",
   "compilerOptions": {
     "target": "ESNext",
     "module": "NodeNext",
@@ -15,7 +16,12 @@
     "outDir": "dist",
     "rootDir": "src",
     "lib": ["ESNext"],
-    "types": ["bun-types"]
+    "types": ["bun-types"],
+    "plugins": [
+      {
+        "name": "@effect/language-service"
+      }
+    ]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

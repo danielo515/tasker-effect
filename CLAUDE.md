@@ -61,12 +61,22 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 ## Development Commands
 
 ```bash
-bun install          # Install deps
-bun run typecheck    # Type check (src/ only)
+bun install          # Install deps (prepare patches tsc with @effect/tsgo)
+bun run typecheck    # Type check (src/ only; emits Effect LSP diagnostics too)
+bun run lint         # oxlint — fast general linting, warnings fail (.oxlintrc.json)
+bun run lint:effect  # Effect language service diagnostics (--strict: warnings fail)
 bun test             # Run tests
 bun run build        # Compile library to dist/ (npm publish surface)
 bun run compile      # Compile tasks/ to dist-tasker/ (Tasker-ready JS)
 ```
+
+Linting runs on every PR (CI `verify` job). The Effect language service is
+`@effect/tsgo` (TS 7 native build): the `prepare` script patches the local
+`typescript` install so `tsc`/editors get Effect diagnostics, and
+`lint:effect` runs them standalone. `@effect/tsgo` is pinned exact — its
+patch replaces the tsc binary with a build matched to that version; upgrade
+both together. Suppress a false positive with
+`// @effect-diagnostics-next-line <rule>:off` plus a reason.
 
 ## What NOT to do
 
