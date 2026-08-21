@@ -167,8 +167,10 @@ const opt = (value: Text | undefined): string =>
 
 /** Compile one action to JavaScript source lines (unindented) */
 export const emitAction = (action: Action): Array<string> =>
-  // The chain is split across two .pipe calls because a single call would
-  // exceed pipe's typed overload arity.
+  // The chain is split across two .pipe calls because a single call cannot
+  // type it: Pipeable's pipe() is overloaded for at most 21 functions, and
+  // this match has 35 tags + Match.exhaustive. Merging them makes inference
+  // collapse to `never` (verified: tsc rejects the merged chain).
   // @effect-diagnostics-next-line unnecessaryPipeChain:off
   Match.value(action).pipe(
     Match.tag("Flash", (a) => [

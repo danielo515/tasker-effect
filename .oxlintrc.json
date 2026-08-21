@@ -10,15 +10,6 @@
   },
   "overrides": [
     {
-      // scripts/ and bin/ are sanctioned Node/Bun edges (see CLAUDE.md):
-      // node builtins and console at the runPromise boundary are fine there.
-      "files": ["scripts/**", "bin/**"],
-      "rules": {
-        "effecttsgo/node-builtin-import": "off",
-        "effecttsgo/global-console": "off"
-      }
-    },
-    {
       // Tests run under bun test on Node: async callbacks around
       // Effect.runPromise, node builtins, fixtures that log, eval of
       // generated compiler output, and String(error) assertions (runtime
