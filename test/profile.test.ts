@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Either, Schema } from "effect";
 import {
   Action,
+  ActionSchema,
   Trigger,
   Task,
   Profile,
@@ -9,11 +10,40 @@ import {
   TimeOfDay,
   cond,
   decodeTask,
+  fmt,
   isGlobalVariable,
+  secret,
+  v,
   variableName,
   If,
+  Interpolated,
 } from "../src/profile.js";
 import { Effect } from "effect";
+
+describe("interpolation values", () => {
+  test("interpolated actions survive a JSON encode/decode round-trip", () => {
+    const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+    const action = Action.flash(fmt`key=${API_KEY} temp=${v("TEMPERATURE")}`);
+
+    const encoded = JSON.parse(
+      JSON.stringify(Schema.encodeUnknownSync(ActionSchema)(action))
+    );
+    const decoded = Schema.decodeUnknownSync(ActionSchema)(encoded);
+
+    expect(decoded).toEqual(action);
+    expect((decoded as { text: Interpolated }).text).toBeInstanceOf(Interpolated);
+  });
+
+  test("a bare Secret field value round-trips", () => {
+    const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+    const action = Action.setGlobal("COPY", API_KEY);
+    const encoded = JSON.parse(
+      JSON.stringify(Schema.encodeUnknownSync(ActionSchema)(action))
+    );
+    const decoded = Schema.decodeUnknownSync(ActionSchema)(encoded);
+    expect(decoded).toEqual(action);
+  });
+});
 
 describe("Action builders", () => {
   test("flash creates a tagged action with defaults", () => {

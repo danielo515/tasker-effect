@@ -142,6 +142,33 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
     expect(written.has("/tmp/tasker-js/README.md")).toBe(false);
   });
 
+  test("syncs .json assets (the secrets manifest) by default", async () => {
+    const { layer, written } = makeStubs({
+      releaseJson: {
+        tag_name: "v1.3.0",
+        assets: [
+          ...release.assets,
+          {
+            name: "secrets.json",
+            browser_download_url: "https://example.com/secrets.json",
+            size: 20,
+          },
+        ],
+      },
+    });
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullLatestProfiles(baseOptions);
+      }).pipe(Effect.provide(layer))
+    );
+
+    expect(result.files.sort()).toEqual(["morning-routine.js", "secrets.json"]);
+    expect(written.has("/tmp/tasker-js/secrets.json")).toBe(true);
+    expect(written.has("/tmp/tasker-js/README.md")).toBe(false);
+  });
+
   test("honours custom asset suffixes", async () => {
     const { layer, written } = makeStubs();
 

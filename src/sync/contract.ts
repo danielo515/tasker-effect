@@ -109,7 +109,10 @@ export interface SyncOptions {
   readonly targetDir?: string;
   /** GitHub token; required for artifact downloads and private repos */
   readonly token?: string;
-  /** File suffixes to download from release assets. Default: [".js"] */
+  /**
+   * File suffixes to download from release assets.
+   * Default: {@link DEFAULT_ASSET_SUFFIXES}
+   */
   readonly assetSuffixes?: ReadonlyArray<string>;
   /** CI artifact name to look for. Default: "tasker-js" */
   readonly artifactName?: string;
@@ -125,6 +128,13 @@ export interface SyncResult {
 }
 
 export const DEFAULT_TARGET_DIR = "/sdcard/Tasker/js";
+
+/**
+ * Release-asset suffixes synced by default: compiled JS plus the
+ * `secrets.json` manifest. Deliberately excludes the importable
+ * `tasker-effect.prj.xml` — that is one-time scaffolding, not device state.
+ */
+export const DEFAULT_ASSET_SUFFIXES: ReadonlyArray<string> = [".js", ".json"];
 
 // =============================================================================
 // Platform capability services

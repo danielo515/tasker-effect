@@ -10,9 +10,9 @@
  *
  * Two sources are supported:
  *
- * - **Releases** (default): downloads the `.js` assets of the latest GitHub
- *   release. Public repos need no token and downloads are plain text, so
- *   this path works both under Node/Bun and inside Tasker.
+ * - **Releases** (default): downloads the `.js`/`.json` assets of the latest
+ *   GitHub release. Public repos need no token and downloads are plain text,
+ *   so this path works both under Node/Bun and inside Tasker.
  * - **Actions artifacts**: downloads the newest CI artifact zip via the
  *   GitHub API (token required) and extracts it. Intended for Node/CI use.
  */
@@ -22,6 +22,7 @@ import { Effect, Schema } from "effect";
 import {
   Artifact,
   ArtifactsResponse,
+  DEFAULT_ASSET_SUFFIXES,
   DEFAULT_TARGET_DIR,
   DownloadError,
   FileStore,
@@ -112,11 +113,11 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
         Effect.catchTags(downloadErrors(url))
       );
 
-    /** Pull the .js assets of the latest release. Works on-device. */
+    /** Pull the .js/.json assets of the latest release. Works on-device. */
     const pullLatestProfiles = Effect.fn("ProfileSync.pullLatestProfiles")(
       function* (options: SyncOptions) {
         const targetDir = options.targetDir ?? DEFAULT_TARGET_DIR;
-        const suffixes = options.assetSuffixes ?? [".js"];
+        const suffixes = options.assetSuffixes ?? DEFAULT_ASSET_SUFFIXES;
         const url = `https://api.github.com/repos/${options.owner}/${options.repo}/releases/latest`;
 
         const payload = yield* getJson(url, options.token);

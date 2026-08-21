@@ -43,6 +43,7 @@
     "url": "git+https://github.com/danielo515/tasker-effect.git"
   },
   "dependencies": {
+    "@effect/cli": "^0.77.0",
     "@effect/platform": "^0.97.1",
     "@effect/platform-node": "^0.108.1",
     "effect": "^3.22.1"

@@ -11,17 +11,24 @@ import {
   Project,
   cond,
 } from "../src/profile.js";
+import { Interpolated, Secret, fmt, secret, v } from "../src/profile.js";
 import {
   CompileError,
+  SECRETS_FILENAME,
   TaskerCompiler,
+  collectProjectSecrets,
+  compileSecretsJson,
   compileTaskToJs,
   compileProfileFiles,
   compileProjectFiles,
   conditionExpr,
   describeTrigger,
   emitAction,
+  emitText,
   slugify,
 } from "../src/compiler.js";
+
+const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
 const expectValidJs = (code: string) => {
   // Throws SyntaxError if the emitted code does not parse.
@@ -163,7 +170,7 @@ describe("compileProjectFiles", () => {
       ],
     });
 
-    const files = compileProjectFiles(project);
+    const files = compileProjectFiles(project, { repo: TEST_REPO });
     const names = files.map((f) => f.filename);
     expect(names).toContain("low-battery.enter.js");
     expect(names).toContain("greet.js");
@@ -172,6 +179,220 @@ describe("compileProjectFiles", () => {
     const readme = files.find((f) => f.filename === "README.md");
     expect(readme?.content).toContain("Battery Level from 0% to 20%");
     expect(readme?.content).toContain("low-battery.enter.js");
+  });
+});
+
+describe("interpolation", () => {
+  const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+
+  test("fmt merges literals, flattens nesting and returns plain strings without refs", () => {
+    expect(fmt`plain ${"text"} only`).toBe("plain text only");
+    const inner = fmt`k=${API_KEY}`;
+    const outer = fmt`pre ${inner} post ${1}${2}`;
+    expect(outer).toBeInstanceOf(Interpolated);
+    expect((outer as Interpolated).parts).toEqual(["pre k=", API_KEY, " post 12"]);
+  });
+
+  test("emitText compiles literals, secrets, variables and interpolations", () => {
+    expect(emitText("hi")).toBe('"hi"');
+    expect(emitText(API_KEY)).toBe('global("OPENWEATHER_KEY")');
+    expect(emitText(v("%TEMPERATURE"))).toBe('global("TEMPERATURE")');
+    expect(emitText(v("myvar"))).toBe('local("myvar")');
+    expect(emitText(fmt`Temp: ${v("TEMPERATURE")} °C`)).toBe(
+      '"Temp: " + global("TEMPERATURE") + " °C"'
+    );
+  });
+
+  test("interpolated action fields compile to concatenations, not %NAME literals", () => {
+    const task = new Task({
+      name: "Weather",
+      actions: [
+        Action.flash(fmt`Temp: ${v("TEMPERATURE")} °C`),
+        Action.http("GET", fmt`https://api.example.com?key=${API_KEY}`, {
+          headers: { Authorization: fmt`Bearer ${API_KEY}` },
+        }),
+      ],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('flash("Temp: " + global("TEMPERATURE") + " °C");');
+    expect(jsSource).toContain(
+      'xhr.open("GET", "https://api.example.com?key=" + global("OPENWEATHER_KEY"), false);'
+    );
+    expect(jsSource).toContain(
+      'xhr.setRequestHeader("Authorization", "Bearer " + global("OPENWEATHER_KEY"));'
+    );
+    expect(jsSource).not.toContain("%TEMPERATURE");
+    expectValidJs(jsSource);
+  });
+
+  test("a bare Secret is a whole field value and a condition variable", () => {
+    const task = new Task({
+      name: "Copy",
+      actions: [
+        Action.setGlobal("COPY", API_KEY),
+        Action.when(cond(API_KEY, "isSet"), [Action.flash("have key")]),
+      ],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('setGlobal("COPY", global("OPENWEATHER_KEY"));');
+    expect(jsSource).toContain(
+      'if ((global("OPENWEATHER_KEY") !== undefined && global("OPENWEATHER_KEY") !== "")) {'
+    );
+    expectValidJs(jsSource);
+  });
+
+  test("Action.js splices refs as expressions", () => {
+    const task = new Task({
+      name: "Raw",
+      actions: [Action.js(fmt`var key = ${API_KEY};\nflash(key);`)],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('var key = global("OPENWEATHER_KEY");');
+    expectValidJs(jsSource);
+  });
+});
+
+describe("secrets", () => {
+  const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+  const weatherTask = new Task({
+    name: "Weather",
+    actions: [
+      Action.http("GET", fmt`https://api.example.com?key=${API_KEY}`, {
+        outputGlobal: "%WEATHER_JSON",
+      }),
+    ],
+  });
+
+  test("secret() normalizes the leading % and validates the name", () => {
+    expect(secret("%API_KEY", "key").name).toBe("API_KEY");
+    expect(() => secret("lowercase", "key")).toThrow();
+  });
+
+  test("collectProjectSecrets finds inline uses across profiles and tasks", () => {
+    const HA_TOKEN = secret("HOME_ASSISTANT_TOKEN", "HA long-lived token");
+    const project = new Project({
+      name: "P",
+      profiles: [
+        new Profile({
+          name: "Prof",
+          triggers: [Trigger.time({ hour: 7, minute: 0 })],
+          enter: new Task({
+            name: "Enter",
+            // Nested inside If and a header record — the walk must reach both.
+            actions: [
+              Action.when(cond("%READY", "isSet"), [
+                Action.http("POST", "https://ha.local/api", {
+                  headers: { Authorization: fmt`Bearer ${HA_TOKEN}` },
+                }),
+              ]),
+            ],
+          }),
+        }),
+      ],
+      tasks: [weatherTask],
+    });
+
+    const secrets = collectProjectSecrets(project);
+    expect(secrets.map((s) => s.name)).toEqual([
+      "HOME_ASSISTANT_TOKEN",
+      "OPENWEATHER_KEY",
+    ]);
+  });
+
+  test("declared but unused secrets are not emitted", () => {
+    // UNUSED_KEY is constructed but never referenced by any action.
+    secret("UNUSED_KEY", "never referenced");
+    const project = new Project({ name: "P", tasks: [weatherTask] });
+    expect(collectProjectSecrets(project).map((s) => s.name)).toEqual([
+      "OPENWEATHER_KEY",
+    ]);
+  });
+
+  test("the same name used with the same description deduplicates", () => {
+    const again = new Secret({
+      name: "OPENWEATHER_KEY",
+      description: "OpenWeather API key",
+    });
+    const project = new Project({
+      name: "P",
+      tasks: [
+        weatherTask,
+        new Task({ name: "B", actions: [Action.setGlobal("K", again)] }),
+      ],
+    });
+    expect(collectProjectSecrets(project)).toHaveLength(1);
+  });
+
+  test("conflicting descriptions for the same secret fail compilation", () => {
+    const conflicting = secret("OPENWEATHER_KEY", "something else entirely");
+    const project = new Project({
+      name: "P",
+      tasks: [
+        weatherTask,
+        new Task({ name: "B", actions: [Action.flash(fmt`${conflicting}`)] }),
+      ],
+    });
+    expect(() => collectProjectSecrets(project)).toThrow(CompileError);
+  });
+
+  test("compileProjectFiles emits secrets.json from inline uses", () => {
+    const project = new Project({ name: "P", tasks: [weatherTask] });
+    const files = compileProjectFiles(project, { repo: TEST_REPO });
+    const manifest = files.find((f) => f.filename === SECRETS_FILENAME);
+    expect(manifest?.kind).toBe("secrets-json");
+    expect(JSON.parse(manifest!.content)).toEqual([
+      { name: "OPENWEATHER_KEY", description: "OpenWeather API key" },
+    ]);
+  });
+
+  test("secrets.json is emitted even when no secrets are used", () => {
+    const project = new Project({
+      name: "Empty",
+      tasks: [new Task({ name: "T", actions: [Action.flash("x")] })],
+    });
+    const files = compileProjectFiles(project, { repo: TEST_REPO });
+    const manifest = files.find((f) => f.filename === SECRETS_FILENAME);
+    expect(JSON.parse(manifest!.content)).toEqual([]);
+  });
+
+  test("a secret used only in a trigger condition is collected and described by name", () => {
+    const KEY = secret("TRIGGER_ONLY_KEY", "only used in a trigger");
+    const trigger = Trigger.variable(cond(KEY, "isSet"));
+    const project = new Project({
+      name: "P",
+      profiles: [
+        new Profile({
+          name: "Prof",
+          triggers: [trigger],
+          enter: new Task({ name: "Enter", actions: [Action.flash("x")] }),
+        }),
+      ],
+    });
+
+    expect(collectProjectSecrets(project).map((s) => s.name)).toEqual([
+      "TRIGGER_ONLY_KEY",
+    ]);
+
+    const description = describeTrigger(trigger);
+    expect(description).toContain("%TRIGGER_ONLY_KEY");
+    expect(description).not.toContain("_tag");
+  });
+
+  test("compileSecretsJson output is stable and sorted by name", () => {
+    const project = new Project({
+      name: "P",
+      tasks: [
+        new Task({
+          name: "T",
+          actions: [
+            Action.flash(fmt`${secret("ZEBRA", "z")}${secret("ALPHA", "a")}`),
+          ],
+        }),
+      ],
+    });
+    expect(
+      JSON.parse(compileSecretsJson(project)).map((s: Secret) => s.name)
+    ).toEqual(["ALPHA", "ZEBRA"]);
   });
 });
 
@@ -230,7 +451,7 @@ describe("task references", () => {
 
     let error: unknown;
     try {
-      compileProjectFiles(project);
+      compileProjectFiles(project, { repo: TEST_REPO });
     } catch (caught) {
       error = caught;
     }
@@ -254,7 +475,7 @@ describe("task references", () => {
     });
     const program = Effect.gen(function* () {
       const compiler = yield* TaskerCompiler;
-      return yield* compiler.compileProject(project);
+      return yield* compiler.compileProject(project, { repo: TEST_REPO });
     });
     const error = await Effect.runPromise(
       program.pipe(Effect.flip, Effect.provide(TaskerCompiler.Default))
@@ -282,7 +503,7 @@ describe("task references", () => {
       ],
       tasks: [weather],
     });
-    expect(() => compileProjectFiles(project)).not.toThrow();
+    expect(() => compileProjectFiles(project, { repo: TEST_REPO })).not.toThrow();
   });
 });
 
