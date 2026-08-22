@@ -7,12 +7,7 @@ import {
 import { Project } from "../src/profile.js";
 import { nightMode, meetingSilencer, quietProfiles } from "../tasks/popular/quiet.js";
 import { drivingMode, drivingAutoReply, drivingProfiles } from "../tasks/popular/driving.js";
-
-const expectValidJs = (code: string) => {
-  // Throws SyntaxError if the emitted code does not parse (never invoked).
-  // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
-  expect(() => new Function(code)).not.toThrow();
-};
+import { expectValidJs } from "./support/valid-js.js";
 
 describe("popular quiet profiles", () => {
   it("Night Mode compiles enter/exit with silence + radio calls", () => {

@@ -8,25 +8,23 @@
  * periodic Time profile (e.g. every 30 minutes). It pairs with the DSL
  * "Night Mode" profile — this script only enables or disables that profile.
  *
- * Sunrise/sunset for %HOME_LAT / %HOME_LON (defaulting to Madrid) come from
- * open-meteo and are mirrored into %NIGHT_START (sunset) and %NIGHT_END
- * (sunrise) as HH:MM; "Night Mode" is enabled after sunset or before
- * sunrise, disabled otherwise.
+ * Home coordinates are read through the Tasker config provider: %HOME_LAT /
+ * %HOME_LON are prompted for once via TE Config when unset (falling back to
+ * Madrid if the prompt goes unanswered). Sunrise/sunset come from open-meteo
+ * and are mirrored into %NIGHT_START (sunset) and %NIGHT_END (sunrise) as
+ * HH:MM; "Night Mode" is enabled after sunset or before sunrise, disabled
+ * otherwise.
  */
 
-import { FetchHttpClient, HttpClient } from "@effect/platform";
-import { DateTime, Effect, Schema } from "effect";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientResponse,
+} from "@effect/platform";
+import { Config, DateTime, Effect, Layer, Schema } from "effect";
 import { Tasker } from "../../src/tasker-api.js";
+import { taskerConfigLayer } from "../../src/config.js";
 import { runInTasker } from "../../src/runtime.js";
-
-const globalOr = (name: string, fallback: string) =>
-  Effect.gen(function* () {
-    const tasker = yield* Tasker;
-    const value = yield* tasker
-      .global(name)
-      .pipe(Effect.orElseSucceed(() => ""));
-    return value === "" || value === undefined ? fallback : value;
-  });
 
 const SunResponse = Schema.Struct({
   daily: Schema.Struct({
@@ -48,18 +46,17 @@ const fetchSunTimes = Effect.fn("adaptiveNightMode.fetchSunTimes")(
       HttpClient.filterStatusOk
     );
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=sunrise,sunset&timezone=auto`;
-    const payload = yield* client
+    const response = yield* client
       .get(url)
-      .pipe(Effect.flatMap((response) => response.json));
-    const response = yield* Schema.decodeUnknown(SunResponse)(payload);
+      .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(SunResponse)));
     return response.daily;
   }
 );
 
 const program = Effect.gen(function* () {
   const tasker = yield* Tasker;
-  const lat = yield* globalOr("HOME_LAT", "40.41");
-  const lon = yield* globalOr("HOME_LON", "-3.70");
+  const lat = yield* Config.string("HOME_LAT").pipe(Config.withDefault("40.41"));
+  const lon = yield* Config.string("HOME_LON").pipe(Config.withDefault("-3.70"));
 
   yield* fetchSunTimes(lat, lon).pipe(
     Effect.flatMap((daily) =>
@@ -108,6 +105,9 @@ const program = Effect.gen(function* () {
   );
 });
 
-void runInTasker(program.pipe(Effect.provide(FetchHttpClient.layer)), {
-  exitWhenDone: true,
-});
+void runInTasker(
+  program.pipe(
+    Effect.provide(Layer.mergeAll(FetchHttpClient.layer, taskerConfigLayer()))
+  ),
+  { exitWhenDone: true }
+);

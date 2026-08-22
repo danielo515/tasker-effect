@@ -11,6 +11,7 @@ import {
   Project,
   cond,
 } from "../src/profile.js";
+import { expectValidJs } from "./support/valid-js.js";
 import { Interpolated, Secret, fmt, secret, v } from "../src/profile.js";
 import {
   CompileError,
@@ -30,11 +31,6 @@ import {
 
 const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
-const expectValidJs = (code: string) => {
-  // Throws SyntaxError if the emitted code does not parse (never invoked).
-  // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
-  expect(() => new Function(code)).not.toThrow();
-};
 
 describe("compileTaskToJs", () => {
   it("emits Tasker API calls for each action", () => {

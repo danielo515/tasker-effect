@@ -6,12 +6,7 @@ import {
   readingMode,
 } from "../tasks/popular/media.js";
 import { batteryFullAlert, chargingDock } from "../tasks/popular/power.js";
-
-const expectValidJs = (code: string) => {
-  // Throws SyntaxError if the emitted code does not parse (never invoked).
-  // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
-  expect(() => new Function(code)).not.toThrow();
-};
+import { expectValidJs } from "./support/valid-js.js";
 
 const contentsByFilename = (
   files: ReadonlyArray<{ filename: string; content: string }>
