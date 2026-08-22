@@ -11,6 +11,7 @@ import {
   Project,
   cond,
 } from "../src/profile.js";
+import { expectValidJs } from "./support/valid-js.js";
 import { Interpolated, Secret, fmt, secret, v } from "../src/profile.js";
 import {
   CompileError,
@@ -30,11 +31,6 @@ import {
 
 const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
-const expectValidJs = (code: string) => {
-  // Throws SyntaxError if the emitted code does not parse (never invoked).
-  // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
-  expect(() => new Function(code)).not.toThrow();
-};
 
 describe("compileTaskToJs", () => {
   it("emits Tasker API calls for each action", () => {
@@ -113,6 +109,28 @@ describe("compileTaskToJs", () => {
     const jsSource = compileTaskToJs(task);
     expect(jsSource).toContain('__out = shell("uptime", false, 30);');
     expect(jsSource).toContain('setGlobal("UPTIME"');
+    expectValidJs(jsSource);
+  });
+
+  it("display and mode actions map to their Tasker functions", () => {
+    const task = new Task({
+      name: "Context Setup",
+      actions: [
+        Action.setCarMode(true),
+        Action.setNightMode(false),
+        Action.stayOn("any"),
+        Action.setAutoRotate(true),
+        Action.setAutoBrightness(false),
+        Action.displayTimeout({ minutes: 30, seconds: 15 }),
+      ],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain("carMode(true);");
+    expect(jsSource).toContain("nightMode(false);");
+    expect(jsSource).toContain('stayOn("any");');
+    expect(jsSource).toContain("displayAutoRotate(true);");
+    expect(jsSource).toContain("displayAutoBright(false);");
+    expect(jsSource).toContain("displayTimeout(0, 30, 15);");
     expectValidJs(jsSource);
   });
 
@@ -548,6 +566,12 @@ describe("Match coverage", () => {
     Action.silentMode("on"),
     Action.goHome(),
     Action.getLocation("gps"),
+    Action.setCarMode(true),
+    Action.setNightMode(true),
+    Action.stayOn("ac"),
+    Action.setAutoRotate(true),
+    Action.setAutoBrightness(false),
+    Action.displayTimeout({ minutes: 10 }),
     Action.js("flash('x')"),
     Action.when(cond("%A", "isSet"), [Action.flash("y")]),
   ];
@@ -566,6 +590,10 @@ describe("Match coverage", () => {
     Trigger.bluetoothConnected(),
     Trigger.appOpened("app"),
     Trigger.batteryLevel(0, 20),
+    Trigger.headsetPlugged("mic"),
+    Trigger.power("wireless"),
+    Trigger.calendarEntry({ title: "Meeting" }),
+    Trigger.receivedText({ kind: "sms" }),
     Trigger.variable(cond("%A", "eq", "1")),
     Trigger.event("Display On"),
     Trigger.state("Power"),
@@ -601,6 +629,21 @@ describe("helpers", () => {
   it("slugify produces safe file names", () => {
     expect(slugify("Morning Routine!")).toBe("morning-routine");
     expect(slugify("  ")).toBe("task");
+  });
+
+  it("describeTrigger formats the popular-profile triggers", () => {
+    expect(describeTrigger(Trigger.headsetPlugged())).toBe(
+      "State > Hardware > Headset Plugged (Type: Any)"
+    );
+    expect(describeTrigger(Trigger.power("ac"))).toBe(
+      "State > Power > Power (Source: ac)"
+    );
+    expect(
+      describeTrigger(Trigger.calendarEntry({ calendar: "Work", title: "1:1" }))
+    ).toBe("State > App > Calendar Entry (Calendar: Work, Title: 1:1)");
+    expect(describeTrigger(Trigger.receivedText({ sender: "Boss" }))).toBe(
+      "Event > Phone > Received Text (Type: Any, Sender: Boss)"
+    );
   });
 
   it("describeTrigger formats times", () => {

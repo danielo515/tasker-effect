@@ -272,6 +272,15 @@ export const emitAction = (action: Action): Array<string> =>
     Match.tag("GoHome", (a) => [`goHome(${a.screen});`]),
     Match.tag("GetLocation", (a) => [
       `getLocation(${js(a.source)}, ${a.keepTracking}, ${a.timeoutSecs});`,
+    ])
+  ).pipe(
+    Match.tag("SetCarMode", (a) => [`carMode(${a.on});`]),
+    Match.tag("SetNightMode", (a) => [`nightMode(${a.on});`]),
+    Match.tag("SetStayOn", (a) => [`stayOn(${js(a.mode)});`]),
+    Match.tag("SetAutoRotate", (a) => [`displayAutoRotate(${a.on});`]),
+    Match.tag("SetAutoBrightness", (a) => [`displayAutoBright(${a.on});`]),
+    Match.tag("SetDisplayTimeout", (a) => [
+      `displayTimeout(${a.hours}, ${a.minutes}, ${a.seconds});`,
     ]),
     Match.tag("JavaScript", (a) => emitJsCode(a.code)),
     Match.tag("If", (a) => {
@@ -353,6 +362,31 @@ export const describeTrigger = (trigger: Trigger): string =>
       "BatteryLevelTrigger",
       (t) => `State > Power > Battery Level from ${t.from}% to ${t.to}%`
     ),
+    Match.tag("HeadsetPluggedTrigger", (t) => {
+      const kind =
+        t.kind === "mic"
+          ? "With Microphone"
+          : t.kind === "no-mic"
+            ? "Without Microphone"
+            : "Any";
+      return `State > Hardware > Headset Plugged (Type: ${kind})`;
+    }),
+    Match.tag(
+      "PowerTrigger",
+      (t) => `State > Power > Power (Source: ${t.source})`
+    ),
+    Match.tag("CalendarEntryTrigger", (t) => {
+      const filters = [
+        ...(t.calendar !== undefined ? [`Calendar: ${t.calendar}`] : []),
+        ...(t.title !== undefined ? [`Title: ${t.title}`] : []),
+      ];
+      return `State > App > Calendar Entry${filters.length > 0 ? ` (${filters.join(", ")})` : ""}`;
+    }),
+    Match.tag("ReceivedTextTrigger", (t) => {
+      const kind = t.kind === "any" ? "Any" : t.kind.toUpperCase();
+      const sender = t.sender !== undefined ? `, Sender: ${t.sender}` : "";
+      return `Event > Phone > Received Text (Type: ${kind}${sender})`;
+    }),
     Match.tag(
       "VariableTrigger",
       (t) =>
