@@ -15,7 +15,7 @@
  */
 
 import { FetchHttpClient, HttpClient } from "@effect/platform";
-import { Effect, Schema } from "effect";
+import { DateTime, Effect, Schema } from "effect";
 import { Tasker } from "../../src/tasker-api.js";
 import { runInTasker } from "../../src/runtime.js";
 
@@ -78,8 +78,11 @@ const program = Effect.gen(function* () {
         yield* tasker.setGlobal("NIGHT_START", nightStart);
         yield* tasker.setGlobal("NIGHT_END", nightEnd);
 
-        const now = yield* Effect.sync(() => new Date());
-        const nowMinutes = now.getHours() * 60 + now.getMinutes();
+        const now = yield* DateTime.nowInCurrentZone.pipe(
+          DateTime.withCurrentZoneLocal
+        );
+        const nowMinutes =
+          DateTime.getPart(now, "hours") * 60 + DateTime.getPart(now, "minutes");
         const isNight =
           nowMinutes >= minutesOfDay(nightStart) ||
           nowMinutes < minutesOfDay(nightEnd);

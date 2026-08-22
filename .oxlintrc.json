@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/@effect/tsgo/oxlint-schema.json",
+  "extends": ["./node_modules/@effect/tsgo/oxlint-presets/recommended.json"],
+  "ignorePatterns": ["dist", "dist-tasker", "coverage"],
+  "rules": {
+    // DSL values are Schema.TaggedClass instances validated at construction;
+    // `instanceof Task`/`Profile`/... in the compiler and CLI is the intended
+    // nominal identity check, not a structural one.
+    "effecttsgo/instance-of-schema": "off"
+  }
+}

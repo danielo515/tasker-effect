@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it } from "@effect/vitest";
 import { compileProfileFiles } from "../src/compiler.js";
 import {
   headphonesIn,
@@ -8,7 +8,8 @@ import {
 import { batteryFullAlert, chargingDock } from "../tasks/popular/power.js";
 
 const expectValidJs = (code: string) => {
-  // Throws SyntaxError if the emitted code does not parse.
+  // Throws SyntaxError if the emitted code does not parse (never invoked).
+  // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
   expect(() => new Function(code)).not.toThrow();
 };
 
@@ -17,7 +18,7 @@ const contentsByFilename = (
 ) => new Map(files.map((f) => [f.filename, f.content]));
 
 describe("popular media profiles", () => {
-  test("Headphones In compiles enter/exit with volume, launch and pause", () => {
+  it("Headphones In compiles enter/exit with volume, launch and pause", () => {
     const files = compileProfileFiles(headphonesIn);
     expect(files.map((f) => f.filename)).toEqual([
       "headphones-in.enter.js",
@@ -36,7 +37,7 @@ describe("popular media profiles", () => {
     for (const file of files) expectValidJs(file.content);
   });
 
-  test("Video Rotation toggles auto-rotate on enter/exit", () => {
+  it("Video Rotation toggles auto-rotate on enter/exit", () => {
     const files = compileProfileFiles(videoRotation);
     expect(files.map((f) => f.filename)).toEqual([
       "video-rotation.enter.js",
@@ -54,7 +55,7 @@ describe("popular media profiles", () => {
     for (const file of files) expectValidJs(file.content);
   });
 
-  test("Reading Mode extends the timeout and locks brightness", () => {
+  it("Reading Mode extends the timeout and locks brightness", () => {
     const files = compileProfileFiles(readingMode);
     expect(files.map((f) => f.filename)).toEqual([
       "reading-mode.enter.js",
@@ -76,7 +77,7 @@ describe("popular media profiles", () => {
 });
 
 describe("popular power profiles", () => {
-  test("Battery Full Alert has an enter file only, with vibrate/say/flash", () => {
+  it("Battery Full Alert has an enter file only, with vibrate/say/flash", () => {
     const files = compileProfileFiles(batteryFullAlert);
     expect(files.map((f) => f.filename)).toEqual([
       "battery-full-alert.enter.js",
@@ -90,7 +91,7 @@ describe("popular power profiles", () => {
     expectValidJs(enter);
   });
 
-  test("Charging Dock keeps the screen on while on AC and restores on exit", () => {
+  it("Charging Dock keeps the screen on while on AC and restores on exit", () => {
     const files = compileProfileFiles(chargingDock);
     expect(files.map((f) => f.filename)).toEqual([
       "charging-dock.enter.js",

@@ -12,6 +12,8 @@ import {
   Profile,
   Project,
   cond,
+  fmt,
+  v,
 } from "../src/index.js";
 import { quietProfiles } from "./popular/quiet.js";
 import { drivingProfiles } from "./popular/driving.js";
@@ -36,8 +38,13 @@ const weatherCheck = new Task({
     ),
     Action.when(
       cond("%TEMPERATURE", "lt", "0"),
-      [Action.flash("Freezing outside: %TEMPERATURE °C"), Action.say("It is freezing outside")],
-      [Action.flash("Current temperature: %TEMPERATURE °C")]
+      [
+        // Tasker does not replace %vars inside JavaScript — fmt compiles the
+        // reference to a global("TEMPERATURE") concatenation.
+        Action.flash(fmt`Freezing outside: ${v("TEMPERATURE")} °C`),
+        Action.say("It is freezing outside"),
+      ],
+      [Action.flash(fmt`Current temperature: ${v("TEMPERATURE")} °C`)]
     ),
   ],
 });

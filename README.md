@@ -35,8 +35,9 @@ flowchart LR
 | --- | --- |
 | `tasker-api` | Type-safe Effect bindings for every documented Tasker JS function (~110), plus a typed `raw` escape hatch |
 | `profile` | Schema-validated DSL: tasks are sequences of tagged actions, profiles add trigger metadata |
-| `compiler` | Compiles DSL definitions to standalone JS using only Tasker globals (no runtime deps), plus a dispatcher and an import-once task XML |
+| `compiler` | Compiles DSL definitions to standalone JS using only Tasker globals (no runtime deps), plus a dispatcher, a `secrets.json` manifest and an import-once project XML |
 | `runtime` | `runInTasker` for Effect programs bundled to a single file |
+| `config` | Tasker-backed `ConfigProvider`: scripts read secrets/config via `Config`, with lazy on-device prompting |
 | `sync/core` + `sync/contract` | Platform-free sync program (`ProfileSync`) and its error/capability contract — exported from the package root |
 | `sync/node` | Desktop layers (`tasker-effect/sync/node` entry point; @effect/platform-node) |
 | `sync/tasker` | On-device layers (`tasker-effect/sync/tasker` entry point; Tasker builtins) |
@@ -45,8 +46,9 @@ flowchart LR
 
 ```bash
 bun install
-bun run typecheck   # type check
-bun test            # run tests
+bun run typecheck   # type check (Effect-aware: tsc is patched by @effect/tsgo)
+bun run lint        # oxlint, including type-aware Effect language service rules
+bun run test        # run tests (vitest + @effect/vitest)
 bun run compile     # compile tasks/ to dist-tasker/
 ```
 
@@ -144,16 +146,21 @@ esbuild script.ts --bundle --minify --format=iife --platform=browser --outfile=d
 
 ### The dispatcher: import once, then only triggers
 
-Compiling a `Project` also emits two extra files:
+Compiling a `Project` also emits extra files:
 
-- **`tasker-effect.tsk.xml`** — static scaffolding containing a single
-  shared task, **TE Dispatch**, whose only action is a file-based
-  *JavaScript* action (Auto Exit on) pointing at
-  `/sdcard/Tasker/js/dispatcher.js`. It never embeds compiled logic, so you
-  import it exactly once: Tasker → Tasks tab → long-press → *Import Task*.
+- **`tasker-effect.prj.xml`** — static scaffolding as an importable Tasker
+  *project*: the shared **TE Dispatch** task (a file-based *JavaScript*
+  action, Auto Exit on, pointing at `/sdcard/Tasker/js/dispatcher.js`), the
+  self-bootstrapping **TE Sync** task with a periodic **TE Sync** profile
+  (every 6 hours), and the **TE Config** secrets prompter. It never embeds
+  compiled logic, so you import it exactly once: Tasker → long-press the
+  home icon (bottom left) → *Import Project*.
 - **`dispatcher.js`** — generated from your project: it embeds a map of
   profile/task names to compiled files and runs the right one with
   `eval(readFile(...))`.
+- **`secrets.json`** — every secret used inline in your tasks (name +
+  description), aggregated by the compiler; `TE Config` prompts for the
+  unset ones on-device.
 
 How the dispatcher picks the file:
 
@@ -182,10 +189,74 @@ defaults to `/sdcard/Tasker/js/` and can be overridden with the Tasker
 global `%TE_JS_DIR` (also edit the path inside the imported task if you do).
 
 Because `dispatcher.js` is a regular `.js` release asset it updates through
-the normal sync, keeping the name→file map current. The `.tsk.xml` is *not*
-synced (sync pulls only `.js` on purpose): download it manually once from
-the latest release — it only ever contains the pointer to `dispatcher.js`,
-so it never goes stale.
+the normal sync, keeping the name→file map current. The `.prj.xml` is *not*
+synced (sync pulls only `.js` and `.json` on purpose): download it manually
+once from the latest release — it only ever contains static scaffolding
+(the dispatcher pointer and your repo's slug for the sync bootstrap), so it
+never goes stale.
+
+The repo embedded in the XML's sync bootstrap is detected from
+`git remote get-url origin`; override it with
+`bunx tasker-effect compile --repo owner/name`.
+
+### Secrets and interpolation
+
+Declare a secret once, then use it **inline** anywhere a string value or a
+variable name goes — the compiler detects every use site by walking the
+action tree and aggregates them into `secrets.json`. After every sync the
+imported `TE Config` task prompts on-device — only for used secrets whose
+Tasker global is still unset (it stays invisible when nothing is missing).
+Answers are stored in Tasker **global** variables named after the secret.
+
+```typescript
+import { Task, secret, fmt, v, cond, Action } from "tasker-effect";
+
+const OPENWEATHER_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+
+const weather = new Task({
+  name: "Weather Check",
+  actions: [
+    Action.http("GET", fmt`https://api.example.com/weather?key=${OPENWEATHER_KEY}`, {
+      outputGlobal: "%WEATHER_JSON",
+    }),
+    // Bare secrets work as whole values and in variable positions too:
+    Action.when(cond(OPENWEATHER_KEY, "isSet"), [
+      Action.flash(fmt`Temp: ${v("TEMPERATURE")} °C`),
+    ]),
+  ],
+});
+```
+
+The `fmt` template exists because Tasker performs **no** `%var` replacement
+inside JavaScript — `"key=%OPENWEATHER_KEY"` in a plain string stays
+literal on-device. `fmt` compiles references to
+`"key=" + global("OPENWEATHER_KEY")`, and `v()` does the same for ordinary
+Tasker variables (ALL-CAPS → `global`, lowercase → `local`). It also works
+inside `Action.js`, where references are spliced in as expressions.
+
+**Effect scripts** read secrets (and any other config) with the idiomatic
+`Config` API, backed by a Tasker `ConfigProvider`. Config paths map to
+globals (`_`-joined, uppercased). On a missing key the provider performs
+`TE Config` in a one-off mode that shows an Input Dialog, waits for the
+answer (which is cached in the global), and fails with a regular
+`ConfigError` if unanswered — so `Config.withDefault`/`Config.option`
+compose as usual.
+
+```typescript
+import { Config, Effect } from "effect";
+import { runInTasker, secret, taskerConfigLayer } from "tasker-effect";
+
+const OPENWEATHER_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+
+const program = Effect.gen(function* () {
+  const key = yield* Config.string("OPENWEATHER_KEY"); // prompts on first use
+  // ...
+});
+
+void runInTasker(
+  program.pipe(Effect.provide(taskerConfigLayer({ secrets: [OPENWEATHER_KEY] })))
+);
+```
 
 ### Effect programs on-device
 
@@ -223,40 +294,53 @@ const { layer, calls } = makeTaskerTestLayer({
 ## Keeping devices up to date
 
 CI compiles `tasks/` on every push, uploads the result as the `tasker-js`
-artifact and refreshes a rolling GitHub release (`tasker-js-latest`).
+artifact and publishes two kinds of GitHub release: a rolling one
+(`tasker-js-latest`) whose assets always mirror the newest green commit —
+stale assets are pruned, so it contains exactly what the build produces —
+and an immutable per-push snapshot (`tasker-js-vN`, marked "not latest" so
+devices ignore it).
 
 **One-time device setup:**
 
-1. Download `sync-profiles.js` from the latest release to
-   `/sdcard/Tasker/js/` (any way you like — browser, `adb push`, …).
-2. In Tasker, create a task **Sync** with a single **JavaScript** action
-   pointing at that file, with *Auto Exit* disabled.
-3. Create a profile that runs **Sync** whenever you want updates: a daily
-   Time trigger, "connected to home Wi-Fi", an NFC tag, or just a home
-   screen shortcut.
-4. Download `tasker-effect.tsk.xml` from the release and import it once
-   (Tasks tab → long-press → *Import Task*) to get the shared `TE Dispatch`
-   task.
-5. For each of your profiles, configure its trigger in the Tasker UI (the
+1. Download `tasker-effect.prj.xml` from the latest release and import it
+   (Tasker → long-press the home icon at the bottom left → *Import
+   Project*).
+2. Enable the imported **TE Sync** profile (or run the **TE Sync** task once
+   to sync immediately). Its first run self-installs: it downloads
+   `sync-profiles.js` from the rolling release with a synchronous XHR,
+   writes it to `/sdcard/Tasker/js/`, and runs it — which then pulls every
+   other compiled file. No files need to be copied to the device by hand.
+   After each sync, **TE Config** prompts for any secrets your tasks use
+   that are still unset.
+3. For each of your profiles, configure its trigger in the Tasker UI (the
    generated `README.md` asset lists them) and set `TE Dispatch` as the
    enter and exit task. Standalone tasks run via Perform Task →
    `TE Dispatch` with `%par1` = the task name.
 
 **How updates propagate:** Tasker reads the `.js` file from disk every time
-an action runs — nothing is cached. Each **Sync** run overwrites
+an action runs — nothing is cached. Each **TE Sync** run overwrites
 `/sdcard/Tasker/js/` with the newest release assets (via Tasker's own
 `writeFile`), so the next time any profile fires it executes the new code.
-This applies to DSL-generated files, Effect bundles, and `sync-profiles.js`
-itself, which updates its own file too.
+This applies to DSL-generated files, Effect bundles, `secrets.json`, and
+`sync-profiles.js` itself, which updates its own file too.
+
+**Rolling back a bad build:** every master push also publishes an immutable
+snapshot release (`tasker-js-vN`). If a build misbehaves on-device, run the
+**Rollback rolling release** workflow (Actions tab) with the snapshot tag to
+restore — it repoints the rolling release's assets at that snapshot, and
+devices pick it up on their next **TE Sync** run (run the task manually to
+apply immediately). The next push to master ships a fresh build over the
+rolling release again, so a rollback is a stopgap until a fix lands.
 
 **The one manual step that remains:** Tasker's JS API cannot create
 profiles or triggers, so a *brand-new* profile still needs its trigger
-configured once in the UI (step 5) — but thanks to the dispatcher that is
+configured once in the UI (step 3) — but thanks to the dispatcher that is
 all: the task slots always point at `TE Dispatch`, and the dispatcher's
 name→file map updates itself on every sync. After that, every change to
 its code ships automatically.
 Point the sync at your own fork with the Tasker globals `%SYNC_OWNER` /
-`%SYNC_REPO`.
+`%SYNC_REPO` (the bootstrap inside the XML already carries your repo, and
+sends `%TE_GH_TOKEN` as an Authorization header when set).
 
 From Node/CI you can do the same programmatically. The platform layers
 live behind dedicated entry points — `tasker-effect/sync/node` for desktop,

@@ -8,25 +8,29 @@
  * JavaScript and writes the files to the output directory.
  *
  * Scope is DSL codegen only: bundling Effect programs for Tasker is
- * intentionally left to the consumer (see the --help text).
+ * intentionally left to the consumer (see the --help footer).
+ *
+ * This module is a sanctioned Node edge (like `src/sync/node.ts`): program
+ * logic is written against `@effect/platform` interfaces and the concrete
+ * `NodeContext.layer` is provided only in {@link runCli}. It is not exported
+ * from the package root, so device/browser bundles can never pull it in.
  */
 
-import { Console, Effect, Either, Layer, Schema } from "effect";
-import { TaskerCompiler, type CompiledFile } from "./compiler.js";
+import { Args, Command, HelpDoc, Options, ValidationError } from "@effect/cli";
+import {
+  Command as PlatformCommand,
+  FileSystem,
+  Path,
+} from "@effect/platform";
+import { NodeContext } from "@effect/platform-node";
+import { Console, Effect, Either, Layer, Option, Schema, Stream } from "effect";
+import { TaskerCompiler, type CompiledFile, type RepoRef } from "./compiler.js";
 import { Profile, Project, Task } from "./profile.js";
 import { FileStore } from "./sync/node.js";
 
 // =============================================================================
 // Errors
 // =============================================================================
-
-/** The command line arguments could not be parsed */
-export class CliUsageError extends Schema.TaggedError<CliUsageError>()(
-  "CliUsageError",
-  {
-    message: Schema.String,
-  }
-) {}
 
 /** No entry module was found at any of the candidate paths */
 export class EntryNotFoundError extends Schema.TaggedError<EntryNotFoundError>()(
@@ -55,90 +59,76 @@ export class NoCompilableExportsError extends Schema.TaggedError<NoCompilableExp
   }
 ) {}
 
-// =============================================================================
-// Argument parsing
-// =============================================================================
-
-const DEFAULT_ENTRIES = ["tasks/automations.ts", "tasks/automations.js"] as const;
-const DEFAULT_OUT_DIR = "dist-tasker";
-
-/** A parsed CLI invocation */
-export type CliInvocation =
-  | { readonly _tag: "Help" }
-  | {
-      readonly _tag: "Compile";
-      readonly entry: string | undefined;
-      readonly outDir: string;
-    };
-
-export const HELP_TEXT = `tasker-effect — compile Tasker DSL definitions to Tasker-executable JavaScript
-
-Usage:
-  tasker-effect compile [entry] [--out <dir>]
-
-Arguments:
-  entry          Module whose exports (default and named) are scanned for
-                 Project, Profile and Task instances.
-                 Default: ${DEFAULT_ENTRIES[0]} (then ${DEFAULT_ENTRIES[1]})
-  --out <dir>    Output directory. Default: ${DEFAULT_OUT_DIR}
-  -h, --help     Show this help.
-
-Runtimes:
-  TypeScript entries require Bun (run via \`bunx tasker-effect\`).
-  Plain JavaScript entries also work under Node (\`npx tasker-effect\`).
-
-Scope:
-  This command only compiles the declarative DSL. Bundling Effect programs
-  for Tasker is intentionally left to the consumer, e.g.:
-    esbuild script.ts --bundle --minify --format=iife --platform=browser --outfile=dist-tasker/script.js`;
-
-/** Parse raw argv (without the node/bun prefix) into an invocation */
-export const parseCliArgs = (
-  argv: ReadonlyArray<string>
-): Either.Either<CliInvocation, CliUsageError> => {
-  const first = argv[0];
-  if (first === undefined || first === "--help" || first === "-h") {
-    return Either.right({ _tag: "Help" });
+/** The GitHub repository could not be determined for a Project compile */
+export class RepoDetectionError extends Schema.TaggedError<RepoDetectionError>()(
+  "RepoDetectionError",
+  {
+    message: Schema.String,
   }
-  if (first !== "compile") {
-    return Either.left(
-      new CliUsageError({ message: `Unknown command: ${first}` })
+) {}
+
+// =============================================================================
+// GitHub repo detection
+// =============================================================================
+
+/**
+ * Parse a GitHub remote URL into its owner/repo pair. Understands the
+ * `git@github.com:owner/repo.git`, `ssh://git@github.com/owner/repo.git` and
+ * `https://github.com/owner/repo(.git)` forms; anything else (including
+ * non-GitHub hosts) yields undefined.
+ */
+export const parseGitHubRepo = (url: string): RepoRef | undefined => {
+  const match =
+    /^(?:git@github\.com:|(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?github\.com\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(
+      url.trim()
     );
-  }
-
-  let entry: string | undefined;
-  let outDir = DEFAULT_OUT_DIR;
-  const rest = argv.slice(1);
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i]!;
-    if (arg === "--help" || arg === "-h") {
-      return Either.right({ _tag: "Help" });
-    }
-    if (arg === "--out") {
-      const value = rest[i + 1];
-      if (value === undefined || value.startsWith("--")) {
-        return Either.left(
-          new CliUsageError({ message: "--out requires a directory argument" })
-        );
-      }
-      outDir = value;
-      i++;
-      continue;
-    }
-    if (arg.startsWith("-")) {
-      return Either.left(new CliUsageError({ message: `Unknown option: ${arg}` }));
-    }
-    if (entry !== undefined) {
-      return Either.left(
-        new CliUsageError({
-          message: `Unexpected extra argument: ${arg} (only one entry is supported)`,
-        })
-      );
-    }
-    entry = arg;
-  }
-  return Either.right({ _tag: "Compile", entry, outDir });
+  if (match === null) return undefined;
+  return { owner: match[1]!, repo: match[2]! };
 };
+
+/** Run `git remote get-url origin`, capturing exit code and stdout */
+const gitOriginRemote = Effect.scoped(
+  Effect.gen(function* () {
+    const process = yield* PlatformCommand.start(
+      PlatformCommand.make("git", "remote", "get-url", "origin")
+    );
+    const output = yield* process.stdout.pipe(
+      Stream.decodeText(),
+      Stream.mkString
+    );
+    const exitCode = yield* process.exitCode;
+    return { exitCode, output };
+  })
+);
+
+/**
+ * Detect the consumer repo from `git remote get-url origin` in the current
+ * working directory. Used when compiling a Project without `--repo`.
+ */
+export const detectRepoFromGit = Effect.fn("cli.detectRepoFromGit")(
+  function* () {
+    const { exitCode, output } = yield* gitOriginRemote.pipe(
+      Effect.mapError(
+        (cause) =>
+          new RepoDetectionError({
+            message: `Could not run \`git remote get-url origin\`: ${String(cause)}`,
+          })
+      )
+    );
+    if (exitCode !== 0) {
+      return yield* new RepoDetectionError({
+        message: `\`git remote get-url origin\` failed with exit code ${exitCode}`,
+      });
+    }
+    const repo = parseGitHubRepo(output);
+    if (repo === undefined) {
+      return yield* new RepoDetectionError({
+        message: `The origin remote "${output.trim()}" is not a GitHub repository URL`,
+      });
+    }
+    return repo;
+  }
+);
 
 // =============================================================================
 // Export scanning
@@ -194,43 +184,42 @@ export const collectCompilables = (
 // Compilation pipeline
 // =============================================================================
 
+const DEFAULT_ENTRIES = ["tasks/automations.ts", "tasks/automations.js"] as const;
+const DEFAULT_OUT_DIR = "dist-tasker";
+
 const resolveEntry = Effect.fn("cli.resolveEntry")(function* (
   entry: string | undefined
 ) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const candidates = entry !== undefined ? [entry] : [...DEFAULT_ENTRIES];
-  const found = yield* Effect.promise(async () => {
-    const { existsSync } = await import("node:fs");
-    const { resolve } = await import("node:path");
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return resolve(candidate);
-    }
-    return undefined;
-  });
-  if (found === undefined) {
-    return yield* Effect.fail(
-      new EntryNotFoundError({
-        message: `Entry module not found. Tried: ${candidates.join(", ")}`,
-        tried: candidates,
-      })
-    );
+  for (const candidate of candidates) {
+    const exists = yield* fs
+      .exists(candidate)
+      .pipe(Effect.orElseSucceed(() => false));
+    if (exists) return path.resolve(candidate);
   }
-  return found;
+  return yield* new EntryNotFoundError({
+    message: `Entry module not found. Tried: ${candidates.join(", ")}`,
+    tried: candidates,
+  });
 });
 
 const importEntry = Effect.fn("cli.importEntry")(function* (entryPath: string) {
-  const { pathToFileURL } = yield* Effect.promise(() => import("node:url"));
+  const path = yield* Path.Path;
   const tsHint =
     /\.(ts|tsx|mts|cts)$/.test(entryPath) && typeof Bun === "undefined"
       ? " TypeScript entries require Bun — run this via `bunx tasker-effect`."
       : "";
+  const toError = (cause: unknown) =>
+    new EntryImportError({
+      message: `Failed to import ${entryPath}: ${String(cause)}.${tsHint}`,
+      entry: entryPath,
+    });
+  const entryUrl = yield* path.toFileUrl(entryPath).pipe(Effect.mapError(toError));
   return yield* Effect.tryPromise({
-    try: () =>
-      import(pathToFileURL(entryPath).href) as Promise<Record<string, unknown>>,
-    catch: (cause) =>
-      new EntryImportError({
-        message: `Failed to import ${entryPath}: ${String(cause)}.${tsHint}`,
-        entry: entryPath,
-      }),
+    try: () => import(entryUrl.href) as Promise<Record<string, unknown>>,
+    catch: toError,
   });
 });
 
@@ -257,6 +246,7 @@ export interface CompileRunResult {
 export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
   readonly entry?: string | undefined;
   readonly outDir: string;
+  readonly repo?: RepoRef | undefined;
 }) {
   const compiler = yield* TaskerCompiler;
   const store = yield* FileStore;
@@ -265,22 +255,31 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
   const module = yield* importEntry(entryPath);
   const compilables = collectCompilables(module);
   if (compilables.length === 0) {
-    return yield* Effect.fail(
-      new NoCompilableExportsError({
-        message:
-          `${entryPath} has no compilable exports. ` +
-          "Export (default or named) Project, Profile or Task instances from tasker-effect.",
-        entry: entryPath,
-      })
-    );
+    return yield* new NoCompilableExportsError({
+      message:
+        `${entryPath} has no compilable exports. ` +
+        "Export (default or named) Project, Profile or Task instances from tasker-effect.",
+      entry: entryPath,
+    });
   }
+
+  // Only Project compiles need the repo (for the sync bootstrap in the
+  // project XML); detect it lazily so Profile/Task-only entries never
+  // require git or --repo.
+  let repo = options.repo;
+  const resolveRepo = Effect.gen(function* () {
+    if (repo === undefined) {
+      repo = yield* detectRepoFromGit();
+    }
+    return repo;
+  });
 
   const written: Array<WrittenFile> = [];
   const seen = new Map<string, string>();
   for (const { exportName, value } of compilables) {
     const files =
       value instanceof Project
-        ? yield* compiler.compileProject(value)
+        ? yield* compiler.compileProject(value, { repo: yield* resolveRepo })
         : value instanceof Profile
           ? yield* compiler.compileProfile(value)
           : [yield* compiler.compileTask(value)];
@@ -309,6 +308,7 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
 const runCompile = Effect.fn("cli.runCompile")(function* (options: {
   readonly entry?: string | undefined;
   readonly outDir: string;
+  readonly repo?: RepoRef | undefined;
 }) {
   const result = yield* compileEntry(options);
   yield* Console.log(
@@ -323,45 +323,126 @@ const runCompile = Effect.fn("cli.runCompile")(function* (options: {
 });
 
 // =============================================================================
+// Command definition (@effect/cli)
+// =============================================================================
+
+const entryArg = Args.file({ name: "entry" }).pipe(
+  Args.withDescription(
+    "Module whose exports (default and named) are scanned for Project, " +
+      `Profile and Task instances. Default: ${DEFAULT_ENTRIES[0]} (then ${DEFAULT_ENTRIES[1]})`
+  ),
+  Args.optional
+);
+
+const outOption = Options.directory("out").pipe(
+  Options.withDescription("Output directory"),
+  Options.withDefault(DEFAULT_OUT_DIR)
+);
+
+const repoOption = Options.text("repo").pipe(
+  Options.mapTryCatch(
+    (value): RepoRef => {
+      const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(value);
+      if (match === null) {
+        throw new Error(`Invalid repository: ${value}`);
+      }
+      return { owner: match[1]!, repo: match[2]! };
+    },
+    () => HelpDoc.p("--repo requires a GitHub repository as <owner>/<name>")
+  ),
+  Options.withDescription(
+    "GitHub repository (<owner>/<name>) embedded in the generated project " +
+      "XML's sync bootstrap. Default: detected from `git remote get-url " +
+      "origin`. Only needed for Projects."
+  ),
+  Options.optional
+);
+
+const compileCommand = Command.make(
+  "compile",
+  { entry: entryArg, out: outOption, repo: repoOption },
+  ({ entry, out, repo }) =>
+    runCompile({
+      entry: Option.getOrUndefined(entry),
+      outDir: out,
+      repo: Option.getOrUndefined(repo),
+    })
+).pipe(
+  Command.withDescription(
+    "Compile the Project/Profile/Task exports of an entry module to " +
+      "Tasker-executable JavaScript"
+  )
+);
+
+const rootCommand = Command.make("tasker-effect").pipe(
+  Command.withDescription(
+    "Compile Tasker DSL definitions to Tasker-executable JavaScript"
+  ),
+  Command.withSubcommands([compileCommand])
+);
+
+const cli = Command.run(rootCommand, {
+  name: "tasker-effect",
+  version: "0.1.0",
+  footer: HelpDoc.blocks([
+    HelpDoc.p(
+      "TypeScript entries require Bun (run via `bunx tasker-effect`). " +
+        "Plain JavaScript entries also work under Node (`npx tasker-effect`)."
+    ),
+    HelpDoc.p(
+      "Only the declarative DSL is compiled. Bundling Effect programs for " +
+        "Tasker is intentionally left to the consumer, e.g.: esbuild " +
+        "script.ts --bundle --minify --format=iife --platform=browser " +
+        "--outfile=dist-tasker/script.js"
+    ),
+  ]),
+});
+
+// =============================================================================
 // Edge: process runner
 // =============================================================================
 
-const CliLive = Layer.mergeAll(TaskerCompiler.Default, FileStore.Default);
+const CliLive = Layer.mergeAll(
+  TaskerCompiler.Default,
+  FileStore.Default,
+  NodeContext.layer
+);
 
 /**
  * Run the CLI with the given argv (excluding the runtime/script prefix) and
- * resolve to a process exit code. This is the only place effects are run.
+ * resolve to a process exit code. This is the only place effects are run and
+ * the only place the concrete Node platform layer is provided.
  */
-export const runCli = (argv: ReadonlyArray<string>): Promise<number> => {
-  const program = Effect.gen(function* () {
-    const invocation = yield* parseCliArgs(argv);
-    if (invocation._tag === "Help") {
-      yield* Console.log(HELP_TEXT);
-      return 0;
-    }
-    yield* runCompile({ entry: invocation.entry, outDir: invocation.outDir });
-    return 0;
-  }).pipe(
-    Effect.catchTags({
-      CliUsageError: (error) =>
-        Console.error(`${error.message}\n\n${HELP_TEXT}`).pipe(Effect.as(1)),
-      EntryNotFoundError: (error) =>
-        Console.error(error.message).pipe(Effect.as(1)),
-      EntryImportError: (error) =>
-        Console.error(error.message).pipe(Effect.as(1)),
-      NoCompilableExportsError: (error) =>
-        Console.error(error.message).pipe(Effect.as(1)),
-      CompileError: (error) =>
-        Console.error(
-          `Compilation failed: ${error.message}` +
-            (error.source !== undefined ? ` (while compiling "${error.source}")` : "")
-        ).pipe(Effect.as(1)),
-      StorageWriteError: (error) =>
-        Console.error(`Failed to write ${error.path}: ${error.message}`).pipe(
-          Effect.as(1)
-        ),
-    }),
-    Effect.provide(CliLive)
+export const runCli = (argv: ReadonlyArray<string>): Promise<number> =>
+  Effect.runPromise(
+    cli(["node", "tasker-effect", ...argv]).pipe(
+      Effect.as(0),
+      Effect.catchTags({
+        EntryNotFoundError: (error) =>
+          Console.error(error.message).pipe(Effect.as(1)),
+        EntryImportError: (error) =>
+          Console.error(error.message).pipe(Effect.as(1)),
+        NoCompilableExportsError: (error) =>
+          Console.error(error.message).pipe(Effect.as(1)),
+        RepoDetectionError: (error) =>
+          Console.error(
+            `${error.message}\n` +
+              "Pass --repo <owner>/<name> to set the GitHub repository explicitly."
+          ).pipe(Effect.as(1)),
+        CompileError: (error) =>
+          Console.error(
+            `Compilation failed: ${error.message}` +
+              (error.source !== undefined
+                ? ` (while compiling "${error.source}")`
+                : "")
+          ).pipe(Effect.as(1)),
+        StorageWriteError: (error) =>
+          Console.error(`Failed to write ${error.path}: ${error.message}`).pipe(
+            Effect.as(1)
+          ),
+      }),
+      // @effect/cli already printed the validation error (with usage) itself.
+      Effect.catchIf(ValidationError.isValidationError, () => Effect.succeed(1)),
+      Effect.provide(CliLive)
+    )
   );
-  return Effect.runPromise(program);
-};

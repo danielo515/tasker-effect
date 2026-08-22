@@ -10,9 +10,9 @@
  *
  * Two sources are supported:
  *
- * - **Releases** (default): downloads the `.js` assets of the latest GitHub
- *   release. Public repos need no token and downloads are plain text, so
- *   this path works both under Node/Bun and inside Tasker.
+ * - **Releases** (default): downloads the `.js`/`.json` assets of the latest
+ *   GitHub release. Public repos need no token and downloads are plain text,
+ *   so this path works both under Node/Bun and inside Tasker.
  * - **Actions artifacts**: downloads the newest CI artifact zip via the
  *   GitHub API (token required) and extracts it. Intended for Node/CI use.
  */
@@ -20,8 +20,8 @@
 import { HttpClient } from "@effect/platform";
 import { Effect, Schema } from "effect";
 import {
-  Artifact,
   ArtifactsResponse,
+  DEFAULT_ASSET_SUFFIXES,
   DEFAULT_TARGET_DIR,
   DownloadError,
   FileStore,
@@ -112,11 +112,11 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
         Effect.catchTags(downloadErrors(url))
       );
 
-    /** Pull the .js assets of the latest release. Works on-device. */
+    /** Pull the .js/.json assets of the latest release. Works on-device. */
     const pullLatestProfiles = Effect.fn("ProfileSync.pullLatestProfiles")(
       function* (options: SyncOptions) {
         const targetDir = options.targetDir ?? DEFAULT_TARGET_DIR;
-        const suffixes = options.assetSuffixes ?? [".js"];
+        const suffixes = options.assetSuffixes ?? DEFAULT_ASSET_SUFFIXES;
         const url = `https://api.github.com/repos/${options.owner}/${options.repo}/releases/latest`;
 
         const payload = yield* getJson(url, options.token);
@@ -126,11 +126,9 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
           suffixes.some((suffix) => asset.name.endsWith(suffix))
         );
         if (assets.length === 0) {
-          return yield* Effect.fail(
-            new NothingToSyncError({
-              message: `Release ${release.tag_name} has no assets matching ${suffixes.join(", ")}`,
-            })
-          );
+          return yield* new NothingToSyncError({
+            message: `Release ${release.tag_name} has no assets matching ${suffixes.join(", ")}`,
+          });
         }
 
         const written: Array<string> = [];
@@ -170,11 +168,9 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
 
       const newest = candidates[0];
       if (newest === undefined) {
-        return yield* Effect.fail(
-          new NothingToSyncError({
-            message: `No CI artifact named "${name}" found`,
-          })
-        );
+        return yield* new NothingToSyncError({
+          message: `No CI artifact named "${name}" found`,
+        });
       }
       return newest;
     });
@@ -183,12 +179,10 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
     const pullFromArtifacts = Effect.fn("ProfileSync.pullFromArtifacts")(
       function* (options: SyncOptions) {
         if (options.token === undefined) {
-          return yield* Effect.fail(
-            new GitHubApiError({
-              message: "A GitHub token is required to download CI artifacts",
-              url: "https://api.github.com/actions/artifacts",
-            })
-          );
+          return yield* new GitHubApiError({
+            message: "A GitHub token is required to download CI artifacts",
+            url: "https://api.github.com/actions/artifacts",
+          });
         }
         const targetDir = options.targetDir ?? DEFAULT_TARGET_DIR;
         const artifact = yield* latestArtifact(options);

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it } from "@effect/vitest";
 import {
   compileProfileFiles,
   compileProjectFiles,
@@ -9,12 +9,13 @@ import { nightMode, meetingSilencer, quietProfiles } from "../tasks/popular/quie
 import { drivingMode, drivingAutoReply, drivingProfiles } from "../tasks/popular/driving.js";
 
 const expectValidJs = (code: string) => {
-  // Throws SyntaxError if the emitted code does not parse.
+  // Throws SyntaxError if the emitted code does not parse (never invoked).
+  // oxlint-disable-next-line typescript/no-implied-eval -- parse-only guard on generated output, never invoked
   expect(() => new Function(code)).not.toThrow();
 };
 
 describe("popular quiet profiles", () => {
-  test("Night Mode compiles enter/exit with silence + radio calls", () => {
+  it("Night Mode compiles enter/exit with silence + radio calls", () => {
     const files = compileProfileFiles(nightMode);
     expect(files.map((f) => f.filename)).toEqual([
       "night-mode.enter.js",
@@ -39,7 +40,7 @@ describe("popular quiet profiles", () => {
     for (const file of files) expectValidJs(file.content);
   });
 
-  test("Meeting Silencer compiles enter/exit with vibrate + flash", () => {
+  it("Meeting Silencer compiles enter/exit with vibrate + flash", () => {
     const files = compileProfileFiles(meetingSilencer);
     expect(files.map((f) => f.filename)).toEqual([
       "meeting-silencer.enter.js",
@@ -59,7 +60,7 @@ describe("popular quiet profiles", () => {
 });
 
 describe("popular driving profiles", () => {
-  test("Driving Mode compiles enter/exit with car mode + %DRIVING flag", () => {
+  it("Driving Mode compiles enter/exit with car mode + %DRIVING flag", () => {
     const files = compileProfileFiles(drivingMode);
     expect(files.map((f) => f.filename)).toEqual([
       "driving-mode.enter.js",
@@ -78,7 +79,7 @@ describe("popular driving profiles", () => {
     for (const file of files) expectValidJs(file.content);
   });
 
-  test("Driving Auto Reply compiles an enter-only runtime SMS reply", () => {
+  it("Driving Auto Reply compiles an enter-only runtime SMS reply", () => {
     const files = compileProfileFiles(drivingAutoReply);
     expect(files.map((f) => f.filename)).toEqual(["driving-auto-reply.enter.js"]);
 
@@ -91,12 +92,14 @@ describe("popular driving profiles", () => {
 });
 
 describe("popular profiles project README", () => {
-  test("describeTrigger output for calendarEntry and receivedText appears", () => {
+  it("describeTrigger output for calendarEntry and receivedText appears", () => {
     const project = new Project({
       name: "Popular Profiles",
       profiles: [...quietProfiles, ...drivingProfiles],
     });
-    const files = compileProjectFiles(project);
+    const files = compileProjectFiles(project, {
+      repo: { owner: "acme", repo: "automations" },
+    });
     const readme = files.find((f) => f.filename === "README.md");
     expect(readme).toBeDefined();
     expect(readme?.content).toContain(
