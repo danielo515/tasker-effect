@@ -220,6 +220,20 @@ export class Condition extends Schema.Class<Condition>("Condition")({
   value: Schema.optional(Schema.String),
 }) {}
 
+/**
+ * Documentation annotations (description + examples) for an action/trigger
+ * schema class, attached as the class's schema annotations. Loosely typed on
+ * purpose: typing the examples against the class's own Type inside its
+ * `extends` clause makes the class type circular (TS2310), so example
+ * validity is enforced by tests instead of the type system.
+ */
+const docs = (annotations: {
+  readonly description: string;
+  readonly examples: ReadonlyArray<unknown>;
+  // oxlint-disable-next-line typescript/no-explicit-any -- Annotations.Schema<Self> would self-reference the class; see doc comment
+}): Schema.Annotations.Schema<any> =>
+  annotations as Schema.Annotations.Schema<any>;
+
 // =============================================================================
 // Actions
 // =============================================================================
@@ -526,29 +540,55 @@ export class GetLocation extends Schema.TaggedClass<GetLocation>()(
 ) {}
 
 /** Enable/disable Android car mode */
-export class SetCarMode extends Schema.TaggedClass<SetCarMode>()("SetCarMode", {
-  on: Schema.Boolean,
-}) {}
+export class SetCarMode extends Schema.TaggedClass<SetCarMode>()(
+  "SetCarMode",
+  {
+    on: Schema.Boolean,
+  },
+  docs({
+    description:
+      "Enable or disable Android car mode (Tasker carMode())",
+    examples: [{ _tag: "SetCarMode", on: true }],
+  })
+) {}
 
 /** Enable/disable Android night mode */
 export class SetNightMode extends Schema.TaggedClass<SetNightMode>()(
   "SetNightMode",
   {
     on: Schema.Boolean,
-  }
+  },
+  docs({
+    description:
+      "Enable or disable Android night mode (Tasker nightMode())",
+    examples: [{ _tag: "SetNightMode", on: true }],
+  })
 ) {}
 
 /** Keep the display on while powered from the given source */
-export class SetStayOn extends Schema.TaggedClass<SetStayOn>()("SetStayOn", {
-  mode: Schema.Literal("never", "ac", "usb", "any"),
-}) {}
+export class SetStayOn extends Schema.TaggedClass<SetStayOn>()(
+  "SetStayOn",
+  {
+    mode: Schema.Literal("never", "ac", "usb", "any"),
+  },
+  docs({
+    description:
+      "Keep the display on while powered from the given source (Tasker stayOn())",
+    examples: [{ _tag: "SetStayOn", mode: "ac" }],
+  })
+) {}
 
 /** Enable/disable display auto-rotation */
 export class SetAutoRotate extends Schema.TaggedClass<SetAutoRotate>()(
   "SetAutoRotate",
   {
     on: Schema.Boolean,
-  }
+  },
+  docs({
+    description:
+      "Enable or disable display auto-rotation (Tasker displayAutoRotate())",
+    examples: [{ _tag: "SetAutoRotate", on: true }],
+  })
 ) {}
 
 /** Enable/disable automatic brightness */
@@ -556,7 +596,12 @@ export class SetAutoBrightness extends Schema.TaggedClass<SetAutoBrightness>()(
   "SetAutoBrightness",
   {
     on: Schema.Boolean,
-  }
+  },
+  docs({
+    description:
+      "Enable or disable automatic brightness (Tasker displayAutoBright())",
+    examples: [{ _tag: "SetAutoBrightness", on: false }],
+  })
 ) {}
 
 /** Set the display auto-off timeout */
@@ -575,7 +620,12 @@ export class SetDisplayTimeout extends Schema.TaggedClass<SetDisplayTimeout>()(
       Schema.Number.pipe(Schema.int(), Schema.between(0, 59)),
       { default: () => 0 }
     ),
-  }
+  },
+  docs({
+    description:
+      "Set the display auto-off timeout (Tasker displayTimeout(hours, minutes, seconds))",
+    examples: [{ _tag: "SetDisplayTimeout", hours: 0, minutes: 30, seconds: 0 }],
+  })
 ) {}
 
 /**
@@ -766,7 +816,12 @@ export class HeadsetPluggedTrigger extends Schema.TaggedClass<HeadsetPluggedTrig
     kind: Schema.optionalWith(Schema.Literal("any", "mic", "no-mic"), {
       default: () => "any" as const,
     }),
-  }
+  },
+  docs({
+    description:
+      "State > Hardware > Headset Plugged — active while a headset is connected, optionally only with or without a microphone",
+    examples: [{ _tag: "HeadsetPluggedTrigger", kind: "any" }],
+  })
 ) {}
 
 /** Active while the device is on external power */
@@ -777,7 +832,12 @@ export class PowerTrigger extends Schema.TaggedClass<PowerTrigger>()(
       Schema.Literal("any", "ac", "usb", "wireless"),
       { default: () => "any" as const }
     ),
-  }
+  },
+  docs({
+    description:
+      "State > Power — active while the device charges from the given source",
+    examples: [{ _tag: "PowerTrigger", source: "ac" }],
+  })
 ) {}
 
 /** Active during a calendar entry, optionally filtered by calendar/title */
@@ -786,7 +846,12 @@ export class CalendarEntryTrigger extends Schema.TaggedClass<CalendarEntryTrigge
   {
     calendar: Schema.optional(Schema.String),
     title: Schema.optional(Schema.String),
-  }
+  },
+  docs({
+    description:
+      "State > App > Calendar Entry — active during a calendar event, optionally filtered by calendar and/or title",
+    examples: [{ _tag: "CalendarEntryTrigger", calendar: "Work", title: "1:1" }],
+  })
 ) {}
 
 /** Fires when a text message arrives, optionally filtered by sender */
@@ -797,7 +862,12 @@ export class ReceivedTextTrigger extends Schema.TaggedClass<ReceivedTextTrigger>
       default: () => "any" as const,
     }),
     sender: Schema.optional(Schema.String),
-  }
+  },
+  docs({
+    description:
+      "Event > Phone > Received Text — fires when an SMS/MMS arrives, optionally filtered by sender",
+    examples: [{ _tag: "ReceivedTextTrigger", kind: "sms", sender: "Boss" }],
+  })
 ) {}
 
 /** Active while a Tasker variable satisfies a condition */
