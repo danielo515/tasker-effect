@@ -370,6 +370,7 @@ await Effect.runPromise(
 src/               # the library (published surface)
 tasks/             # your automations, compiled by CI
   automations.ts   #   DSL project → one JS file per task
+  popular/         #   community-profile ports, pulled into the project
   scripts/         #   Effect programs → single-file bundles
 scripts/           # build tooling (compile-tasks.ts)
 examples/          # runnable walkthroughs
