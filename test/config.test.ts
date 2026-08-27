@@ -3,7 +3,11 @@ import { Config, ConfigError, Effect, Fiber } from "effect";
 import { CONFIG_TASK_NAME } from "../src/compiler.js";
 import { makeTaskerConfigProvider, taskerConfigLayer } from "../src/config.js";
 import { secret } from "../src/profile.js";
-import { makeTestTasker, TaskerCallError } from "../src/tasker-api.js";
+import {
+  makeTestTasker,
+  TaskerCallError,
+  type TaskerApi,
+} from "../src/tasker-api.js";
 
 const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
 
@@ -14,6 +18,7 @@ const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
 const makePromptingTasker = (options?: {
   readonly globals?: Record<string, string>;
   readonly answer?: string;
+  readonly overrides?: Partial<TaskerApi>;
 }) => {
   const globals = new Map(Object.entries(options?.globals ?? {}));
   return {
@@ -27,6 +32,7 @@ const makePromptingTasker = (options?: {
           }
           return true;
         }),
+      ...options?.overrides,
     }),
   };
 };
@@ -85,6 +91,51 @@ describe("makeTaskerConfigProvider", () => {
     })
   );
 
+  it.live("performs the prompt one above the caller's %priority", () =>
+    Effect.gen(function* () {
+      const { api, calls } = makePromptingTasker({
+        answer: "x",
+        overrides: {
+          local: (name) => Effect.succeed(name === "priority" ? "12" : ""),
+        },
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      );
+      const prompt = calls.find((call) => call.name === "performTask");
+      expect(prompt?.args).toEqual([
+        CONFIG_TASK_NAME,
+        13,
+        "OPENWEATHER_KEY",
+        "OPENWEATHER_KEY",
+      ]);
+    })
+  );
+
+  it.live("a failing %priority read falls back to the constant and does not fail the read", () =>
+    Effect.gen(function* () {
+      const { api, calls } = makePromptingTasker({
+        answer: "still-works",
+        overrides: {
+          local: () =>
+            Effect.fail(
+              new TaskerCallError({ function: "local", message: "boom" })
+            ),
+        },
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      const value = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      );
+      expect(value).toBe("still-works");
+      const prompt = calls.find((call) => call.name === "performTask");
+      expect(prompt?.args[1]).toBe(5);
+    })
+  );
+
   it.effect("nested config paths map to underscore-joined uppercase globals", () =>
     Effect.gen(function* () {
       const { api } = makePromptingTasker({ globals: { TE_KEY: "nested" } });
@@ -115,6 +166,123 @@ describe("makeTaskerConfigProvider", () => {
         provider
       );
       expect(fallback).toBe("default");
+    })
+  );
+
+  it.live("a dismissed prompt fails promptly with MissingData and composes with Config.withDefault", () =>
+    Effect.gen(function* () {
+      // TE Config is seen running, then stops without ever setting the
+      // global: the user dismissed the dialog. The read must fail well
+      // before the generous 5s prompt timeout — a regression to
+      // timeout-only behavior trips the 1s guards below.
+      const GENEROUS = { pollIntervalMillis: 5, promptTimeoutMillis: 5_000 };
+      const dismissedTasker = () => {
+        let checks = 0;
+        return makePromptingTasker({
+          overrides: {
+            taskRunning: () => Effect.sync(() => ++checks <= 2),
+          },
+        });
+      };
+
+      const errorProvider = yield* makeTaskerConfigProvider(
+        dismissedTasker().api,
+        GENEROUS
+      );
+      const error = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        errorProvider
+      ).pipe(
+        Effect.flip,
+        Effect.timeoutFail({
+          duration: "1 second",
+          onTimeout: () => "dismissal was not detected promptly" as const,
+        })
+      );
+      expect(ConfigError.isConfigError(error)).toBe(true);
+      expect(ConfigError.isMissingDataOnly(error)).toBe(true);
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("OPENWEATHER_KEY");
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("without an answer");
+
+      const fallbackProvider = yield* makeTaskerConfigProvider(
+        dismissedTasker().api,
+        GENEROUS
+      );
+      const fallback = yield* Effect.withConfigProvider(
+        Config.withDefault(Config.string("OPENWEATHER_KEY"), "default"),
+        fallbackProvider
+      ).pipe(
+        Effect.timeoutFail({
+          duration: "1 second",
+          onTimeout: () => "fallback was not reached promptly" as const,
+        })
+      );
+      expect(fallback).toBe("default");
+    })
+  );
+
+  it.live("does not fail while the prompt task has not started yet (start race)", () =>
+    Effect.gen(function* () {
+      // taskRunning is false while TE Config is still queued; only a
+      // true → false transition may fail the read.
+      const globals = new Map<string, string>();
+      let checks = 0;
+      const { api } = makeTestTasker({
+        global: (name) => Effect.succeed(globals.get(name) ?? ""),
+        taskRunning: () =>
+          Effect.sync(() => {
+            checks++;
+            if (checks <= 3) return false; // queued, not yet started
+            if (checks >= 6) globals.set("OPENWEATHER_KEY", "late-start"); // answered
+            return true;
+          }),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, {
+        pollIntervalMillis: 5,
+        promptTimeoutMillis: 5_000,
+      });
+      const value = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      );
+      expect(value).toBe("late-start");
+    })
+  );
+
+  it.live("returns the value stored just before the task ended (end race)", () =>
+    Effect.gen(function* () {
+      // The store action sets the global right before TE Config exits, so
+      // the poll may observe the global unset and then taskRunning false:
+      // the final re-read must pick the value up instead of reporting a
+      // dismissal.
+      const globals = new Map<string, string>();
+      let checks = 0;
+      const { api } = makeTestTasker({
+        global: (name) => Effect.succeed(globals.get(name) ?? ""),
+        taskRunning: () =>
+          Effect.sync(() => {
+            checks++;
+            if (checks < 3) return true;
+            globals.set("OPENWEATHER_KEY", "stored-at-exit");
+            return false;
+          }),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, {
+        pollIntervalMillis: 5,
+        promptTimeoutMillis: 5_000,
+      });
+      const value = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      ).pipe(
+        Effect.timeoutFail({
+          duration: "1 second",
+          onTimeout: () => "end race was not resolved promptly" as const,
+        })
+      );
+      expect(value).toBe("stored-at-exit");
     })
   );
 

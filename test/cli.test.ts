@@ -286,6 +286,8 @@ describe("compileEntry", () => {
         "project-task.js",
         "secrets.json",
         "tasker-effect.prj.xml",
+        "te-config-label.js",
+        "te-config-scan.js",
       ]);
       for (const file of result.files) {
         const exists = yield* fs.exists(path.join(outDir, file.filename));
@@ -662,7 +664,7 @@ describe("CLI end-to-end (spawned)", () => {
         expect(stderr).toBe("");
         expect(exitCode).toBe(0);
         expect(stdout).toContain("Compiled 3 export(s)");
-        expect(stdout).toContain("8 file(s) written");
+        expect(stdout).toContain("10 file(s) written");
         expect(yield* fs.exists(path.join(outDir, "greet.js"))).toBe(true);
         expect(
           yield* fs.exists(path.join(outDir, "night-mode.enter.js"))

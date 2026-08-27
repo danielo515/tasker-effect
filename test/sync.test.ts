@@ -170,7 +170,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
     })
   );
 
-  it.effect("syncs .json assets (the secrets manifest) by default", () =>
+  it.effect("syncs .json and .prj.xml assets (secrets manifest, project XML) by default", () =>
     Effect.gen(function* () {
       const { layer, written } = makeStubs({
         releaseJson: {
@@ -182,6 +182,11 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
               browser_download_url: "https://example.com/secrets.json",
               size: 20,
             },
+            {
+              name: "tasker-effect.prj.xml",
+              browser_download_url: "https://example.com/tasker-effect.prj.xml",
+              size: 30,
+            },
           ],
         },
       });
@@ -191,8 +196,13 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(Effect.provide(layer));
 
-      expect(result.files.sort()).toEqual(["morning-routine.js", "secrets.json"]);
+      expect(result.files.sort()).toEqual([
+        "morning-routine.js",
+        "secrets.json",
+        "tasker-effect.prj.xml",
+      ]);
       expect(written.has("/tmp/tasker-js/secrets.json")).toBe(true);
+      expect(written.has("/tmp/tasker-js/tasker-effect.prj.xml")).toBe(true);
       expect(written.has("/tmp/tasker-js/README.md")).toBe(false);
     })
   );
