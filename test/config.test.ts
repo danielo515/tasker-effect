@@ -1,9 +1,9 @@
-import { describe, expect, it } from "@effect/vitest";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Config, ConfigError, Effect, Fiber } from "effect";
 import { CONFIG_TASK_NAME } from "../src/compiler.js";
-import { makeTaskerConfigProvider } from "../src/config.js";
+import { makeTaskerConfigProvider, taskerConfigLayer } from "../src/config.js";
 import { secret } from "../src/profile.js";
-import { makeTestTasker } from "../src/tasker-api.js";
+import { makeTestTasker, TaskerCallError } from "../src/tasker-api.js";
 
 const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
 
@@ -232,5 +232,59 @@ describe("makeTaskerConfigProvider", () => {
         expect(later).toBe("late-answer");
         expect(calls.filter((call) => call.name === "performTask")).toHaveLength(2);
       })
+  );
+
+  it.effect("wraps a failing global() read in SourceUnavailable", () =>
+    Effect.gen(function* () {
+      const { api } = makeTestTasker({
+        global: () =>
+          Effect.fail(new TaskerCallError({ function: "global", message: "no globals" })),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      const error = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      ).pipe(Effect.flip);
+      expect(ConfigError.isConfigError(error)).toBe(true);
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("no globals");
+    })
+  );
+
+  it.live("wraps a failing performTask() prompt in SourceUnavailable", () =>
+    Effect.gen(function* () {
+      const { api } = makeTestTasker({
+        global: () => Effect.succeed(""),
+        performTask: () =>
+          Effect.fail(new TaskerCallError({ function: "performTask", message: "no task runner" })),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      const error = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      ).pipe(Effect.flip);
+      expect(ConfigError.isConfigError(error)).toBe(true);
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("no task runner");
+    })
+  );
+});
+
+describe("taskerConfigLayer", () => {
+  const g = globalThis as Record<string, unknown>;
+
+  afterEach(() => {
+    delete g.global;
+    delete g.performTask;
+  });
+
+  it.effect("installs a ConfigProvider backed by the live Tasker globals", () =>
+    Effect.gen(function* () {
+      g.global = (name: string) => (name === "OPENWEATHER_KEY" ? "live-value" : "");
+      const value = yield* Config.string("OPENWEATHER_KEY").pipe(
+        Effect.provide(taskerConfigLayer({ secrets: [API_KEY] }))
+      );
+      expect(value).toBe("live-value");
+    })
   );
 });

@@ -64,6 +64,43 @@ describe("Action builders", () => {
     expect(action.outputGlobal).toBeUndefined();
   });
 
+  it("http sets body and outputGlobal when provided", () => {
+    const action = Action.http("POST", "https://example.com", {
+      body: "payload",
+      outputGlobal: "RESPONSE",
+    });
+    expect(action.body).toBe("payload");
+    expect(action.outputGlobal).toBe("RESPONSE");
+  });
+
+  it("say sets engine and voice when provided", () => {
+    const action = Action.say("hi", { engine: "google", voice: "en-us" });
+    expect(action.engine).toBe("google");
+    expect(action.voice).toBe("en-us");
+  });
+
+  it("launchApp sets data when provided", () => {
+    const action = Action.launchApp("app", { data: "extra" });
+    expect(action.data).toBe("extra");
+  });
+
+  it("sendIntent sets every optional field when provided", () => {
+    const action = Action.sendIntent("android.intent.action.VIEW", "activity", {
+      pkg: "com.example",
+      cls: "MainActivity",
+      category: "android.intent.category.DEFAULT",
+      data: "content://x",
+      mimeType: "text/plain",
+      extras: ["a=1"],
+    });
+    expect(action.pkg).toBe("com.example");
+    expect(action.cls).toBe("MainActivity");
+    expect(action.category).toBe("android.intent.category.DEFAULT");
+    expect(action.data).toBe("content://x");
+    expect(action.mimeType).toBe("text/plain");
+    expect(action.extras).toEqual(["a=1"]);
+  });
+
   it("when nests actions recursively", () => {
     const action = Action.when(
       cond("%BATT", "lt", "20"),
@@ -137,6 +174,11 @@ describe("Trigger builders", () => {
     expect(trigger._tag).toBe("TimeTrigger");
     expect(trigger.from).toBeInstanceOf(TimeOfDay);
     expect(() => Trigger.time({ hour: 25, minute: 0 })).toThrow();
+  });
+
+  it("time trigger sets repeatMinutes when provided", () => {
+    const trigger = Trigger.time({ hour: 7, minute: 0 }, { repeatMinutes: 30 });
+    expect(trigger.repeatMinutes).toBe(30);
   });
 
   it("battery trigger validates range", () => {

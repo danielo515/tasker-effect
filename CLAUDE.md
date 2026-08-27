@@ -65,11 +65,16 @@ bun install          # Install deps (prepare patches tsc + oxlint via @effect/ts
 bun run typecheck    # Type check (src/ only; emits Effect LSP diagnostics too)
 bun run lint         # oxlint incl. type-aware Effect LSP rules; warnings fail
 bun run test         # Run tests (vitest + @effect/vitest — NOT `bun test`)
+bun run test:coverage # Run tests with v8 coverage; enforces the 100% thresholds in vitest.config.ts
 bun run build        # Compile library to dist/ (npm publish surface)
 bun run compile      # Compile tasks/ to dist-tasker/ (Tasker-ready JS)
 ```
 
 Linting runs on every PR (CI `verify` job) as ONE command: `bun run lint`.
+`bun run test:coverage` is what CI runs for the test step: `vitest.config.ts`
+sets `coverage.thresholds` to 100% for statements/branches/functions/lines
+over `src/**/*.ts` (v8 provider) — a PR that lowers coverage fails CI, not
+just the `bun run test` step used for quick local iteration.
 The Effect language service is `@effect/tsgo` (TS 7 native build); the
 `prepare` script patches the local `typescript` install (so `tsc`/editors
 get Effect diagnostics) and the local `oxlint`/`oxlint-tsgolint` installs

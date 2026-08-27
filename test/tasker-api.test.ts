@@ -49,6 +49,14 @@ describe("Tasker service (test layer)", () => {
     })
   );
 
+  it.effect("getVoice defaults to an empty array", () =>
+    Effect.gen(function* () {
+      const tasker = yield* Tasker;
+      const result = yield* tasker.getVoice("prompt", "web", 5);
+      expect(result).toEqual([]);
+    }).pipe(Effect.provide(TaskerTest))
+  );
+
   it.effect("isAvailable is false in the test layer", () =>
     Effect.gen(function* () {
       const tasker = yield* Tasker;
@@ -97,6 +105,46 @@ describe("Tasker service (default/live layer)", () => {
         )
       );
       expect(seen).toEqual(["on-device"]);
+    })
+  );
+
+  it.effect("wraps a throwing global in TaskerCallError", () =>
+    Effect.gen(function* () {
+      (globalThis as Record<string, unknown>).flash = () => {
+        throw new Error("device exploded");
+      };
+      const error = yield* Effect.gen(function* () {
+        const tasker = yield* Tasker;
+        yield* tasker.flash("hello");
+      }).pipe(
+        Effect.provide(Tasker.Default),
+        Effect.flip,
+        Effect.ensuring(
+          Effect.sync(() => {
+            delete (globalThis as Record<string, unknown>).flash;
+          })
+        )
+      );
+      expect(error._tag).toBe("TaskerCallError");
+      expect(error.message).toContain("device exploded");
+    })
+  );
+
+  it.effect("isAvailable is true on-device when flash is defined", () =>
+    Effect.gen(function* () {
+      (globalThis as Record<string, unknown>).flash = () => {};
+      const result = yield* Effect.gen(function* () {
+        const tasker = yield* Tasker;
+        return yield* tasker.isAvailable;
+      }).pipe(
+        Effect.provide(Tasker.Default),
+        Effect.ensuring(
+          Effect.sync(() => {
+            delete (globalThis as Record<string, unknown>).flash;
+          })
+        )
+      );
+      expect(result).toBe(true);
     })
   );
 });

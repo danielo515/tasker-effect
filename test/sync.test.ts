@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { HttpClient, HttpClientResponse } from "@effect/platform";
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "@effect/platform";
 import { Effect, Layer } from "effect";
 import {
   FileStore,
@@ -57,6 +57,8 @@ const artifacts = {
 const makeStubs = (options?: {
   readonly releaseJson?: unknown;
   readonly releaseStatus?: number;
+  readonly artifactsJson?: unknown;
+  readonly failTransport?: "api" | "download";
 }) => {
   const written = new Map<string, string | Uint8Array>();
   const extractedInto: Array<string> = [];
@@ -68,6 +70,32 @@ const makeStubs = (options?: {
       const respond = (body: Response) =>
         Effect.succeed(HttpClientResponse.fromWeb(request, body));
 
+      if (
+        options?.failTransport === "api" &&
+        (url.includes("/releases/latest") || url.includes("/actions/artifacts"))
+      ) {
+        return Effect.fail(
+          new HttpClientError.RequestError({
+            request: HttpClientRequest.get(url),
+            reason: "Transport",
+            cause: new Error("connection refused"),
+          })
+        );
+      }
+      if (
+        options?.failTransport === "download" &&
+        !url.includes("/releases/latest") &&
+        !url.includes("/actions/artifacts")
+      ) {
+        return Effect.fail(
+          new HttpClientError.RequestError({
+            request: HttpClientRequest.get(url),
+            reason: "Transport",
+            cause: new Error("connection refused"),
+          })
+        );
+      }
+
       if (url.includes("/releases/latest")) {
         return respond(
           new Response(JSON.stringify(options?.releaseJson ?? release), {
@@ -78,7 +106,7 @@ const makeStubs = (options?: {
       }
       if (url.includes("/actions/artifacts")) {
         return respond(
-          new Response(JSON.stringify(artifacts), {
+          new Response(JSON.stringify(options?.artifactsJson ?? artifacts), {
             headers: { "content-type": "application/json" },
           })
         );
@@ -200,6 +228,106 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
     })
   );
 
+  it.effect("defaults targetDir when not provided", () =>
+    Effect.gen(function* () {
+      const { layer, written } = makeStubs();
+
+      yield* Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullLatestProfiles({
+          owner: baseOptions.owner,
+          repo: baseOptions.repo,
+        });
+      }).pipe(Effect.provide(layer));
+
+      expect(written.has("/sdcard/Tasker/js/morning-routine.js")).toBe(true);
+    })
+  );
+
+  it.effect("maps a non-2xx asset download to DownloadError with the status", () =>
+    Effect.gen(function* () {
+      const overrideHttp = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          const respond = (body: Response) =>
+            Effect.succeed(HttpClientResponse.fromWeb(request, body));
+          if (request.url.includes("/releases/latest")) {
+            return respond(
+              new Response(JSON.stringify(release), {
+                headers: { "content-type": "application/json" },
+              })
+            );
+          }
+          return respond(new Response("not found", { status: 404 }));
+        })
+      );
+
+      const error = yield* Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullLatestProfiles(baseOptions);
+      }).pipe(
+        Effect.provide(
+          ProfileSync.Default.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                overrideHttp,
+                Layer.succeed(FileStore, {
+                  writeText: () => Effect.void,
+                  writeBytes: () => Effect.void,
+                }),
+                Layer.succeed(ZipExtractor, { extract: () => Effect.succeed([]) })
+              )
+            )
+          )
+        ),
+        Effect.flip
+      );
+
+      expect(error._tag).toBe("DownloadError");
+      expect(error.message).toContain("Download returned 404");
+    })
+  );
+
+  it.effect("maps a non-status-code API response failure to GitHubApiError", () =>
+    Effect.gen(function* () {
+      const brokenStream = new ReadableStream({
+        start(controller) {
+          controller.error(new Error("json stream exploded"));
+        },
+      });
+      const overrideHttp = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.succeed(HttpClientResponse.fromWeb(request, new Response(brokenStream)))
+        )
+      );
+
+      const error = yield* Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullLatestProfiles(baseOptions);
+      }).pipe(
+        Effect.provide(
+          ProfileSync.Default.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                overrideHttp,
+                Layer.succeed(FileStore, {
+                  writeText: () => Effect.void,
+                  writeBytes: () => Effect.void,
+                }),
+                Layer.succeed(ZipExtractor, { extract: () => Effect.succeed([]) })
+              )
+            )
+          )
+        ),
+        Effect.flip
+      );
+
+      expect(error._tag).toBe("GitHubApiError");
+      expect(error._tag === "GitHubApiError" && error.status).toBeUndefined();
+    })
+  );
+
   it.effect("fails with GitHubApiError on malformed payloads", () =>
     Effect.gen(function* () {
       const { layer } = makeStubs({ releaseJson: { nope: true } });
@@ -210,6 +338,87 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
       }).pipe(Effect.provide(layer), Effect.flip);
 
       expect(error._tag).toBe("GitHubApiError");
+    })
+  );
+
+  it.effect("maps a transport failure fetching the release JSON to GitHubApiError", () =>
+    Effect.gen(function* () {
+      const { layer } = makeStubs({ failTransport: "api" });
+
+      const error = yield* Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullLatestProfiles(baseOptions);
+      }).pipe(Effect.provide(layer), Effect.flip);
+
+      expect(error._tag).toBe("GitHubApiError");
+      expect(error._tag === "GitHubApiError" && error.message).toContain(
+        "Transport error"
+      );
+    })
+  );
+
+  it.effect("maps a transport failure downloading an asset to DownloadError", () =>
+    Effect.gen(function* () {
+      const { layer } = makeStubs({ failTransport: "download" });
+
+      const error = yield* Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullLatestProfiles(baseOptions);
+      }).pipe(Effect.provide(layer), Effect.flip);
+
+      expect(error._tag).toBe("DownloadError");
+    })
+  );
+
+  it.effect("maps a non-status-code download failure to DownloadError", () =>
+    Effect.gen(function* () {
+      const brokenStream = new ReadableStream({
+        start(controller) {
+          controller.error(new Error("stream exploded"));
+        },
+      });
+      const overrideHttp = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          if (request.url.includes("/releases/latest")) {
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(JSON.stringify(release), {
+                  headers: { "content-type": "application/json" },
+                })
+              )
+            );
+          }
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(request, new Response(brokenStream))
+          );
+        })
+      );
+
+      const error = yield* Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullLatestProfiles(baseOptions);
+      }).pipe(
+        Effect.provide(
+          ProfileSync.Default.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                overrideHttp,
+                Layer.succeed(FileStore, {
+                  writeText: () => Effect.void,
+                  writeBytes: () => Effect.void,
+                }),
+                Layer.succeed(ZipExtractor, { extract: () => Effect.succeed([]) })
+              )
+            )
+          )
+        ),
+        Effect.flip
+      );
+
+      expect(error._tag).toBe("DownloadError");
+      expect(error.message).not.toContain("Download returned");
     })
   );
 
@@ -242,6 +451,24 @@ describe("ProfileSync artifacts source", () => {
     })
   );
 
+  it.effect("latestArtifact fails with NothingToSyncError when none match", () =>
+    Effect.gen(function* () {
+      const { layer } = makeStubs({ artifactsJson: { artifacts: [] } });
+
+      const error = yield* Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.latestArtifact({
+          ...baseOptions,
+          token: "t",
+          artifactName: "no-such-artifact",
+        });
+      }).pipe(Effect.provide(layer), Effect.flip);
+
+      expect(error._tag).toBe("NothingToSyncError");
+      expect(error.message).toContain("no-such-artifact");
+    })
+  );
+
   it.effect("pullFromArtifacts requires a token", () =>
     Effect.gen(function* () {
       const { layer } = makeStubs();
@@ -252,6 +479,23 @@ describe("ProfileSync artifacts source", () => {
       }).pipe(Effect.provide(layer), Effect.flip);
 
       expect(error._tag).toBe("GitHubApiError");
+    })
+  );
+
+  it.effect("pullFromArtifacts defaults targetDir when not provided", () =>
+    Effect.gen(function* () {
+      const { layer, written } = makeStubs();
+
+      yield* Effect.gen(function* () {
+        const sync = yield* ProfileSync;
+        return yield* sync.pullFromArtifacts({
+          owner: baseOptions.owner,
+          repo: baseOptions.repo,
+          token: "t",
+        });
+      }).pipe(Effect.provide(layer));
+
+      expect(written.has("/sdcard/Tasker/js/tasker-js.zip")).toBe(true);
     })
   );
 

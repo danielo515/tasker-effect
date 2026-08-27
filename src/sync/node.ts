@@ -33,74 +33,101 @@ import {
 import { ProfileSync } from "./core.js";
 import type { DownloadError, GitHubApiError, NothingToSyncError } from "./contract.js";
 
+/**
+ * Pure factory behind {@link FileStoreNodeLive}, taking its `FileSystem`/
+ * `Path` dependencies as plain arguments instead of resolving them from a
+ * Layer — this lets tests exercise the `BadArgument` mapping (which real
+ * Node file operations essentially never raise) with a stub `FileSystem`,
+ * without needing a Layer override to reach past `Layer.provide(NodeContext.layer)`.
+ */
+export const makeNodeFileStore = (
+  fs: FileSystem.FileSystem,
+  path: Path.Path
+): FileStoreShape => {
+  const storageErrors = (target: string) => ({
+    SystemError: (error: { readonly message: string }) =>
+      Effect.fail(new StorageWriteError({ message: error.message, path: target })),
+    BadArgument: (error: { readonly message: string }) =>
+      Effect.fail(new StorageWriteError({ message: error.message, path: target })),
+  });
+
+  return {
+    writeText: (target, content) =>
+      fs.makeDirectory(path.dirname(target), { recursive: true }).pipe(
+        Effect.andThen(fs.writeFileString(target, content)),
+        Effect.catchTags(storageErrors(target))
+      ),
+    writeBytes: (target, content) =>
+      fs.makeDirectory(path.dirname(target), { recursive: true }).pipe(
+        Effect.andThen(fs.writeFile(target, content)),
+        Effect.catchTags(storageErrors(target))
+      ),
+  };
+};
+
 /** FileStore backed by @effect/platform's FileSystem (Node/Bun) */
 export const FileStoreNodeLive: Layer.Layer<FileStoreTag> = Layer.effect(
   FileStoreTag,
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-
-    const storageErrors = (target: string) => ({
-      SystemError: (error: { readonly message: string }) =>
-        Effect.fail(new StorageWriteError({ message: error.message, path: target })),
-      BadArgument: (error: { readonly message: string }) =>
-        Effect.fail(new StorageWriteError({ message: error.message, path: target })),
-    });
-
-    const store: FileStoreShape = {
-      writeText: (target, content) =>
-        fs.makeDirectory(path.dirname(target), { recursive: true }).pipe(
-          Effect.andThen(fs.writeFileString(target, content)),
-          Effect.catchTags(storageErrors(target))
-        ),
-      writeBytes: (target, content) =>
-        fs.makeDirectory(path.dirname(target), { recursive: true }).pipe(
-          Effect.andThen(fs.writeFile(target, content)),
-          Effect.catchTags(storageErrors(target))
-        ),
-    };
-    return store;
+    return makeNodeFileStore(fs, path);
   })
 ).pipe(Layer.provide(NodeContext.layer));
+
+/**
+ * Pure factory behind {@link ZipExtractorNodeLive}, taking `FileSystem` as a
+ * plain argument for the same testability reason as {@link makeNodeFileStore}
+ * — real `mkdir`/`readdir` essentially never raise `BadArgument`, so tests
+ * stub it directly rather than trying to provoke it through the real
+ * filesystem.
+ */
+export const makeNodeZipExtractor = (
+  fs: FileSystem.FileSystem
+): {
+  readonly extract: (
+    zipPath: string,
+    targetDir: string
+  ) => Effect.Effect<ReadonlyArray<string>, ZipExtractError, CommandExecutor.CommandExecutor>;
+} => ({
+  extract: (zipPath, targetDir) =>
+    Effect.gen(function* () {
+      yield* fs.makeDirectory(targetDir, { recursive: true });
+      const exitCode = yield* Command.exitCode(
+        Command.make("unzip", "-o", zipPath, "-d", targetDir)
+      );
+      if (exitCode !== 0) {
+        return yield* new ZipExtractError({
+          message: `unzip exited with code ${exitCode}`,
+          path: zipPath,
+        });
+      }
+      return (yield* fs.readDirectory(targetDir)) as ReadonlyArray<string>;
+    }).pipe(
+      Effect.catchTags({
+        SystemError: (error) =>
+          Effect.fail(
+            new ZipExtractError({ message: error.message, path: zipPath })
+          ),
+        BadArgument: (error) =>
+          Effect.fail(
+            new ZipExtractError({ message: error.message, path: zipPath })
+          ),
+      })
+    ),
+});
 
 /** ZipExtractor running the system `unzip` via @effect/platform's Command */
 export const ZipExtractorNodeLive: Layer.Layer<ZipExtractorTag> = Layer.effect(
   ZipExtractorTag,
   Effect.gen(function* () {
-    const context = yield* Effect.context<
-      FileSystem.FileSystem | CommandExecutor.CommandExecutor
-    >();
+    const context = yield* Effect.context<CommandExecutor.CommandExecutor>();
     const fs = yield* FileSystem.FileSystem;
-
-    const extractor: ZipExtractorShape = {
+    const extractor = makeNodeZipExtractor(fs);
+    return {
       extract: (zipPath, targetDir) =>
-        Effect.gen(function* () {
-          yield* fs.makeDirectory(targetDir, { recursive: true });
-          const exitCode = yield* Command.exitCode(
-            Command.make("unzip", "-o", zipPath, "-d", targetDir)
-          );
-          if (exitCode !== 0) {
-            return yield* new ZipExtractError({
-              message: `unzip exited with code ${exitCode}`,
-              path: zipPath,
-            });
-          }
-          return (yield* fs.readDirectory(targetDir)) as ReadonlyArray<string>;
-        }).pipe(
-          Effect.catchTags({
-            SystemError: (error) =>
-              Effect.fail(
-                new ZipExtractError({ message: error.message, path: zipPath })
-              ),
-            BadArgument: (error) =>
-              Effect.fail(
-                new ZipExtractError({ message: error.message, path: zipPath })
-              ),
-          }),
-          Effect.provide(context)
-        ),
-    };
-    return extractor;
+        extractor.extract(zipPath, targetDir).pipe(Effect.provide(context)),
+    } satisfies ZipExtractorShape;
   })
 ).pipe(Layer.provide(NodeContext.layer));
 
