@@ -12,6 +12,20 @@
  * for every later read. Unanswered prompts fail with an idiomatic
  * `ConfigError`, composing with `Config.withDefault` / `Config.option`.
  *
+ * The prompt is performed at the *caller's* priority + 1 (read from Tasker's
+ * built-in `%priority` local): Tasker only runs the actions of the
+ * highest-priority alive task, so a fixed low priority would leave
+ * `TE Config` queued frozen behind the very task that is polling for its
+ * answer. Dismissing the dialog is detected via `taskRunning("TE Config")`
+ * flipping true → false with the global still unset, so fallbacks
+ * (`Config.withDefault` / `Config.option`) trigger promptly instead of
+ * waiting out the full prompt timeout.
+ *
+ * Invariant: the JavaScript action hosting the program must have a timeout
+ * **greater than** `promptTimeoutMillis` (the generated `TE Dispatch` uses
+ * 600s vs the 120s default) — otherwise Tasker kills the script before the
+ * provider can fail over.
+ *
  * Prompt labels come from the {@link Secret} declarations passed to the
  * layer; unknown keys prompt with the bare global name.
  */
@@ -35,20 +49,35 @@ import type { Secret } from "./profile.js";
 import { Tasker, type TaskerApiError, type TaskerShape } from "./tasker-api.js";
 
 /** The slice of the Tasker API the provider needs (test with makeTestTasker) */
-export type TaskerConfigApi = Pick<TaskerShape, "global" | "performTask">;
+export type TaskerConfigApi = Pick<
+  TaskerShape,
+  "global" | "local" | "performTask" | "taskRunning"
+>;
 
 /** Options for the Tasker config provider */
 export interface TaskerConfigOptions {
   /** Declared secrets, used for human-readable prompt labels */
   readonly secrets?: ReadonlyArray<Secret>;
-  /** How long to wait for a prompt answer. Default: 120s */
+  /**
+   * How long to wait for a prompt answer. Default: 120s. Must stay below the
+   * timeout of the JavaScript action hosting the program (the generated
+   * `TE Dispatch` uses 600s), or Tasker kills the script before the provider
+   * can fail over to `Config.withDefault` / `Config.option`.
+   */
   readonly promptTimeoutMillis?: number;
   /** How often to poll the global while waiting. Default: 1s */
   readonly pollIntervalMillis?: number;
 }
 
-/** Priority used when performing the TE Config prompt task */
-const PROMPT_TASK_PRIORITY = 5;
+/** Prompt task priority when the caller's %priority cannot be read */
+const FALLBACK_PROMPT_PRIORITY = 5;
+
+/** Parse Tasker's %priority local; undefined for unset/garbage values. */
+const parsePriority = (value: string | undefined): number | undefined => {
+  if (value === undefined || value === "") return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+};
 
 const globalNameOf = (path: ReadonlyArray<string>): string =>
   path.join("_").toUpperCase();
@@ -96,7 +125,12 @@ export const makeTaskerConfigProvider = (
         })
       );
 
-    /** Prompt once per key: concurrent readers await the same Deferred. */
+    /**
+     * Prompt once per key: concurrent readers await the same Deferred. The
+     * TE Config task is performed at the caller's priority + 1 (Tasker
+     * freezes lower-priority tasks while the caller polls) and a dismissed
+     * dialog fails the read promptly via {@link TaskerShape.taskRunning}.
+     */
     const promptFor = (
       path: ReadonlyArray<string>,
       name: string
@@ -115,19 +149,59 @@ export const makeTaskerConfigProvider = (
         }
 
         const attempt = Effect.gen(function* () {
+          // Perform the prompt one above the caller's priority (%priority is
+          // Tasker's built-in local holding this task's priority): only the
+          // highest-priority alive task's actions run, so a fixed low
+          // priority would leave TE Config queued frozen behind the very
+          // task that is polling for its answer. Priority is an optimization,
+          // not a correctness requirement — any failure reading it falls
+          // back to the constant. Like `global`, the binding returns
+          // undefined for unset locals despite the string type.
+          const callerPriority = yield* tasker.local("priority").pipe(
+            Effect.map(parsePriority),
+            Effect.orElseSucceed(() => undefined)
+          );
+          const promptPriority =
+            callerPriority !== undefined
+              ? callerPriority + 1
+              : FALLBACK_PROMPT_PRIORITY;
           yield* tasker
-            .performTask(
-              CONFIG_TASK_NAME,
-              PROMPT_TASK_PRIORITY,
-              name,
-              labels.get(name) ?? name
-            )
+            .performTask(CONFIG_TASK_NAME, promptPriority, name, labels.get(name) ?? name)
             .pipe(Effect.mapError((error) => sourceUnavailable(path, name, error)));
           const attempts = Math.max(1, Math.ceil(timeout / pollInterval));
+          // Dismissal detection: taskRunning(TE Config) flipping true → false
+          // with the global still unset means the dialog ended without an
+          // answer. Deliberately conservative: if we never observe the task
+          // running (e.g. it is itself queued behind something) we keep
+          // polling and let the overall timeout govern. Known limitation:
+          // taskRunning is per-task-name, so with two concurrent TE Config
+          // instances (two keys prompting at once) a dismissal of one is
+          // masked by the other and that waiter falls back to the timeout.
+          let seenRunning = false;
           for (let i = 0; i < attempts; i++) {
             yield* Effect.sleep(Duration.millis(pollInterval));
             const value = yield* readGlobal(path, name);
             if (value !== undefined) return value;
+            const running = yield* tasker.taskRunning(CONFIG_TASK_NAME).pipe(
+              // A taskRunning failure must not fail the read: treat it as
+              // "still running" and let the overall timeout govern.
+              Effect.orElseSucceed(() => true)
+            );
+            if (running) {
+              seenRunning = true;
+            } else if (seenRunning) {
+              // The store action sets the global just before the task ends;
+              // one final read closes the race where the task finished
+              // between the global read above and the taskRunning check.
+              const last = yield* readGlobal(path, name);
+              if (last !== undefined) return last;
+              return yield* Effect.fail(
+                ConfigError.MissingData(
+                  [...path],
+                  `The ${CONFIG_TASK_NAME} prompt for Tasker global %${name} ended without an answer (dismissed?)`
+                )
+              );
+            }
           }
           return yield* Effect.fail(
             ConfigError.MissingData(

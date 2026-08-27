@@ -130,11 +130,17 @@ export interface SyncResult {
 export const DEFAULT_TARGET_DIR = "/sdcard/Tasker/js";
 
 /**
- * Release-asset suffixes synced by default: compiled JS plus the
- * `secrets.json` manifest. Deliberately excludes the importable
- * `tasker-effect.prj.xml` — that is one-time scaffolding, not device state.
+ * Release-asset suffixes synced by default: compiled JS, the `secrets.json`
+ * manifest, and the importable `tasker-effect.prj.xml`. The XML is inert on
+ * disk (Tasker only reads it during a manual import), but keeping the current
+ * copy next to the JS means scaffolding updates are a re-import away — no
+ * manual download.
  */
-export const DEFAULT_ASSET_SUFFIXES: ReadonlyArray<string> = [".js", ".json"];
+export const DEFAULT_ASSET_SUFFIXES: ReadonlyArray<string> = [
+  ".js",
+  ".json",
+  ".prj.xml",
+];
 
 // =============================================================================
 // Platform capability services

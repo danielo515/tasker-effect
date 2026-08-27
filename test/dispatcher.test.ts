@@ -9,10 +9,13 @@ import {
   secret,
 } from "../src/profile.js";
 import {
+  CONFIG_LABEL_FILENAME,
+  CONFIG_SCAN_FILENAME,
   CONFIG_TASK_NAME,
   DISPATCHER_FILENAME,
   DISPATCH_TASK_NAME,
   ROLLING_RELEASE_TAG,
+  SCAFFOLD_VERSION,
   SECRETS_FILENAME,
   SYNC_PROFILE_NAME,
   SYNC_SCRIPT_FILENAME,
@@ -20,7 +23,8 @@ import {
   TASKER_PROJECT_XML_FILENAME,
   compileDispatcherJs,
   compileProjectFiles,
-  configScanJs,
+  configLabelFileJs,
+  configScanFileJs,
   syncBootstrapJs,
   taskerProjectXml,
 } from "../src/compiler.js";
@@ -103,6 +107,17 @@ describe("compileDispatcherJs", () => {
     expect(source).toContain("unknown profile or task");
     expect(source).toContain("could not read");
   });
+
+  it("warns (without blocking) when the imported scaffolding is outdated", () => {
+    const source = compileDispatcherJs(makeProject());
+    expect(source).toContain('parseInt(global("TE_SCAFFOLD_VERSION"), 10)');
+    expect(source).toContain(`if (installed < ${SCAFFOLD_VERSION}) {`);
+    expect(source).toContain(
+      `tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir`
+    );
+    // Warn-only: the check flashes but never returns/exits before dispatch.
+    expectValidJs(source);
+  });
 });
 
 describe("taskerProjectXml", () => {
@@ -124,12 +139,36 @@ describe("taskerProjectXml", () => {
     }
   });
 
+  // Slice out the <Action> element containing a marker, to pin its timeout.
+  const actionContaining = (marker: string): string => {
+    const start = xml.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    return xml.slice(start, xml.indexOf("</Action>", start));
+  };
+
   it("TE Dispatch runs the dispatcher file (code 131, Auto Exit on)", () => {
     expect(xml).toContain("<code>131</code>");
     expect(xml).toContain(
       '<Str sr="arg0" ve="3">/sdcard/Tasker/js/dispatcher.js</Str>'
     );
     expect(xml).toContain('<Int sr="arg2" val="1"/>');
+    // The dispatch action's timeout (arg3) must exceed the config provider's
+    // default promptTimeoutMillis (120s), or Tasker kills the script before
+    // an unanswered TE Config prompt can fail over to Config.withDefault.
+    // It is deliberately generous (600s) so timeout tuning ships in JS
+    // (promptTimeoutMillis), never via an XML change forcing a re-import.
+    expect(actionContaining("dispatcher.js")).toContain(
+      '<Int sr="arg3" val="600"/>'
+    );
+  });
+
+  it("the TE Sync and TE Config scan scriptlets get generous 600s timeouts", () => {
+    expect(actionContaining("releases/download")).toContain(
+      '<Int sr="arg3" val="600"/>'
+    );
+    expect(actionContaining(CONFIG_SCAN_FILENAME)).toContain(
+      '<Int sr="arg3" val="600"/>'
+    );
   });
 
   it("the TE Sync profile repeats every 6 hours and runs the TE Sync task", () => {
@@ -156,25 +195,61 @@ describe("taskerProjectXml", () => {
     expect(xml).toContain("releases/download/tasker-js-latest/sync-profiles.js");
   });
 
-  it("TE Config has a one-off mode driven by %par1/%par2", () => {
-    const scan = configScanJs();
+  it("the TE Sync bootstrap stamps the scaffolding version on every run", () => {
+    const stamp = `setGlobal("TE_SCAFFOLD_VERSION", "${SCAFFOLD_VERSION}");`;
+    expect(syncBootstrapJs(TEST_REPO)).toContain(stamp);
+    expect(xml).toContain(
+      `setGlobal(&quot;TE_SCAFFOLD_VERSION&quot;, &quot;${SCAFFOLD_VERSION}&quot;);`
+    );
+  });
+
+  it("TE Config's synced scan file has a one-off mode driven by %par1/%par2", () => {
     // One-off mode: prompt for exactly the named global, label from %par2.
-    expect(scan).toContain('var par1 = local("par1");');
-    expect(scan).toContain('setLocal("te_missing", par1);');
-    expect(scan).toContain('if (par2 !== undefined && par2 !== "") setLocal("te_label", par2);');
-    expectValidSnippetJs(scan);
+    expect(configScanFileJs).toContain('var par1 = local("par1");');
+    expect(configScanFileJs).toContain('setLocal("te_missing", par1);');
+    expect(configScanFileJs).toContain(
+      'if (par2 !== undefined && par2 !== "") setLocal("te_label", par2);'
+    );
     // The label lookup prefers the one-off %te_label over secrets.json.
-    expect(xml).toContain("local(&quot;te_label&quot;)");
+    expect(configLabelFileJs).toContain('var label = local("te_label");');
+    expect(configLabelFileJs).toContain(SECRETS_FILENAME);
+    expect(configLabelFileJs).toContain('setLocal("te_prompt", label);');
     // Still exactly the three sanctioned tasks.
     expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(3);
   });
 
-  it("TE Config scans secrets.json and prompts via For + Input Dialog", () => {
-    const scan = configScanJs();
-    expect(scan).toContain(SECRETS_FILENAME);
-    expect(scan).toContain('setLocal("te_missing", missing.join(","));');
-    expectValidSnippetJs(scan);
+  it("TE Config's synced scan file waits for secrets.json and collects unset secrets", () => {
+    expect(configScanFileJs).toContain(SECRETS_FILENAME);
+    expect(configScanFileJs).toContain('setLocal("te_missing", missing.join(","));');
+    expect(configScanFileJs).toContain("setTimeout(scan, 2000);");
+    expectValidSnippetJs(configScanFileJs);
+    expectValidSnippetJs(configLabelFileJs);
+  });
 
+  it("the XML holds only eval stubs for the TE Config logic", () => {
+    // Scan stub: polls for the synced file (first-run race), then evals it.
+    const scanStub = xml.slice(
+      xml.indexOf(CONFIG_SCAN_FILENAME),
+      xml.indexOf("</Action>", xml.indexOf(CONFIG_SCAN_FILENAME))
+    );
+    expect(scanStub).toContain("setTimeout(boot, 2000);");
+    expect(scanStub).toContain("tries &lt; 30");
+    expect(scanStub).toContain("eval(src);");
+    expect(scanStub).toContain(`${CONFIG_SCAN_FILENAME} missing - run TE Sync`);
+    // Label stub: evals the synced file, degrading to the bare name.
+    const labelStub = xml.slice(
+      xml.indexOf(CONFIG_LABEL_FILENAME),
+      xml.indexOf("</Action>", xml.indexOf(CONFIG_LABEL_FILENAME))
+    );
+    expect(labelStub).toContain("eval(src);");
+    expect(labelStub).toContain("local(&quot;te_label&quot;)");
+    expect(labelStub).toContain("setLocal(&quot;te_prompt&quot;, fallback);");
+    // The moved logic itself is no longer embedded in the XML.
+    expect(xml).not.toContain("missing.join");
+    expect(xml).not.toContain("declared[i].description");
+  });
+
+  it("TE Config prompts via For + Input Dialog with the inline store scriptlet", () => {
     expect(xml).toContain("<code>37</code>"); // If %te_missing Set
     expect(xml).toContain("<lhs>%te_missing</lhs>");
     expect(xml).toContain("<op>12</op>");
@@ -256,6 +331,15 @@ describe("compileProjectFiles with dispatcher", () => {
 
     const dispatcher = files.find((file) => file.filename === DISPATCHER_FILENAME);
     expect(dispatcher?.kind).toBe("dispatcher-js");
+
+    // The TE Config logic ships as plain .js release assets so the normal
+    // sync picks them up with zero changes.
+    const scan = files.find((file) => file.filename === CONFIG_SCAN_FILENAME);
+    expect(scan?.kind).toBe("scaffold-js");
+    expect(scan?.content).toBe(configScanFileJs);
+    const label = files.find((file) => file.filename === CONFIG_LABEL_FILENAME);
+    expect(label?.kind).toBe("scaffold-js");
+    expect(label?.content).toBe(configLabelFileJs);
 
     const readme = files.find((file) => file.filename === "README.md");
     expect(readme?.content).toContain(DISPATCH_TASK_NAME);
