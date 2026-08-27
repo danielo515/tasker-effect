@@ -136,6 +136,21 @@ describe("makeTaskerConfigProvider", () => {
     })
   );
 
+  it.live("a negative or non-numeric %priority falls back to the constant", () =>
+    Effect.gen(function* () {
+      const { api, calls } = makePromptingTasker({
+        answer: "x",
+        overrides: {
+          local: (name) => Effect.succeed(name === "priority" ? "-1" : ""),
+        },
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      yield* Effect.withConfigProvider(Config.string("OPENWEATHER_KEY"), provider);
+      const prompt = calls.find((call) => call.name === "performTask");
+      expect(prompt?.args[1]).toBe(5);
+    })
+  );
+
   it.effect("nested config paths map to underscore-joined uppercase globals", () =>
     Effect.gen(function* () {
       const { api } = makePromptingTasker({ globals: { TE_KEY: "nested" } });
@@ -283,6 +298,36 @@ describe("makeTaskerConfigProvider", () => {
         })
       );
       expect(value).toBe("stored-at-exit");
+    })
+  );
+
+  it.live("a failing taskRunning check is treated as still-running, not a dismissal", () =>
+    Effect.gen(function* () {
+      // taskRunning itself failing (e.g. TaskerCallError) must not fail the
+      // read or be mistaken for a dismissal: it falls back to "still
+      // running" and the eventual answer still comes through.
+      const { api } = makeTestTasker({
+        global: () => Effect.succeed(""),
+        taskRunning: () =>
+          Effect.fail(
+            new TaskerCallError({ function: "taskRunning", message: "boom" })
+          ),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, {
+        pollIntervalMillis: 5,
+        promptTimeoutMillis: 50,
+      });
+      const error = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      ).pipe(Effect.flip);
+      // Never answered, so it times out normally rather than reporting a
+      // dismissal — proving the taskRunning failure was swallowed.
+      expect(ConfigError.isConfigError(error)).toBe(true);
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).not.toContain("dismissed");
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("was not answered within");
     })
   );
 
