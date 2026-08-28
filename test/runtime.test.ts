@@ -2,6 +2,14 @@ import { afterEach, describe, expect, it, vi } from "@effect/vitest"
 import { Effect } from "effect"
 import { runInTasker } from "../src/runtime.js"
 
+// runInTasker hardcodes Effect.provide(Tasker.Default) — it isn't
+// parameterized with a Layer. Tasker.Default's live implementation looks up
+// the Tasker builtins (flash, exit, ...) as globalThis properties at call
+// time, since that's how Tasker actually injects them into its JS
+// environment; there's no service boundary to substitute off-device. So
+// stubbing those globals is the only way to exercise the live success/
+// failure/exit paths here — the same technique test/tasker-api.test.ts
+// already uses for the same Tasker.Default layer.
 const g = globalThis as Record<string, unknown>
 
 describe("runInTasker", () => {
