@@ -2,7 +2,10 @@ import { describe, expect, it } from "@effect/vitest";
 import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "@effect/platform";
 import { Effect, Layer } from "effect";
 import {
+  DownloadError,
   FileStore,
+  GitHubApiError,
+  NothingToSyncError,
   StorageWriteError,
   ZipExtractor,
   type SyncOptions,
@@ -234,7 +237,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(Effect.provide(layer), Effect.flip);
 
-      expect(error._tag).toBe("NothingToSyncError");
+      expect(error).toBeInstanceOf(NothingToSyncError);
     })
   );
 
@@ -293,7 +296,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         Effect.flip
       );
 
-      expect(error._tag).toBe("DownloadError");
+      expect(error).toBeInstanceOf(DownloadError);
       expect(error.message).toContain("Download returned 404");
     })
   );
@@ -333,8 +336,8 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         Effect.flip
       );
 
-      expect(error._tag).toBe("GitHubApiError");
-      expect(error._tag === "GitHubApiError" && error.status).toBeUndefined();
+      expect(error).toBeInstanceOf(GitHubApiError);
+      expect(error instanceof GitHubApiError && error.status).toBeUndefined();
     })
   );
 
@@ -347,7 +350,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(Effect.provide(layer), Effect.flip);
 
-      expect(error._tag).toBe("GitHubApiError");
+      expect(error).toBeInstanceOf(GitHubApiError);
     })
   );
 
@@ -360,8 +363,8 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(Effect.provide(layer), Effect.flip);
 
-      expect(error._tag).toBe("GitHubApiError");
-      expect(error._tag === "GitHubApiError" && error.message).toContain(
+      expect(error).toBeInstanceOf(GitHubApiError);
+      expect(error instanceof GitHubApiError && error.message).toContain(
         "Transport error"
       );
     })
@@ -376,7 +379,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(Effect.provide(layer), Effect.flip);
 
-      expect(error._tag).toBe("DownloadError");
+      expect(error).toBeInstanceOf(DownloadError);
     })
   );
 
@@ -427,7 +430,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         Effect.flip
       );
 
-      expect(error._tag).toBe("DownloadError");
+      expect(error).toBeInstanceOf(DownloadError);
       expect(error.message).not.toContain("Download returned");
     })
   );
@@ -441,8 +444,8 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(Effect.provide(layer), Effect.flip);
 
-      expect(error._tag).toBe("GitHubApiError");
-      expect(error._tag === "GitHubApiError" && error.status).toBe(500);
+      expect(error).toBeInstanceOf(GitHubApiError);
+      expect(error instanceof GitHubApiError && error.status).toBe(500);
     })
   );
 });
@@ -474,7 +477,7 @@ describe("ProfileSync artifacts source", () => {
         });
       }).pipe(Effect.provide(layer), Effect.flip);
 
-      expect(error._tag).toBe("NothingToSyncError");
+      expect(error).toBeInstanceOf(NothingToSyncError);
       expect(error.message).toContain("no-such-artifact");
     })
   );
@@ -488,7 +491,7 @@ describe("ProfileSync artifacts source", () => {
         return yield* sync.pullFromArtifacts(baseOptions);
       }).pipe(Effect.provide(layer), Effect.flip);
 
-      expect(error._tag).toBe("GitHubApiError");
+      expect(error).toBeInstanceOf(GitHubApiError);
     })
   );
 

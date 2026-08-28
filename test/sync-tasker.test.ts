@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Exit } from "effect";
 import {
   TaskerFileStore,
   TaskerZipExtractor,
   pullLatestProfiles,
 } from "../src/sync/tasker.js";
-import { FileStore, ZipExtractor } from "../src/sync/contract.js";
+import {
+  FileStore,
+  StorageWriteError,
+  ZipExtractor,
+  ZipExtractError,
+} from "../src/sync/contract.js";
 
 const g = globalThis as Record<string, unknown>;
 
@@ -38,7 +43,7 @@ describe("TaskerFileStore", () => {
         const store = yield* FileStore;
         yield* store.writeText("/sdcard/x.js", "content");
       }).pipe(Effect.provide(TaskerFileStore), Effect.flip);
-      expect(error._tag).toBe("StorageWriteError");
+      expect(error).toBeInstanceOf(StorageWriteError);
       expect(error.message).toContain("disk full");
     })
   );
@@ -50,7 +55,7 @@ describe("TaskerFileStore", () => {
         const store = yield* FileStore;
         yield* store.writeText("/sdcard/x.js", "content");
       }).pipe(Effect.provide(TaskerFileStore), Effect.flip);
-      expect(error._tag).toBe("StorageWriteError");
+      expect(error).toBeInstanceOf(StorageWriteError);
     })
   );
 
@@ -60,7 +65,7 @@ describe("TaskerFileStore", () => {
         const store = yield* FileStore;
         yield* store.writeBytes("/sdcard/x.zip", new Uint8Array([1]));
       }).pipe(Effect.provide(TaskerFileStore), Effect.flip);
-      expect(error._tag).toBe("StorageWriteError");
+      expect(error).toBeInstanceOf(StorageWriteError);
       expect(error.message).toContain("Binary writes are not supported");
     })
   );
@@ -96,7 +101,7 @@ describe("TaskerZipExtractor", () => {
         const extractor = yield* ZipExtractor;
         return yield* extractor.extract("/sdcard/x.zip", "/sdcard/target");
       }).pipe(Effect.provide(TaskerZipExtractor), Effect.flip);
-      expect(error._tag).toBe("ZipExtractError");
+      expect(error).toBeInstanceOf(ZipExtractError);
       expect(error.message).toContain("corrupt archive");
     })
   );
@@ -108,7 +113,7 @@ describe("TaskerZipExtractor", () => {
         const extractor = yield* ZipExtractor;
         return yield* extractor.extract("/sdcard/x.zip", "/sdcard/target");
       }).pipe(Effect.provide(TaskerZipExtractor), Effect.flip);
-      expect(error._tag).toBe("ZipExtractError");
+      expect(error).toBeInstanceOf(ZipExtractError);
     })
   );
 });
@@ -124,7 +129,7 @@ describe("pullLatestProfiles (on-device convenience)", () => {
       // the HTTP call: this only proves the convenience wiring composes the
       // right layers without needing a real device or network.
       const exit = yield* Effect.exit(pullLatestProfiles({ owner: "a", repo: "b" }));
-      expect(exit._tag).toBe("Failure");
+      expect(Exit.isFailure(exit)).toBe(true);
     })
   );
 });

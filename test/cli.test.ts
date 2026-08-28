@@ -189,7 +189,7 @@ describe("detectRepoFromGit", () => {
         Effect.provide(failingExecutor),
         Effect.flip
       );
-      expect(error._tag).toBe("RepoDetectionError");
+      expect(error).toBeInstanceOf(RepoDetectionError);
       expect(error.message).toContain("Could not run");
     })
   );
@@ -200,7 +200,7 @@ describe("detectRepoFromGit", () => {
         Effect.provide(fakeCommandExecutorLayer({ exitCode: 1 })),
         Effect.flip
       );
-      expect(error._tag).toBe("RepoDetectionError");
+      expect(error).toBeInstanceOf(RepoDetectionError);
       expect(error.message).toContain("exit code 1");
     })
   );
@@ -216,7 +216,7 @@ describe("detectRepoFromGit", () => {
         ),
         Effect.flip
       );
-      expect(error._tag).toBe("RepoDetectionError");
+      expect(error).toBeInstanceOf(RepoDetectionError);
       expect(error.message).toContain("not a GitHub repository URL");
     })
   );
@@ -328,7 +328,7 @@ describe("compileEntry", () => {
           entry: FIXTURE_ENTRY,
           outDir,
         }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, flakyFs)), Effect.flip);
-        expect(error._tag).toBe("EntryNotFoundError");
+        expect(error).toBeInstanceOf(EntryNotFoundError);
       }).pipe(Effect.provide(CliTestLayer))
   );
 
@@ -342,7 +342,7 @@ describe("compileEntry", () => {
         entry: "does/not/exist.ts",
         outDir,
       }).pipe(Effect.flip);
-      expect(error._tag).toBe("EntryNotFoundError");
+      expect(error).toBeInstanceOf(EntryNotFoundError);
     }).pipe(Effect.provide(CliTestLayer))
   );
 
@@ -355,7 +355,7 @@ describe("compileEntry", () => {
       const error = yield* compileEntry({ entry: EMPTY_ENTRY, outDir }).pipe(
         Effect.flip
       );
-      expect(error._tag).toBe("NoCompilableExportsError");
+      expect(error).toBeInstanceOf(NoCompilableExportsError);
     }).pipe(Effect.provide(CliTestLayer))
   );
 
@@ -368,7 +368,7 @@ describe("compileEntry", () => {
       const error = yield* compileEntry({ entry: THROWS_ENTRY, outDir }).pipe(
         Effect.flip
       );
-      expect(error._tag).toBe("EntryImportError");
+      expect(error).toBeInstanceOf(EntryImportError);
       expect(error.message).toContain("boom: this module cannot be imported");
     }).pipe(Effect.provide(CliTestLayer))
   );
@@ -384,7 +384,7 @@ describe("compileEntry", () => {
         const error = yield* compileEntry({ entry: THROWS_JS_ENTRY, outDir }).pipe(
           Effect.flip
         );
-        expect(error._tag).toBe("EntryImportError");
+        expect(error).toBeInstanceOf(EntryImportError);
         expect(error.message).not.toContain("TypeScript entries require Bun");
       }).pipe(Effect.provide(CliTestLayer))
   );
@@ -408,7 +408,7 @@ describe("compileEntry", () => {
             })
           )
         );
-        expect(error._tag).toBe("EntryImportError");
+        expect(error).toBeInstanceOf(EntryImportError);
         expect(error.message).toContain("TypeScript entries require Bun");
       }).pipe(Effect.provide(CliTestLayer))
   );
@@ -470,7 +470,7 @@ describe("compileEntry", () => {
       const error = yield* compileEntry({ entry: FIXTURE_ENTRY, outDir }).pipe(
         Effect.flip
       );
-      expect(error._tag).toBe("StorageWriteError");
+      expect(error).toBeInstanceOf(StorageWriteError);
     }).pipe(Effect.provide(CliTestLayer))
   );
 });

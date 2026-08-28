@@ -4,6 +4,7 @@ import {
   Tasker,
   TaskerTest,
   makeTaskerTestLayer,
+  TaskerCallError,
   TaskerNotAvailableError,
   TASKER_FUNCTION_NAMES,
   raw,
@@ -125,7 +126,7 @@ describe("Tasker service (default/live layer)", () => {
           })
         )
       );
-      expect(error._tag).toBe("TaskerCallError");
+      expect(error).toBeInstanceOf(TaskerCallError);
       expect(error.message).toContain("device exploded");
     })
   );

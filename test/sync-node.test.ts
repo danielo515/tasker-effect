@@ -1,19 +1,28 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Command, Error as PlatformError, FileSystem, Path } from "@effect/platform";
-import { NodeContext } from "@effect/platform-node";
-import { Effect, Layer } from "effect";
+import { NodeCommandExecutor, NodeContext, NodePath } from "@effect/platform-node";
+import { Effect, Exit, Layer } from "effect";
 import {
   FileStoreNodeLive,
-  makeNodeFileStore,
-  makeNodeZipExtractor,
+  makeFileStore,
+  makeZipExtractor,
   ZipExtractorNodeLive,
   pullLatestProfiles,
 } from "../src/sync/node.js";
-import { FileStore, ZipExtractor } from "../src/sync/contract.js";
+import {
+  FileStore,
+  StorageWriteError,
+  ZipExtractor,
+  ZipExtractError,
+} from "../src/sync/contract.js";
 
 /** A BadArgument PlatformError, as real Node FS operations essentially never raise */
 const badArgument = (message: string) =>
   new PlatformError.BadArgument({ module: "FileSystem", method: "test", message });
+
+/** A stub FileSystem whose makeDirectory always fails, merged with a real Path */
+const stubFsLayer = (fs: Partial<FileSystem.FileSystem>) =>
+  Layer.succeed(FileSystem.FileSystem, FileSystem.makeNoop(fs));
 
 const NodeLayer = Layer.mergeAll(NodeContext.layer);
 
@@ -67,7 +76,7 @@ describe("FileStoreNodeLive", () => {
           yield* store.writeText(target, "hello");
         }).pipe(Effect.provide(FileStoreNodeLive), Effect.flip);
 
-        expect(error._tag).toBe("StorageWriteError");
+        expect(error).toBeInstanceOf(StorageWriteError);
         expect(error.path).toBe(target);
       }).pipe(Effect.provide(NodeLayer))
   );
@@ -88,36 +97,42 @@ describe("FileStoreNodeLive", () => {
           yield* store.writeBytes(target, new Uint8Array([1]));
         }).pipe(Effect.provide(FileStoreNodeLive), Effect.flip);
 
-        expect(error._tag).toBe("StorageWriteError");
+        expect(error).toBeInstanceOf(StorageWriteError);
       }).pipe(Effect.provide(NodeLayer))
   );
 });
 
-describe("makeNodeFileStore (BadArgument mapping)", () => {
+describe("makeFileStore (BadArgument mapping)", () => {
   it.effect("writeText maps a BadArgument from makeDirectory to StorageWriteError", () =>
     Effect.gen(function* () {
-      const path = yield* Path.Path;
-      const fs = FileSystem.makeNoop({
-        makeDirectory: () => Effect.fail(badArgument("bad path")),
-      });
-      const store = makeNodeFileStore(fs, path);
-      const error = yield* store.writeText("/x/y.js", "hi").pipe(Effect.flip);
-      expect(error._tag).toBe("StorageWriteError");
-    }).pipe(Effect.provide(NodeLayer))
+      const error = yield* makeFileStore.pipe(
+        Effect.flatMap((store) => store.writeText("/x/y.js", "hi")),
+        Effect.flip,
+        Effect.provide(
+          Layer.mergeAll(
+            stubFsLayer({ makeDirectory: () => Effect.fail(badArgument("bad path")) }),
+            NodePath.layer
+          )
+        )
+      );
+      expect(error).toBeInstanceOf(StorageWriteError);
+    })
   );
 
   it.effect("writeBytes maps a BadArgument from makeDirectory to StorageWriteError", () =>
     Effect.gen(function* () {
-      const path = yield* Path.Path;
-      const fs = FileSystem.makeNoop({
-        makeDirectory: () => Effect.fail(badArgument("bad path")),
-      });
-      const store = makeNodeFileStore(fs, path);
-      const error = yield* store
-        .writeBytes("/x/y.bin", new Uint8Array([1]))
-        .pipe(Effect.flip);
-      expect(error._tag).toBe("StorageWriteError");
-    }).pipe(Effect.provide(NodeLayer))
+      const error = yield* makeFileStore.pipe(
+        Effect.flatMap((store) => store.writeBytes("/x/y.bin", new Uint8Array([1]))),
+        Effect.flip,
+        Effect.provide(
+          Layer.mergeAll(
+            stubFsLayer({ makeDirectory: () => Effect.fail(badArgument("bad path")) }),
+            NodePath.layer
+          )
+        )
+      );
+      expect(error).toBeInstanceOf(StorageWriteError);
+    })
   );
 });
 
@@ -162,7 +177,7 @@ describe("ZipExtractorNodeLive", () => {
         return yield* extractor.extract(badZip, targetDir);
       }).pipe(Effect.provide(ZipExtractorNodeLive), Effect.flip);
 
-      expect(error._tag).toBe("ZipExtractError");
+      expect(error).toBeInstanceOf(ZipExtractError);
       expect(error.message).toContain("unzip exited with code");
     }).pipe(Effect.provide(NodeLayer))
   );
@@ -183,26 +198,28 @@ describe("ZipExtractorNodeLive", () => {
           return yield* extractor.extract(path.join(dir, "whatever.zip"), targetDir);
         }).pipe(Effect.provide(ZipExtractorNodeLive), Effect.flip);
 
-        expect(error._tag).toBe("ZipExtractError");
+        expect(error).toBeInstanceOf(ZipExtractError);
       }).pipe(Effect.provide(NodeLayer))
   );
 });
 
-describe("makeNodeZipExtractor (BadArgument mapping)", () => {
+describe("makeZipExtractor (BadArgument mapping)", () => {
   it.effect(
     "extract maps a BadArgument from makeDirectory to ZipExtractError",
     () =>
       Effect.gen(function* () {
-        const fs = FileSystem.makeNoop({
+        const stubFs = stubFsLayer({
           makeDirectory: () => Effect.fail(badArgument("bad target dir")),
         });
-        const extractor = makeNodeZipExtractor(fs);
-        const error = yield* extractor
-          .extract("/x/y.zip", "/x/out")
-          .pipe(Effect.flip);
-        expect(error._tag).toBe("ZipExtractError");
-        expect(error._tag).toBe("ZipExtractError");
-      }).pipe(Effect.provide(NodeLayer))
+        const error = yield* makeZipExtractor.pipe(
+          Effect.flatMap((extractor) => extractor.extract("/x/y.zip", "/x/out")),
+          Effect.flip,
+          Effect.provide(
+            Layer.mergeAll(stubFs, NodeCommandExecutor.layer.pipe(Layer.provide(stubFs)))
+          )
+        );
+        expect(error).toBeInstanceOf(ZipExtractError);
+      })
   );
 });
 
@@ -215,7 +232,7 @@ describe("pullLatestProfiles (Node convenience)", () => {
       const exit = yield* Effect.exit(
         pullLatestProfiles({ owner: "danielo515", repo: "does-not-exist-xyz" })
       );
-      expect(exit._tag).toBe("Failure");
+      expect(Exit.isFailure(exit)).toBe(true);
     })
   );
 });
