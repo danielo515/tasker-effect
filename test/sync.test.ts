@@ -140,7 +140,7 @@ const makeStubs = (options?: {
       }),
   });
 
-  const layer = ProfileSync.Default.pipe(
+  const layer = ProfileSync.DefaultWithoutDependencies.pipe(
     Layer.provide(Layer.mergeAll(httpLayer, fileLayer, zipLayer))
   );
 
@@ -280,7 +280,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(
         Effect.provide(
-          ProfileSync.Default.pipe(
+          ProfileSync.DefaultWithoutDependencies.pipe(
             Layer.provide(
               Layer.mergeAll(
                 overrideHttp,
@@ -320,7 +320,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(
         Effect.provide(
-          ProfileSync.Default.pipe(
+          ProfileSync.DefaultWithoutDependencies.pipe(
             Layer.provide(
               Layer.mergeAll(
                 overrideHttp,
@@ -414,7 +414,7 @@ describe("ProfileSync.pullLatestProfiles (release source)", () => {
         return yield* sync.pullLatestProfiles(baseOptions);
       }).pipe(
         Effect.provide(
-          ProfileSync.Default.pipe(
+          ProfileSync.DefaultWithoutDependencies.pipe(
             Layer.provide(
               Layer.mergeAll(
                 overrideHttp,
