@@ -4,6 +4,8 @@ import {
   type Action as ActionType,
   type Trigger as TriggerType,
   Action,
+  ComparisonOp,
+  PresenceOp,
   ConditionOp,
   Trigger,
   Task,
@@ -704,9 +706,16 @@ describe("Match coverage", () => {
   });
 
   it("conditionExpr handles every operator", () => {
-    for (const op of ConditionOp.literals) {
+    for (const op of ComparisonOp.literals) {
       expect(conditionExpr(cond("%A", op, "1")).length).toBeGreaterThan(0);
     }
+    for (const op of PresenceOp.literals) {
+      expect(conditionExpr(cond("%A", op)).length).toBeGreaterThan(0);
+    }
+    // the two families together are exactly ConditionOp
+    expect(
+      [...ComparisonOp.literals, ...PresenceOp.literals].sort()
+    ).toEqual([...ConditionOp.literals].sort());
   });
 });
 
