@@ -9,7 +9,6 @@
  * stays free of node: specifiers).
  */
 
-import { FetchHttpClient } from "@effect/platform";
 import { Effect, Layer } from "effect";
 import { Tasker } from "../tasker-api.js";
 import {
@@ -18,14 +17,8 @@ import {
   ZipExtractor,
   ZipExtractError,
   type SyncOptions,
-  type SyncResult,
   type FileStoreShape,
   type ZipExtractorShape,
-} from "./contract.js";
-import type {
-  DownloadError,
-  GitHubApiError,
-  NothingToSyncError,
 } from "./contract.js";
 import { ProfileSync } from "./core.js";
 
@@ -40,6 +33,14 @@ export const TaskerFileStore: Layer.Layer<FileStore> = Layer.effect(
     const store: FileStoreShape = {
       writeText: (path, content) =>
         tasker.writeFile(path, content, false).pipe(
+          Effect.filterOrFail(
+            (written) => written !== false,
+            () =>
+              new StorageWriteError({
+                message: "Tasker writeFile() returned false",
+                path,
+              })
+          ),
           Effect.asVoid,
           Effect.catchTags({
             TaskerCallError: (error) =>
@@ -68,7 +69,19 @@ export const TaskerZipExtractor: Layer.Layer<ZipExtractor> = Layer.effect(
     const extractor: ZipExtractorShape = {
       extract: (zipPath, _targetDir) =>
         tasker.unzip(zipPath, true).pipe(
-          Effect.as([] as ReadonlyArray<string>),
+          Effect.flatMap((unzipped) =>
+            Effect.fail(
+              unzipped === false
+                ? new ZipExtractError({
+                    message: "Tasker unzip() returned false",
+                    path: zipPath,
+                  })
+                : new ZipExtractError({
+                    message: "extracted file list is not observable from Tasker",
+                    path: zipPath,
+                  })
+            )
+          ),
           Effect.catchTags({
             TaskerCallError: (error) =>
               Effect.fail(new ZipExtractError({ message: error.message, path: zipPath })),
@@ -86,24 +99,16 @@ export const TaskerZipExtractor: Layer.Layer<ZipExtractor> = Layer.effect(
  * plus Tasker-backed file writes and zip extraction.
  */
 export const SyncTaskerLive: Layer.Layer<ProfileSync> = ProfileSync.Default.pipe(
-  Layer.provide(
-    Layer.mergeAll(FetchHttpClient.layer, TaskerFileStore, TaskerZipExtractor)
-  )
+  Layer.provide(Layer.mergeAll(TaskerFileStore, TaskerZipExtractor))
 );
 
 /**
  * One-shot convenience: pull the latest release assets using the on-device
  * services.
  */
-export const pullLatestProfiles = (
-  options: SyncOptions
-): Effect.Effect<
-  SyncResult,
-  GitHubApiError | DownloadError | NothingToSyncError | StorageWriteError
-> =>
-  Effect.gen(function* () {
-    const sync = yield* ProfileSync;
-    return yield* sync.pullLatestProfiles(options);
-  }).pipe(Effect.provide(SyncTaskerLive));
+export const pullLatestProfiles = (options: SyncOptions) =>
+  ProfileSync.use((sync) => sync.pullLatestProfiles(options)).pipe(
+    Effect.provide(SyncTaskerLive)
+  );
 
 export { ProfileSync } from "./core.js";

@@ -17,8 +17,8 @@
  *   GitHub API (token required) and extracts it. Intended for Node/CI use.
  */
 
-import { HttpClient } from "@effect/platform";
-import { Effect, Schema } from "effect";
+import { FetchHttpClient, HttpClient, HttpClientError, HttpClientResponse } from "@effect/platform";
+import { Array as Arr, Effect, Order, Schema } from "effect";
 import {
   ArtifactsResponse,
   DEFAULT_ASSET_SUFFIXES,
@@ -29,6 +29,7 @@ import {
   NothingToSyncError,
   Release,
   ZipExtractor,
+  type ArtifactInfo,
   type SyncOptions,
   type SyncResult,
 } from "./contract.js";
@@ -40,19 +41,6 @@ const apiHeaders = (token: string | undefined): Record<string, string> => ({
   ...(token !== undefined ? { Authorization: `Bearer ${token}` } : {}),
 });
 
-const decodeAs = <A, I>(schema: Schema.Schema<A, I>, url: string) =>
-  (input: unknown): Effect.Effect<A, GitHubApiError> =>
-    Schema.decodeUnknown(schema)(input).pipe(
-      Effect.catchTag("ParseError", (error) =>
-        Effect.fail(
-          new GitHubApiError({
-            message: `Unexpected GitHub API payload: ${error.message}`,
-            url,
-          })
-        )
-      )
-    );
-
 export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
   effect: Effect.gen(function* () {
     const client = (yield* HttpClient.HttpClient).pipe(
@@ -61,33 +49,42 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
     const files = yield* FileStore;
     const extractor = yield* ZipExtractor;
 
-    const getJson = (url: string, token: string | undefined) =>
+    const getSchemaErrors = (url: string) => ({
+      RequestError: (error: HttpClientError.RequestError) =>
+        Effect.fail(new GitHubApiError({ message: error.message, url })),
+      ResponseError: (error: HttpClientError.ResponseError) =>
+        Effect.fail(
+          error.reason === "StatusCode"
+            ? new GitHubApiError({
+                message: `GitHub API returned ${error.response.status}`,
+                url,
+                status: error.response.status,
+              })
+            : new GitHubApiError({ message: error.message, url })
+        ),
+      ParseError: (error: { readonly message: string }) =>
+        Effect.fail(
+          new GitHubApiError({
+            message: `Unexpected GitHub API payload: ${error.message}`,
+            url,
+          })
+        ),
+    });
+
+    const getSchema = <A, I>(
+      schema: Schema.Schema<A, I>,
+      url: string,
+      token: string | undefined
+    ) =>
       client.get(url, { headers: apiHeaders(token) }).pipe(
-        Effect.flatMap((response) => response.json),
-        Effect.catchTags({
-          RequestError: (error) =>
-            Effect.fail(new GitHubApiError({ message: error.message, url })),
-          ResponseError: (error) =>
-            Effect.fail(
-              error.reason === "StatusCode"
-                ? new GitHubApiError({
-                    message: `GitHub API returned ${error.response.status}`,
-                    url,
-                    status: error.response.status,
-                  })
-                : new GitHubApiError({ message: error.message, url })
-            ),
-        })
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(schema)),
+        Effect.catchTags(getSchemaErrors(url))
       );
 
     const downloadErrors = (url: string) => ({
-      RequestError: (error: { readonly message: string }) =>
-        Effect.fail(new DownloadError({ message: error.message, url })),
-      ResponseError: (error: {
-        readonly message: string;
-        readonly reason: string;
-        readonly response: { readonly status: number };
-      }) =>
+      RequestError: (error: HttpClientError.RequestError) =>
+        Effect.fail(new DownloadError({ message: `${error.reason}: ${error.message}`, url })),
+      ResponseError: (error: HttpClientError.ResponseError) =>
         Effect.fail(
           new DownloadError({
             message:
@@ -112,6 +109,13 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
         Effect.catchTags(downloadErrors(url))
       );
 
+    /**
+     * Assets committed last: `dispatcher.js` is the name→file map and
+     * `sync-profiles.js` overwrites the running sync script itself, so both
+     * should only land once every other asset in this run has landed.
+     */
+    const commitLast = new Set(["dispatcher.js", "sync-profiles.js"]);
+
     /** Pull the matching assets of the latest release. Works on-device. */
     const pullLatestProfiles = Effect.fn("ProfileSync.pullLatestProfiles")(
       function* (options: SyncOptions) {
@@ -119,8 +123,7 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
         const suffixes = options.assetSuffixes ?? DEFAULT_ASSET_SUFFIXES;
         const url = `https://api.github.com/repos/${options.owner}/${options.repo}/releases/latest`;
 
-        const payload = yield* getJson(url, options.token);
-        const release = yield* decodeAs(Release, url)(payload);
+        const release = yield* getSchema(Release, url, options.token);
 
         const assets = release.assets.filter((asset) =>
           suffixes.some((suffix) => asset.name.endsWith(suffix))
@@ -131,22 +134,34 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
           });
         }
 
-        const written: Array<string> = [];
-        for (const asset of assets) {
-          const content = yield* getText(
-            asset.browser_download_url,
-            options.token
-          );
-          const path = `${targetDir}/${asset.name}`;
-          yield* files.writeText(path, content);
-          written.push(asset.name);
-          yield* Effect.log("Synced release asset", { asset: asset.name, path });
-        }
+        const downloaded = yield* Effect.forEach(assets, (asset) =>
+          getText(asset.browser_download_url, options.token).pipe(
+            Effect.map((content) => ({
+              name: asset.name,
+              path: `${targetDir}/${asset.name}`,
+              content,
+            }))
+          )
+        );
+
+        const ordered = [...downloaded].sort(
+          (a, b) => Number(commitLast.has(a.name)) - Number(commitLast.has(b.name))
+        );
+        yield* Effect.forEach(
+          ordered,
+          (file) =>
+            files.writeText(file.path, file.content).pipe(
+              Effect.tap(() =>
+                Effect.log("Synced release asset", { asset: file.name, path: file.path })
+              )
+            ),
+          { discard: true }
+        );
 
         return {
           source: "release",
           version: release.tag_name,
-          files: written,
+          files: downloaded.map((file) => file.name),
           targetDir,
         } satisfies SyncResult;
       }
@@ -159,20 +174,15 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
       const name = options.artifactName ?? "tasker-js";
       const url = `https://api.github.com/repos/${options.owner}/${options.repo}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=10`;
 
-      const payload = yield* getJson(url, options.token);
-      const response = yield* decodeAs(ArtifactsResponse, url)(payload);
+      const response = yield* getSchema(ArtifactsResponse, url, options.token);
 
-      const candidates = response.artifacts
-        .filter((artifact) => !artifact.expired)
-        .sort((a, b) => b.created_at.localeCompare(a.created_at));
-
-      const newest = candidates[0];
-      if (newest === undefined) {
+      const live = response.artifacts.filter((artifact) => !artifact.expired);
+      if (!Arr.isNonEmptyReadonlyArray(live)) {
         return yield* new NothingToSyncError({
           message: `No CI artifact named "${name}" found`,
         });
       }
-      return newest;
+      return Arr.max(live, Order.mapInput(Order.Date, (artifact: ArtifactInfo) => artifact.created_at));
     });
 
     /** Download and extract the newest CI artifact zip. Node/CI only. */
@@ -197,7 +207,7 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
 
         return {
           source: "artifact",
-          version: artifact.created_at,
+          version: artifact.created_at.toISOString(),
           files: extracted,
           targetDir,
         } satisfies SyncResult;
@@ -206,4 +216,5 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
 
     return { pullLatestProfiles, latestArtifact, pullFromArtifacts };
   }),
+  dependencies: [FetchHttpClient.layer],
 }) {}
