@@ -1,19 +1,22 @@
 /**
- * Adaptive night mode: toggle the "Night Mode" profile with the sun.
+ * Adaptive night mode: drive the "Night Mode" profile's window with the sun.
  *
  * Effect-based script bundled to a single JS file for Tasker: `bun run
  * compile` produces dist-tasker/adaptive-night-mode.js. In Tasker, create a
  * task with a JavaScript action pointing at the bundled file, disable Auto
  * Exit (the script calls exit() itself when done), and run it from a
  * periodic Time profile (e.g. every 30 minutes). It pairs with the DSL
- * "Night Mode" profile — this script only enables or disables that profile.
+ * "Night Mode" profile (tasks/popular/quiet.ts), which is gated by a
+ * variable trigger on %NIGHT_WINDOW rather than a fixed Time context —
+ * `enableProfile` cannot move a Time-context window, so this script owns
+ * the window by flipping that global instead.
  *
  * Home coordinates are read through the Tasker config provider: %HOME_LAT /
  * %HOME_LON are prompted for once via TE Config when unset (falling back to
  * Madrid if the prompt goes unanswered). Sunrise/sunset come from open-meteo
- * and are mirrored into %NIGHT_START (sunset) and %NIGHT_END (sunrise) as
- * HH:MM; "Night Mode" is enabled after sunset or before sunrise, disabled
- * otherwise.
+ * (in the location's own timezone, not the device's) and are mirrored into
+ * %NIGHT_START (sunset) and %NIGHT_END (sunrise) as HH:MM; %NIGHT_WINDOW is
+ * set to "1" after sunset or before sunrise, "0" otherwise.
  */
 
 import {
@@ -26,10 +29,18 @@ import { Tasker } from "../../src/tasker-api.js";
 import { taskerConfigLayer } from "../../src/config.js";
 import { runInTasker } from "../../src/runtime.js";
 
+/** A local ISO datetime as open-meteo renders it, e.g. "2026-08-18T07:12". */
+const LocalIsoTime = Schema.String.pipe(
+  Schema.pattern(/^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2})/, {
+    identifier: "LocalIsoTime",
+  })
+);
+
 const SunResponse = Schema.Struct({
+  timezone: Schema.String,
   daily: Schema.Struct({
-    sunrise: Schema.Array(Schema.String),
-    sunset: Schema.Array(Schema.String),
+    sunrise: Schema.NonEmptyArray(LocalIsoTime),
+    sunset: Schema.NonEmptyArray(LocalIsoTime),
   }),
 });
 
@@ -49,7 +60,7 @@ const fetchSunTimes = Effect.fn("adaptiveNightMode.fetchSunTimes")(
     const response = yield* client
       .get(url)
       .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(SunResponse)));
-    return response.daily;
+    return { daily: response.daily, timezone: response.timezone };
   }
 );
 
@@ -59,24 +70,18 @@ const program = Effect.gen(function* () {
   const lon = yield* Config.string("HOME_LON").pipe(Config.withDefault("-3.70"));
 
   yield* fetchSunTimes(lat, lon).pipe(
-    Effect.flatMap((daily) =>
+    Effect.flatMap(({ daily, timezone }) =>
       Effect.gen(function* () {
-        const sunriseIso = daily.sunrise[0];
-        const sunsetIso = daily.sunset[0];
-        if (sunriseIso === undefined || sunsetIso === undefined) {
-          yield* tasker.flash(
-            "Night mode: open-meteo returned no sun times for today"
-          );
-          return;
-        }
-
-        const nightStart = hhmm(sunsetIso);
-        const nightEnd = hhmm(sunriseIso);
+        const nightStart = hhmm(daily.sunset[0]);
+        const nightEnd = hhmm(daily.sunrise[0]);
         yield* tasker.setGlobal("NIGHT_START", nightStart);
         yield* tasker.setGlobal("NIGHT_END", nightEnd);
 
         const now = yield* DateTime.nowInCurrentZone.pipe(
-          DateTime.withCurrentZoneLocal
+          DateTime.withCurrentZoneNamed(timezone),
+          Effect.orElse(() =>
+            DateTime.nowInCurrentZone.pipe(DateTime.withCurrentZoneLocal)
+          )
         );
         const nowMinutes =
           DateTime.getPart(now, "hours") * 60 + DateTime.getPart(now, "minutes");
@@ -84,10 +89,16 @@ const program = Effect.gen(function* () {
           nowMinutes >= minutesOfDay(nightStart) ||
           nowMinutes < minutesOfDay(nightEnd);
 
-        yield* tasker.enableProfile("Night Mode", isNight);
-        yield* tasker.flash(
-          `Night Mode ${isNight ? "enabled" : "disabled"} (night ${nightStart}–${nightEnd})`
-        );
+        const previous = yield* tasker
+          .global("NIGHT_WINDOW")
+          .pipe(Effect.orElseSucceed(() => undefined));
+        yield* tasker.setGlobal("NIGHT_WINDOW", isNight ? "1" : "0");
+
+        if (previous !== (isNight ? "1" : "0")) {
+          yield* tasker.flash(
+            `Night Mode ${isNight ? "enabled" : "disabled"} (night ${nightStart}–${nightEnd})`
+          );
+        }
       })
     ),
     Effect.catchTags({

@@ -19,7 +19,7 @@ import {
   HttpClient,
   HttpClientResponse,
 } from "@effect/platform";
-import { Config, Effect, Layer, Schema } from "effect";
+import { Config, Duration, Effect, Layer, Schedule, Schema } from "effect";
 import { Tasker } from "../../src/tasker-api.js";
 import { taskerConfigLayer } from "../../src/config.js";
 import { runInTasker } from "../../src/runtime.js";
@@ -32,30 +32,45 @@ const ForecastResponse = Schema.Struct({
 });
 
 const fetchCurrentWeather = Effect.fn("morningBriefing.fetchCurrentWeather")(
-  function* (lat: string, lon: string) {
+  function* (lat: number, lon: number) {
     const client = (yield* HttpClient.HttpClient).pipe(
-      HttpClient.filterStatusOk
+      HttpClient.filterStatusOk,
+      HttpClient.retryTransient({
+        times: 3,
+        schedule: Schedule.exponential("500 millis"),
+      })
     );
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`;
     const forecast = yield* client
-      .get(url)
-      .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(ForecastResponse)));
+      .get("https://api.open-meteo.com/v1/forecast", {
+        urlParams: {
+          latitude: String(lat),
+          longitude: String(lon),
+          current_weather: "true",
+        },
+      })
+      .pipe(
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(ForecastResponse)),
+        Effect.timeout(Duration.seconds(20))
+      );
     return forecast.current_weather;
   }
 );
 
 const program = Effect.gen(function* () {
   const tasker = yield* Tasker;
-  const lat = yield* Config.string("HOME_LAT").pipe(Config.withDefault("40.41"));
-  const lon = yield* Config.string("HOME_LON").pipe(Config.withDefault("-3.70"));
+  const lat = yield* Config.number("HOME_LAT").pipe(Config.withDefault(40.41));
+  const lon = yield* Config.number("HOME_LON").pipe(Config.withDefault(-3.7));
 
-  const battery = yield* tasker
-    .global("BATT")
-    .pipe(Effect.orElseSucceed(() => ""));
-  const level = Number.parseInt(battery, 10);
-  const batteryPart = Number.isNaN(level)
-    ? "Battery level unknown."
-    : `Battery at ${level} percent.`;
+  const batteryPart = yield* tasker.global("BATT").pipe(
+    Effect.tapError((e) =>
+      tasker.flash(`Morning briefing: %BATT unreadable (${e.message})`)
+    ),
+    Effect.flatMap(Schema.decodeUnknown(Schema.NumberFromString)),
+    Effect.match({
+      onFailure: () => "Battery level unknown.",
+      onSuccess: (level) => `Battery at ${level} percent.`,
+    })
+  );
 
   yield* fetchCurrentWeather(lat, lon).pipe(
     Effect.flatMap((weather) =>
@@ -81,6 +96,8 @@ const program = Effect.gen(function* () {
         ),
       ParseError: () =>
         tasker.flash("Morning briefing: unexpected open-meteo payload"),
+      TimeoutException: () =>
+        tasker.flash("Morning briefing: weather request timed out"),
     })
   );
 });
