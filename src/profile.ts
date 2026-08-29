@@ -1244,30 +1244,34 @@ export const Action = {
 } as const;
 
 /**
+ * The argument shapes {@link cond} accepts, as a disjoint union of tuples:
+ * a {@link PresenceOp} takes exactly two arguments, a {@link ComparisonOp}
+ * exactly three. The arity *and* the operator literal discriminate the two
+ * arms, so `cond("BATT", "lt")` and `cond("BATT", "isSet", "20")` are both
+ * rejected by the type checker — the mispaired call never reaches a runtime
+ * check. The labels are kept so editor signature help stays readable.
+ */
+export type CondArgs =
+  | readonly [variable: VarName, op: PresenceOp]
+  | readonly [variable: VarName, op: ComparisonOp, value: string];
+
+/**
  * Build a condition over a Tasker variable (or a Secret's global).
  *
- * The overloads enforce the operator/value pairing at compile time:
  * `cond("BATT", "isSet")` takes no value, `cond("BATT", "lt", "20")`
- * requires one, and mixing them does not typecheck.
+ * requires one. Because {@link CondArgs} pairs each operator family with its
+ * own arity, `args.length` narrows the tuple union on its own: every branch
+ * has exactly the fields its condition class needs, so the body carries no
+ * type assertion and there is no path that builds a {@link Comparison}
+ * without a comparand.
  */
-export function cond(variable: VarName, op: PresenceOp): Presence;
-export function cond(
-  variable: VarName,
-  op: ComparisonOp,
-  value: string
-): Comparison;
-export function cond(
-  variable: VarName,
-  op: ConditionOp,
-  value?: string
-): Condition {
-  const name = asVarName(variable);
-  if (op === "isSet" || op === "notSet") {
-    return new Presence({ variable: name, op });
+export function cond(...args: CondArgs): Condition {
+  if (args.length === 2) {
+    const [variable, op] = args;
+    return new Presence({ variable: asVarName(variable), op });
   }
-  // `value` is guaranteed by the overloads; an untyped caller that omits it
-  // fails loudly in the Schema constructor rather than comparing against "".
-  return new Comparison({ variable: name, op, value: value as string });
+  const [variable, op, value] = args;
+  return new Comparison({ variable: asVarName(variable), op, value });
 }
 
 /** Ergonomic factories for every trigger */

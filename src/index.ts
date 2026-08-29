@@ -149,6 +149,7 @@ export {
   // Builders (Action and Trigger double as builder namespaces)
   Action,
   Trigger,
+  type CondArgs,
   cond,
 } from "./profile.js";
 
