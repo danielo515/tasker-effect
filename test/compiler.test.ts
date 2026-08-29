@@ -87,16 +87,18 @@ describe("compileTaskToJs", () => {
     const task = new Task({
       name: "Fetch Weather",
       actions: [
-        Action.http("GET", "https://example.com/weather", {
+        Action.http("POST", "https://example.com/weather", {
           headers: { Accept: "application/json" },
+          body: "payload",
           outputGlobal: "%WEATHER",
         }),
       ],
     });
 
     const jsSource = compileTaskToJs(task);
-    expect(jsSource).toContain('xhr.open("GET", "https://example.com/weather", false);');
+    expect(jsSource).toContain('xhr.open("POST", "https://example.com/weather", false);');
     expect(jsSource).toContain('xhr.setRequestHeader("Accept", "application/json");');
+    expect(jsSource).toContain('xhr.send("payload");');
     expect(jsSource).toContain('setGlobal("WEATHER", __out);');
     expectValidJs(jsSource);
   });
@@ -134,6 +136,20 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
+  it("sendIntent compiles its extras array", () => {
+    const task = new Task({
+      name: "Intent",
+      actions: [
+        Action.sendIntent("android.intent.action.VIEW", "activity", {
+          extras: ["a=1", "b=2"],
+        }),
+      ],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('["a=1", "b=2"]');
+    expectValidJs(jsSource);
+  });
+
   it("raw JavaScript is inserted verbatim", () => {
     const task = new Task({
       name: "Custom",
@@ -142,6 +158,49 @@ describe("compileTaskToJs", () => {
     const jsSource = compileTaskToJs(task);
     expect(jsSource).toContain("var x = 1;");
     expectValidJs(jsSource);
+  });
+
+  it("blank lines inside multi-line raw JavaScript are left unindented", () => {
+    const task = new Task({
+      name: "Custom",
+      actions: [Action.js("var x = 1;\n\nflash(String(x));")],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource.split("\n")).toContain("");
+    expectValidJs(jsSource);
+  });
+
+  it("flash(long: true) maps to flashLong()", () => {
+    const task = new Task({
+      name: "Custom",
+      actions: [Action.flash("hi", { long: true })],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('flashLong("hi");');
+    expectValidJs(jsSource);
+  });
+
+  it("raw JavaScript interpolation splices in a variable reference", () => {
+    const task = new Task({
+      name: "Custom",
+      actions: [Action.js(fmt`var x = ${v("myvar")};`)],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('var x = local("myvar");');
+    expectValidJs(jsSource);
+  });
+
+  it("raw JavaScript that is a bare secret/variable reference is emitted as an expression statement", () => {
+    const API_KEY = secret("RAW_JS_KEY", "key used as a whole code body");
+    const task = new Task({ name: "Custom", actions: [Action.js(API_KEY)] });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('global("RAW_JS_KEY");');
+    expectValidJs(jsSource);
+
+    const varTask = new Task({ name: "Custom2", actions: [Action.js(v("myvar"))] });
+    const varJsSource = compileTaskToJs(varTask);
+    expect(varJsSource).toContain('local("myvar");');
+    expectValidJs(varJsSource);
   });
 
   it("wraps everything in an error handler that flashes", () => {
@@ -172,6 +231,7 @@ describe("compileProfileFiles", () => {
 
 describe("compileProjectFiles", () => {
   it("bundles profiles, tasks and a setup README", () => {
+    const greet = new Task({ name: "Greet", actions: [Action.flash("Hi")] });
     const project = new Project({
       name: "My Automations",
       profiles: [
@@ -182,11 +242,13 @@ describe("compileProjectFiles", () => {
             name: "Save Power",
             actions: [Action.setWifi(false)],
           }),
+          exit: new Task({
+            name: "Restore Power",
+            actions: [Action.performTask(greet)],
+          }),
         }),
       ],
-      tasks: [
-        new Task({ name: "Greet", actions: [Action.flash("Hi")] }),
-      ],
+      tasks: [greet],
     });
 
     const files = compileProjectFiles(project, { repo: TEST_REPO });
@@ -340,6 +402,17 @@ describe("secrets", () => {
       ],
     });
     expect(collectProjectSecrets(project)).toHaveLength(1);
+  });
+
+  it("a shared action object referenced twice is only walked once", () => {
+    const sharedAction = Action.flash(fmt`${secret("SHARED_KEY", "shared")}`);
+    const project = new Project({
+      name: "P",
+      tasks: [new Task({ name: "B", actions: [sharedAction, sharedAction] })],
+    });
+    expect(collectProjectSecrets(project).map((s) => s.name)).toEqual([
+      "SHARED_KEY",
+    ]);
   });
 
   it("conflicting descriptions for the same secret fail compilation", () => {
@@ -506,6 +579,29 @@ describe("task references", () => {
     })
   );
 
+  it.effect("TaskerCompiler.compileTask wraps an unexpected non-CompileError failure", () =>
+    Effect.gen(function* () {
+      const brokenAction = { _tag: "NotARealAction" } as unknown as ActionType;
+      // Bypass schema validation: this simulates an internal bug producing an
+      // action tag the compiler's Match.exhaustive does not know about,
+      // which is the only way to reach a non-CompileError failure.
+      const task = new Task(
+        { name: "Broken Task", actions: [brokenAction] },
+        { disableValidation: true }
+      );
+      const program = Effect.gen(function* () {
+        const compiler = yield* TaskerCompiler;
+        return yield* compiler.compileTask(task);
+      });
+      const error = yield* program.pipe(
+        Effect.flip,
+        Effect.provide(TaskerCompiler.Default)
+      );
+      expect(error).toBeInstanceOf(CompileError);
+      expect(error.source).toBe("Broken Task");
+    })
+  );
+
   it("valid DSL references compile, including UI-task escape hatches", () => {
     const project = new Project({
       name: "Linked",
@@ -596,7 +692,9 @@ describe("Match coverage", () => {
     Trigger.receivedText({ kind: "sms" }),
     Trigger.variable(cond("%A", "eq", "1")),
     Trigger.event("Display On"),
+    Trigger.event("Notification", "com.app"),
     Trigger.state("Power"),
+    Trigger.state("Power", "AC"),
   ];
 
   it("describeTrigger handles every trigger tag", () => {
@@ -623,6 +721,20 @@ describe("TaskerCompiler service", () => {
       expect(file.content).toContain('flash("via service");');
     }).pipe(Effect.provide(TaskerCompiler.Default))
   );
+
+  it.effect("compileProfile returns the enter/exit CompiledFiles", () =>
+    Effect.gen(function* () {
+      const compiler = yield* TaskerCompiler;
+      const files = yield* compiler.compileProfile(
+        new Profile({
+          name: "Service Profile",
+          triggers: [Trigger.wifiConnected()],
+          enter: new Task({ name: "Arrive", actions: [Action.flash("hi")] }),
+        })
+      );
+      expect(files.map((f) => f.filename)).toEqual(["service-profile.enter.js"]);
+    }).pipe(Effect.provide(TaskerCompiler.Default))
+  );
 });
 
 describe("helpers", () => {
@@ -644,6 +756,16 @@ describe("helpers", () => {
     expect(describeTrigger(Trigger.receivedText({ sender: "Boss" }))).toBe(
       "Event > Phone > Received Text (Type: Any, Sender: Boss)"
     );
+    expect(describeTrigger(Trigger.headsetPlugged("no-mic"))).toBe(
+      "State > Hardware > Headset Plugged (Type: Without Microphone)"
+    );
+  });
+
+  it("describeTrigger includes repeatMinutes when set", () => {
+    const description = describeTrigger(
+      Trigger.time({ hour: 7, minute: 0 }, { repeatMinutes: 15 })
+    );
+    expect(description).toBe("Time from 07:00 every 15m");
   });
 
   it("describeTrigger formats times", () => {

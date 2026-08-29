@@ -1,15 +1,23 @@
 import { beforeAll, describe, expect, it } from "@effect/vitest";
-import { Command, FileSystem, Path } from "@effect/platform";
+import { Command, CommandExecutor, FileSystem, Path } from "@effect/platform";
 import { NodeContext } from "@effect/platform-node";
-import { Effect, Layer, Stream } from "effect";
-import { Action, Task } from "../src/profile.js";
-import { TaskerCompiler } from "../src/compiler.js";
+import { Chunk, Effect, Layer, Stream } from "effect";
+import { Action, Profile, Project, Task, Trigger } from "../src/profile.js";
+import { CompileError, TaskerCompiler } from "../src/compiler.js";
 import { FileStore } from "../src/sync/node.js";
+import { StorageWriteError } from "../src/sync/contract.js";
 import {
   asCompilable,
   collectCompilables,
   compileEntry,
+  detectRepoFromGit,
+  EntryImportError,
+  EntryNotFoundError,
+  formatCliError,
+  NoCompilableExportsError,
   parseGitHubRepo,
+  RepoDetectionError,
+  runCli,
 } from "../src/cli.js";
 import * as fixture from "./fixtures/cli-entry.js";
 
@@ -17,12 +25,48 @@ const REPO_ROOT = new URL("..", import.meta.url).pathname;
 const FIXTURE_ENTRY = new URL("./fixtures/cli-entry.ts", import.meta.url)
   .pathname;
 const EMPTY_ENTRY = new URL("./fixtures/cli-empty.ts", import.meta.url).pathname;
+const THROWS_ENTRY = new URL("./fixtures/cli-throws.ts", import.meta.url)
+  .pathname;
+const THROWS_JS_ENTRY = new URL("./fixtures/cli-throws.js", import.meta.url)
+  .pathname;
+const COLLISION_ENTRY = new URL("./fixtures/cli-collision.ts", import.meta.url)
+  .pathname;
+const BROKEN_LINK_ENTRY = new URL(
+  "./fixtures/cli-broken-link.ts",
+  import.meta.url
+).pathname;
 
 const CliTestLayer = Layer.mergeAll(
   TaskerCompiler.Default,
   FileStore.Default,
   NodeContext.layer
 );
+
+/** A fake CommandExecutor that never spawns a real process, for testing `git` interactions */
+const fakeCommandExecutorLayer = (options: {
+  readonly stdout?: string;
+  readonly exitCode: number;
+}): Layer.Layer<CommandExecutor.CommandExecutor> =>
+  Layer.succeed(
+    CommandExecutor.CommandExecutor,
+    CommandExecutor.makeExecutor(() =>
+      Effect.succeed({
+        [CommandExecutor.ProcessTypeId]: CommandExecutor.ProcessTypeId,
+        pid: CommandExecutor.ProcessId(1),
+        exitCode: Effect.succeed(CommandExecutor.ExitCode(options.exitCode)),
+        isRunning: Effect.succeed(false),
+        kill: () => Effect.void,
+        stderr: Stream.empty,
+        stdin: undefined as never,
+        stdout: Stream.fromChunk(
+          Chunk.of(new TextEncoder().encode(options.stdout ?? ""))
+        ),
+        toJSON: () => ({ _id: "FakeProcess" }),
+        toString: () => "FakeProcess",
+        [Symbol.for("nodejs.util.inspect.custom")]: () => "FakeProcess",
+      } as unknown as CommandExecutor.Process)
+    )
+  );
 
 describe("parseGitHubRepo", () => {
   it.each([
@@ -74,6 +118,146 @@ describe("export scanning", () => {
     expect(recovered).toBeInstanceOf(Task);
     expect((recovered as Task).name).toBe("Alien");
   });
+
+  it("accepts a structurally-matching plain Profile", () => {
+    const plain = JSON.parse(
+      JSON.stringify(
+        new Profile({
+          name: "Alien Profile",
+          triggers: [Trigger.wifiConnected()],
+          enter: new Task({ name: "Enter", actions: [Action.flash("hi")] }),
+        })
+      )
+    );
+    const recovered = asCompilable(plain);
+    expect(recovered).toBeInstanceOf(Profile);
+    expect((recovered as Profile).name).toBe("Alien Profile");
+  });
+
+  it("accepts a structurally-matching plain Project", () => {
+    const plain = JSON.parse(
+      JSON.stringify(
+        new Project({
+          name: "Alien Project",
+          tasks: [new Task({ name: "T", actions: [Action.flash("hi")] })],
+        })
+      )
+    );
+    const recovered = asCompilable(plain);
+    expect(recovered).toBeInstanceOf(Project);
+    expect((recovered as Project).name).toBe("Alien Project");
+  });
+
+  it("rejects a plain object that fails schema validation", () => {
+    expect(asCompilable({ name: "Bad", triggers: "not-an-array-of-triggers" })).toBeUndefined();
+    expect(asCompilable({ name: "Bad", actions: "not-an-array" })).toBeUndefined();
+    expect(asCompilable({ name: "Bad", triggers: [{ _tag: "NotATrigger" }] })).toBeUndefined();
+  });
+});
+
+describe("detectRepoFromGit", () => {
+  it.effect("parses the repo from a successful git command", () =>
+    Effect.gen(function* () {
+      const repo = yield* detectRepoFromGit().pipe(
+        Effect.provide(
+          fakeCommandExecutorLayer({
+            stdout: "https://github.com/acme/automations.git\n",
+            exitCode: 0,
+          })
+        )
+      );
+      expect(repo).toEqual({ owner: "acme", repo: "automations" });
+    })
+  );
+
+  it.effect("fails when the git command itself cannot be spawned", () =>
+    Effect.gen(function* () {
+      const failingExecutor = Layer.succeed(
+        CommandExecutor.CommandExecutor,
+        CommandExecutor.makeExecutor(() =>
+          Effect.fail({
+            _tag: "SystemError",
+            reason: "NotFound",
+            module: "Command",
+            method: "spawn",
+            pathOrDescriptor: "git",
+            message: "spawn git ENOENT",
+          } as never)
+        )
+      );
+      const error = yield* detectRepoFromGit().pipe(
+        Effect.provide(failingExecutor),
+        Effect.flip
+      );
+      expect(error).toBeInstanceOf(RepoDetectionError);
+      expect(error.message).toContain("Could not run");
+    })
+  );
+
+  it.effect("fails when git exits non-zero", () =>
+    Effect.gen(function* () {
+      const error = yield* detectRepoFromGit().pipe(
+        Effect.provide(fakeCommandExecutorLayer({ exitCode: 1 })),
+        Effect.flip
+      );
+      expect(error).toBeInstanceOf(RepoDetectionError);
+      expect(error.message).toContain("exit code 1");
+    })
+  );
+
+  it.effect("fails when the origin remote is not a GitHub URL", () =>
+    Effect.gen(function* () {
+      const error = yield* detectRepoFromGit().pipe(
+        Effect.provide(
+          fakeCommandExecutorLayer({
+            stdout: "https://gitlab.com/acme/automations.git\n",
+            exitCode: 0,
+          })
+        ),
+        Effect.flip
+      );
+      expect(error).toBeInstanceOf(RepoDetectionError);
+      expect(error.message).toContain("not a GitHub repository URL");
+    })
+  );
+});
+
+describe("formatCliError", () => {
+  it("formats every CLI failure tag", () => {
+    expect(
+      formatCliError(
+        new CompileError({ message: "bad task", source: "MyTask" })
+      )
+    ).toBe('Compilation failed: bad task (while compiling "MyTask")');
+    expect(formatCliError(new CompileError({ message: "bad task" }))).toBe(
+      "Compilation failed: bad task"
+    );
+    expect(
+      formatCliError(
+        new EntryNotFoundError({ message: "not found", tried: ["a.ts"] })
+      )
+    ).toBe("not found");
+    expect(
+      formatCliError(
+        new EntryImportError({ message: "import failed", entry: "a.ts" })
+      )
+    ).toBe("import failed");
+    expect(
+      formatCliError(
+        new NoCompilableExportsError({ message: "nothing here", entry: "a.ts" })
+      )
+    ).toBe("nothing here");
+    expect(
+      formatCliError(new RepoDetectionError({ message: "no repo" }))
+    ).toBe(
+      "no repo\nPass --repo <owner>/<name> to set the GitHub repository explicitly."
+    );
+    expect(
+      formatCliError(
+        new StorageWriteError({ message: "disk full", path: "/x/y.js" })
+      )
+    ).toBe("Failed to write /x/y.js: disk full");
+  });
 });
 
 describe("compileEntry", () => {
@@ -121,6 +305,33 @@ describe("compileEntry", () => {
     }).pipe(Effect.provide(CliTestLayer))
   );
 
+  it.scoped(
+    "treats a failing fs.exists() check as not-found rather than propagating",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const outDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "tasker-effect-cli-",
+        });
+        const flakyFs = FileSystem.makeNoop({
+          exists: () =>
+            Effect.fail({
+              _tag: "SystemError",
+              reason: "Unknown",
+              module: "FileSystem",
+              method: "exists",
+              pathOrDescriptor: "?",
+              message: "boom",
+            } as never),
+        });
+        const error = yield* compileEntry({
+          entry: FIXTURE_ENTRY,
+          outDir,
+        }).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem, flakyFs)), Effect.flip);
+        expect(error).toBeInstanceOf(EntryNotFoundError);
+      }).pipe(Effect.provide(CliTestLayer))
+  );
+
   it.scoped("fails with EntryNotFoundError for a missing entry", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -131,7 +342,7 @@ describe("compileEntry", () => {
         entry: "does/not/exist.ts",
         outDir,
       }).pipe(Effect.flip);
-      expect(error._tag).toBe("EntryNotFoundError");
+      expect(error).toBeInstanceOf(EntryNotFoundError);
     }).pipe(Effect.provide(CliTestLayer))
   );
 
@@ -144,8 +355,195 @@ describe("compileEntry", () => {
       const error = yield* compileEntry({ entry: EMPTY_ENTRY, outDir }).pipe(
         Effect.flip
       );
-      expect(error._tag).toBe("NoCompilableExportsError");
+      expect(error).toBeInstanceOf(NoCompilableExportsError);
     }).pipe(Effect.provide(CliTestLayer))
+  );
+
+  it.scoped("fails with EntryImportError when the entry throws on import", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const outDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "tasker-effect-cli-",
+      });
+      const error = yield* compileEntry({ entry: THROWS_ENTRY, outDir }).pipe(
+        Effect.flip
+      );
+      expect(error).toBeInstanceOf(EntryImportError);
+      expect(error.message).toContain("boom: this module cannot be imported");
+    }).pipe(Effect.provide(CliTestLayer))
+  );
+
+  it.scoped(
+    "a .js import failure never adds the Bun hint, regardless of runtime",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const outDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "tasker-effect-cli-",
+        });
+        const error = yield* compileEntry({ entry: THROWS_JS_ENTRY, outDir }).pipe(
+          Effect.flip
+        );
+        expect(error).toBeInstanceOf(EntryImportError);
+        expect(error.message).not.toContain("TypeScript entries require Bun");
+      }).pipe(Effect.provide(CliTestLayer))
+  );
+
+  it.scoped(
+    "the EntryImportError message hints at Bun when a .ts import fails off-Bun",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const outDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "tasker-effect-cli-",
+        });
+        const g = globalThis as { Bun?: unknown };
+        const savedBun = g.Bun;
+        delete g.Bun;
+        const error = yield* compileEntry({ entry: THROWS_ENTRY, outDir }).pipe(
+          Effect.flip,
+          Effect.ensuring(
+            Effect.sync(() => {
+              g.Bun = savedBun;
+            })
+          )
+        );
+        expect(error).toBeInstanceOf(EntryImportError);
+        expect(error.message).toContain("TypeScript entries require Bun");
+      }).pipe(Effect.provide(CliTestLayer))
+  );
+
+  it.scoped("defaults to tasks/automations.ts when no entry is given", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const outDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "tasker-effect-cli-",
+      });
+      const result = yield* compileEntry({
+        outDir,
+        repo: { owner: "acme", repo: "automations" },
+      });
+      expect(result.entry).toContain("tasks/automations.ts");
+      expect(result.files.length).toBeGreaterThan(0);
+    }).pipe(Effect.provide(CliTestLayer))
+  );
+
+  it.scoped("auto-detects the repo from git when --repo is omitted", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const outDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "tasker-effect-cli-",
+      });
+      const result = yield* compileEntry({ entry: FIXTURE_ENTRY, outDir });
+      const projectXml = result.files.find(
+        (file) => file.filename === "tasker-effect.prj.xml"
+      );
+      expect(projectXml).toBeDefined();
+    }).pipe(Effect.provide(CliTestLayer))
+  );
+
+  it.scoped("warns and lets the later export win when two exports collide on a filename", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const outDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "tasker-effect-cli-",
+      });
+      const result = yield* compileEntry({ entry: COLLISION_ENTRY, outDir });
+      const matches = result.files.filter((file) => file.filename === "same-name.js");
+      expect(matches.map((file) => file.exportName)).toEqual(["first", "second"]);
+      const content = yield* fs.readFileString(path.join(outDir, "same-name.js"));
+      expect(content).toContain('flash("second");');
+    }).pipe(Effect.provide(CliTestLayer))
+  );
+
+  it.scoped("fails with StorageWriteError when the output path cannot be written", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tmpDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "tasker-effect-cli-",
+      });
+      // outDir points at a plain file, so `mkdir -p` for it fails.
+      const outDir = path.join(tmpDir, "not-a-directory");
+      yield* fs.writeFileString(outDir, "occupied");
+      const error = yield* compileEntry({ entry: FIXTURE_ENTRY, outDir }).pipe(
+        Effect.flip
+      );
+      expect(error).toBeInstanceOf(StorageWriteError);
+    }).pipe(Effect.provide(CliTestLayer))
+  );
+});
+
+// These call `runCli` in-process (against source, not the built dist): they
+// exist for coverage of the Command wiring and `runCli`'s own error
+// reporting. The "spawned" suite below additionally proves the packaged bin
+// works end to end.
+describe("runCli (in-process)", () => {
+  it.effect("--help prints usage and exits 0", () =>
+    Effect.gen(function* () {
+      const exitCode = yield* Effect.promise(() => runCli(["--help"]));
+      expect(exitCode).toBe(0);
+    })
+  );
+
+  it.effect("rejects a malformed --repo with exit code 1", () =>
+    Effect.gen(function* () {
+      const exitCode = yield* Effect.promise(() =>
+        runCli(["compile", "--repo", "not-a-slug"])
+      );
+      expect(exitCode).toBe(1);
+    })
+  );
+
+  it.scoped("compiles a fixture entry to the requested output dir and exits 0", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const outDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "tasker-effect-cli-",
+      });
+      const exitCode = yield* Effect.promise(() =>
+        runCli([
+          "compile",
+          FIXTURE_ENTRY,
+          "--out",
+          outDir,
+          "--repo",
+          "acme/automations",
+        ])
+      );
+      expect(exitCode).toBe(0);
+      expect(yield* fs.exists(`${outDir}/greet.js`)).toBe(true);
+    }).pipe(Effect.provide(NodeContext.layer))
+  );
+
+  it.effect("reports EntryNotFoundError with exit code 1", () =>
+    Effect.gen(function* () {
+      const exitCode = yield* Effect.promise(() =>
+        runCli(["compile", "no/such/entry.ts", "--repo", "acme/automations"])
+      );
+      expect(exitCode).toBe(1);
+    })
+  );
+
+  it.effect("reports NoCompilableExportsError with exit code 1", () =>
+    Effect.gen(function* () {
+      const exitCode = yield* Effect.promise(() =>
+        runCli(["compile", EMPTY_ENTRY, "--repo", "acme/automations"])
+      );
+      expect(exitCode).toBe(1);
+    })
+  );
+
+  it.effect("reports a linker CompileError with exit code 1", () =>
+    Effect.gen(function* () {
+      // The fixture's Project references a task not listed in `tasks:`,
+      // which fails the dispatcher's static link check.
+      const exitCode = yield* Effect.promise(() =>
+        runCli(["compile", BROKEN_LINK_ENTRY, "--repo", "acme/automations"])
+      );
+      expect(exitCode).toBe(1);
+    })
   );
 });
 

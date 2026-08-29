@@ -23,10 +23,11 @@ import {
   Path,
 } from "@effect/platform";
 import { NodeContext } from "@effect/platform-node";
-import { Console, Effect, Either, Layer, Option, Schema, Stream } from "effect";
-import { TaskerCompiler, type CompiledFile, type RepoRef } from "./compiler.js";
+import { Console, Effect, Either, Layer, Match, Option, Schema, Stream } from "effect";
+import { CompileError, TaskerCompiler, type CompiledFile, type RepoRef } from "./compiler.js";
 import { Profile, Project, Task } from "./profile.js";
 import { FileStore } from "./sync/node.js";
+import { StorageWriteError } from "./sync/contract.js";
 
 // =============================================================================
 // Errors
@@ -408,6 +409,43 @@ const CliLive = Layer.mergeAll(
   NodeContext.layer
 );
 
+/** Union of every error `runCli` reports on stderr with exit code 1 */
+type CliFailure =
+  | EntryNotFoundError
+  | EntryImportError
+  | NoCompilableExportsError
+  | RepoDetectionError
+  | CompileError
+  | StorageWriteError;
+
+/** Render a `CliFailure` as the message printed to stderr */
+export const formatCliError = (error: CliFailure): string =>
+  Match.value(error).pipe(
+    Match.tag("EntryNotFoundError", (e) => e.message),
+    Match.tag("EntryImportError", (e) => e.message),
+    Match.tag("NoCompilableExportsError", (e) => e.message),
+    Match.tag(
+      "RepoDetectionError",
+      (e) =>
+        `${e.message}\n` +
+        "Pass --repo <owner>/<name> to set the GitHub repository explicitly."
+    ),
+    Match.tag(
+      "CompileError",
+      (e) =>
+        `Compilation failed: ${e.message}` +
+        (e.source !== undefined ? ` (while compiling "${e.source}")` : "")
+    ),
+    Match.tag(
+      "StorageWriteError",
+      (e) => `Failed to write ${e.path}: ${e.message}`
+    ),
+    Match.exhaustive
+  );
+
+const reportAndFail = (error: CliFailure): Effect.Effect<number> =>
+  Console.error(formatCliError(error)).pipe(Effect.as(1));
+
 /**
  * Run the CLI with the given argv (excluding the runtime/script prefix) and
  * resolve to a process exit code. This is the only place effects are run and
@@ -418,28 +456,12 @@ export const runCli = (argv: ReadonlyArray<string>): Promise<number> =>
     cli(["node", "tasker-effect", ...argv]).pipe(
       Effect.as(0),
       Effect.catchTags({
-        EntryNotFoundError: (error) =>
-          Console.error(error.message).pipe(Effect.as(1)),
-        EntryImportError: (error) =>
-          Console.error(error.message).pipe(Effect.as(1)),
-        NoCompilableExportsError: (error) =>
-          Console.error(error.message).pipe(Effect.as(1)),
-        RepoDetectionError: (error) =>
-          Console.error(
-            `${error.message}\n` +
-              "Pass --repo <owner>/<name> to set the GitHub repository explicitly."
-          ).pipe(Effect.as(1)),
-        CompileError: (error) =>
-          Console.error(
-            `Compilation failed: ${error.message}` +
-              (error.source !== undefined
-                ? ` (while compiling "${error.source}")`
-                : "")
-          ).pipe(Effect.as(1)),
-        StorageWriteError: (error) =>
-          Console.error(`Failed to write ${error.path}: ${error.message}`).pipe(
-            Effect.as(1)
-          ),
+        EntryNotFoundError: reportAndFail,
+        EntryImportError: reportAndFail,
+        NoCompilableExportsError: reportAndFail,
+        RepoDetectionError: reportAndFail,
+        CompileError: reportAndFail,
+        StorageWriteError: reportAndFail,
       }),
       // @effect/cli already printed the validation error (with usage) itself.
       Effect.catchIf(ValidationError.isValidationError, () => Effect.succeed(1)),

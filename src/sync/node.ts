@@ -33,8 +33,12 @@ import {
 import { ProfileSync } from "./core.js";
 import type { DownloadError, GitHubApiError, NothingToSyncError } from "./contract.js";
 
-/** FileStore backed by @effect/platform's FileSystem (Node/Bun) */
-export const FileStoreNodeLive: Layer.Layer<FileStoreTag> = Layer.effect(
+/** FileStore backed by `FileSystem`/`Path`, undecided which implementation */
+export const FileStoreLive: Layer.Layer<
+  FileStoreTag,
+  never,
+  FileSystem.FileSystem | Path.Path
+> = Layer.effect(
   FileStoreTag,
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -47,7 +51,7 @@ export const FileStoreNodeLive: Layer.Layer<FileStoreTag> = Layer.effect(
         Effect.fail(new StorageWriteError({ message: error.message, path: target })),
     });
 
-    const store: FileStoreShape = {
+    return {
       writeText: (target, content) =>
         fs.makeDirectory(path.dirname(target), { recursive: true }).pipe(
           Effect.andThen(fs.writeFileString(target, content)),
@@ -58,21 +62,27 @@ export const FileStoreNodeLive: Layer.Layer<FileStoreTag> = Layer.effect(
           Effect.andThen(fs.writeFile(target, content)),
           Effect.catchTags(storageErrors(target))
         ),
-    };
-    return store;
+    } satisfies FileStoreShape;
   })
-).pipe(Layer.provide(NodeContext.layer));
+);
 
-/** ZipExtractor running the system `unzip` via @effect/platform's Command */
-export const ZipExtractorNodeLive: Layer.Layer<ZipExtractorTag> = Layer.effect(
+/** FileStore backed by @effect/platform's FileSystem (Node/Bun) */
+export const FileStoreNodeLive: Layer.Layer<FileStoreTag> = FileStoreLive.pipe(
+  Layer.provide(NodeContext.layer)
+);
+
+/** ZipExtractor backed by `FileSystem`/`CommandExecutor`, undecided which implementation */
+export const ZipExtractorLive: Layer.Layer<
+  ZipExtractorTag,
+  never,
+  FileSystem.FileSystem | CommandExecutor.CommandExecutor
+> = Layer.effect(
   ZipExtractorTag,
   Effect.gen(function* () {
-    const context = yield* Effect.context<
-      FileSystem.FileSystem | CommandExecutor.CommandExecutor
-    >();
+    const context = yield* Effect.context<CommandExecutor.CommandExecutor>();
     const fs = yield* FileSystem.FileSystem;
 
-    const extractor: ZipExtractorShape = {
+    return {
       extract: (zipPath, targetDir) =>
         Effect.gen(function* () {
           yield* fs.makeDirectory(targetDir, { recursive: true });
@@ -99,10 +109,14 @@ export const ZipExtractorNodeLive: Layer.Layer<ZipExtractorTag> = Layer.effect(
           }),
           Effect.provide(context)
         ),
-    };
-    return extractor;
+    } satisfies ZipExtractorShape;
   })
-).pipe(Layer.provide(NodeContext.layer));
+);
+
+/** ZipExtractor running the system `unzip` via @effect/platform's Command */
+export const ZipExtractorNodeLive: Layer.Layer<ZipExtractorTag> = ZipExtractorLive.pipe(
+  Layer.provide(NodeContext.layer)
+);
 
 /**
  * Compatibility service classes: same tags as the contract, with a `.Default`

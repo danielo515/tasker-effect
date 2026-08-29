@@ -1,7 +1,7 @@
-import { describe, expect, it } from "@effect/vitest";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Config, ConfigError, Effect, Fiber } from "effect";
 import { CONFIG_TASK_NAME } from "../src/compiler.js";
-import { makeTaskerConfigProvider } from "../src/config.js";
+import { makeTaskerConfigProvider, taskerConfigLayer } from "../src/config.js";
 import { secret } from "../src/profile.js";
 import {
   makeTestTasker,
@@ -131,6 +131,21 @@ describe("makeTaskerConfigProvider", () => {
         provider
       );
       expect(value).toBe("still-works");
+      const prompt = calls.find((call) => call.name === "performTask");
+      expect(prompt?.args[1]).toBe(5);
+    })
+  );
+
+  it.live("a negative or non-numeric %priority falls back to the constant", () =>
+    Effect.gen(function* () {
+      const { api, calls } = makePromptingTasker({
+        answer: "x",
+        overrides: {
+          local: (name) => Effect.succeed(name === "priority" ? "-1" : ""),
+        },
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      yield* Effect.withConfigProvider(Config.string("OPENWEATHER_KEY"), provider);
       const prompt = calls.find((call) => call.name === "performTask");
       expect(prompt?.args[1]).toBe(5);
     })
@@ -286,6 +301,36 @@ describe("makeTaskerConfigProvider", () => {
     })
   );
 
+  it.live("a failing taskRunning check is treated as still-running, not a dismissal", () =>
+    Effect.gen(function* () {
+      // taskRunning itself failing (e.g. TaskerCallError) must not fail the
+      // read or be mistaken for a dismissal: it falls back to "still
+      // running" and the eventual answer still comes through.
+      const { api } = makeTestTasker({
+        global: () => Effect.succeed(""),
+        taskRunning: () =>
+          Effect.fail(
+            new TaskerCallError({ function: "taskRunning", message: "boom" })
+          ),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, {
+        pollIntervalMillis: 5,
+        promptTimeoutMillis: 50,
+      });
+      const error = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      ).pipe(Effect.flip);
+      // Never answered, so it times out normally rather than reporting a
+      // dismissal — proving the taskRunning failure was swallowed.
+      expect(ConfigError.isConfigError(error)).toBe(true);
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).not.toContain("dismissed");
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("was not answered within");
+    })
+  );
+
   it.live("concurrent reads of the same missing key prompt once", () =>
     Effect.gen(function* () {
       const { api, calls } = makePromptingTasker({ answer: "once" });
@@ -400,5 +445,59 @@ describe("makeTaskerConfigProvider", () => {
         expect(later).toBe("late-answer");
         expect(calls.filter((call) => call.name === "performTask")).toHaveLength(2);
       })
+  );
+
+  it.effect("wraps a failing global() read in SourceUnavailable", () =>
+    Effect.gen(function* () {
+      const { api } = makeTestTasker({
+        global: () =>
+          Effect.fail(new TaskerCallError({ function: "global", message: "no globals" })),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      const error = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      ).pipe(Effect.flip);
+      expect(ConfigError.isConfigError(error)).toBe(true);
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("no globals");
+    })
+  );
+
+  it.live("wraps a failing performTask() prompt in SourceUnavailable", () =>
+    Effect.gen(function* () {
+      const { api } = makeTestTasker({
+        global: () => Effect.succeed(""),
+        performTask: () =>
+          Effect.fail(new TaskerCallError({ function: "performTask", message: "no task runner" })),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      const error = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      ).pipe(Effect.flip);
+      expect(ConfigError.isConfigError(error)).toBe(true);
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("no task runner");
+    })
+  );
+});
+
+describe("taskerConfigLayer", () => {
+  const g = globalThis as Record<string, unknown>;
+
+  afterEach(() => {
+    delete g.global;
+    delete g.performTask;
+  });
+
+  it.effect("installs a ConfigProvider backed by the live Tasker globals", () =>
+    Effect.gen(function* () {
+      g.global = (name: string) => (name === "OPENWEATHER_KEY" ? "live-value" : "");
+      const value = yield* Config.string("OPENWEATHER_KEY").pipe(
+        Effect.provide(taskerConfigLayer({ secrets: [API_KEY] }))
+      );
+      expect(value).toBe("live-value");
+    })
   );
 });
