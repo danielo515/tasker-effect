@@ -6,10 +6,13 @@
 > union). `master` has since advanced to `cea8b76` (PR #7: vitest coverage to 100%, plus review fixes
 > to `src/sync/node.ts`). Findings were re-verified against `dadd35a`; line numbers in files that PR #7
 > touched — `src/sync/node.ts`, `src/cli.ts` and most of `test/` — may be a few lines out, and a small
-> number of `sync/node.ts` findings may be partly addressed there. Spot-checked as still open after
-> `cea8b76`: `Effect.context` re-provision (`sync/node.ts:82`) and the `FileStore`/`ZipExtractor`
-> tag-subclasses (`:126`). Everything in `src/compiler.ts`, `src/profile.ts`, `src/config.ts` and
-> `tasks/` is unaffected by PR #7.
+> number of `sync/node.ts` findings may be partly addressed there. **One has since been withdrawn:**
+> the "capability layers self-provide `NodeContext`" entry was already resolved by PR #7 and its fix
+> would have been wrong — see the `src/sync/node.ts` entry below. That drops the count to 94
+> (11 high, 45 medium, 38 low). Re-checked as still open after `cea8b76`: `Effect.context`
+> re-provision (`sync/node.ts:82`) and the `FileStore`/`ZipExtractor` tag-subclasses (`:126`).
+> Everything in `src/compiler.ts`, `src/profile.ts`, `src/config.ts` and `tasks/` is unaffected by
+> PR #7.
 
 Audited the full tree at `/home/user/tasker-effect`: `src/` (compiler, profile DSL, tasker-api, cli, config, runtime, sync/{contract,core,node,tasker}), the newer `tasks/popular/*` and `tasks/scripts/*`, `scripts/compile-tasks.ts`, `examples/`, and all 12 test files. Baseline on the audited tree: `bun run typecheck` clean, `bun run lint` clean (oxlint 1.78 with the ~90-rule `@effect/tsgo` recommended preset), `bun test` 189/189 passing. **Every finding a linter already enforces was excluded** — `try-catch-in-effect-gen`, `floating-effect`, `leaking-requirements`, `missing-layer-context`, `unsafe-effect-type-assertion`, `unnecessary-effect-gen`, `catch-to-ignore`, `global-*`, `prefer-schema-over-json` and the rest of the preset were checked against each candidate and anything they cover was dropped. What is listed below is therefore, by construction, what automation will not catch for you. Where a lint rule looks adjacent but stays silent, the entry says which rule and why. Most fixes were applied to a scratch tree and re-run through typecheck/lint/tests; where a proposed fix broke something, that is stated. Line numbers were re-anchored on the current tree; a handful of `src/profile.ts` anchors sit a few lines from older records because commit `dadd35a` (Condition → `Comparison | Presence`) shifted the file.
 
@@ -252,19 +255,21 @@ export const SyncTaskerLive: Layer.Layer<ProfileSync> = ProfileSync.Default.pipe
 
 Applied: typecheck/lint/189 green, `SyncTaskerLive`'s public type unchanged, and the probe test passes for the right reason. Keep an assertion on `error.message`, not just `_tag` — `_tag` alone passes under the closed seam too. (Drop the "two Tasker instances" rationale: layer memoisation builds it once — verified.)
 
-**`src/sync/node.ts:64` — [MED] the Node capability layers self-provide `NodeContext.layer`, collapsing R to `never` so `FileSystem`/`CommandExecutor` can never be substituted.**
-Same shape as above, in the other platform module. No test can hand `FileStoreNodeLive` an in-memory FileSystem or a stub executor to exercise the `StorageWriteError`/`ZipExtractError` mappings at `:43-48` and `:90-99` — and none does. The callers already show the confusion: `test/cli.test.ts:21-25` and `scripts/compile-tasks.ts:91` merge a `NodeContext` the layers ignore.
+**`src/sync/node.ts` — [RESOLVED on master] the Node capability layers already expose a dependency-free variant; this finding was stale when written.**
+Flagged during review by @danielo515 and confirmed: the audit was generated against `dadd35a`, which predates PR #7. On `cea8b76` the split this finding asked for already exists, with the opposite naming to what the entry assumed:
 
 ```ts
-export const FileStoreNodeLive: Layer.Layer<FileStoreTag, never, FileSystem.FileSystem | Path.Path> = /* provide removed */;
-export const ZipExtractorNodeLive: Layer.Layer<ZipExtractorTag, never, FileSystem.FileSystem | CommandExecutor.CommandExecutor> = /* … */;
-export class FileStore extends FileStoreTag {
-  static readonly Default: Layer.Layer<FileStoreTag> = FileStoreNodeLive.pipe(Layer.provide(NodeContext.layer));
-}
+// src/sync/node.ts:37  — deps NOT fulfilled; this is the substitutable one
+export const FileStoreLive: Layer.Layer<FileStoreTag, never, FileSystem.FileSystem | Path.Path>
+// src/sync/node.ts:70  — deps fulfilled; correctly has no requirements
+export const FileStoreNodeLive: Layer.Layer<FileStoreTag> = FileStoreLive.pipe(Layer.provide(NodeContext.layer))
 ```
 
-Applied: typecheck/lint/189 green with **no** edits to any `.Default` call site. `missing-layer-context` and `leaking-requirements` both flag *under*-declared context; over-providing satisfies them by construction.
+`ZipExtractorLive` (`:75`) / `ZipExtractorNodeLive` (`:117`) mirror it. So the proposed fix — giving `FileStoreNodeLive` an `R` channel — would be **wrong**: `FileStoreNodeLive` is meant to be dependency-free, and `FileStoreLive` is the layer tests should reach for.
 
+The supporting claims were false too, and are withdrawn: `test/sync-node.test.ts:105` (`FileStoreLive (BadArgument mapping)`) and `:214` do exactly the substitution the entry said no test performs, providing stub `FileSystem`/`CommandExecutor` layers to exercise the `StorageWriteError`/`ZipExtractError` mappings. The cited `test/cli.test.ts:21-25` composition root no longer exists, and the `NodeContext.layer` merges at `src/cli.ts:408` and `scripts/compile-tasks.ts:91` are not redundant — `resolveEntry` and `detectRepoFromGit` need `FileSystem`/`Path`/`CommandExecutor` from it.
+
+The sibling finding on `src/sync/tasker.ts:61,82` is **unaffected and still open** — that module has no un-provided variant, so its capability layers still close the seam.
 **`src/config.ts:123` — [MED] `global`/`local` are declared to return `string` but can return `undefined`; three sites work around it independently.**
 `TaskerRawApi` declares `global(varName: string): string` (`tasker-api.ts:202`) and `liveFn` hands back the bridge's value through `as TaskerApi[K]` (`:625`), so every consumer is told the success is a string. This module widens locally (`config.ts:123`, and again at `:158-161`); `tasks/scripts/sync-profiles.ts:24` writes `value === "" || value === undefined` — dead by the types, load-bearing at runtime; `tasks/scripts/battery-report.ts:20` runs `Number.parseInt(battery, 10)` with no guard. Fix the declaration once:
 
