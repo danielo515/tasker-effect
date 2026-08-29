@@ -1,10 +1,10 @@
 import { beforeAll, describe, expect, it } from "@effect/vitest";
 import { Command, CommandExecutor, FileSystem, Path } from "@effect/platform";
 import { NodeContext } from "@effect/platform-node";
-import { Chunk, Effect, Layer, Stream } from "effect";
+import { Chunk, Effect, Layer, ParseResult, Schema, Stream } from "effect";
 import { Action, Profile, Project, Task, Trigger } from "../src/profile.js";
 import { CompileError, TaskerCompiler } from "../src/compiler.js";
-import { FileStore } from "../src/sync/node.js";
+import { FileStoreNodeLive } from "../src/sync/node.js";
 import { StorageWriteError } from "../src/sync/contract.js";
 import {
   asCompilable,
@@ -17,7 +17,9 @@ import {
   NoCompilableExportsError,
   parseGitHubRepo,
   RepoDetectionError,
+  RepoRefFromString,
   runCli,
+  scanExports,
 } from "../src/cli.js";
 import * as fixture from "./fixtures/cli-entry.js";
 
@@ -35,16 +37,19 @@ const BROKEN_LINK_ENTRY = new URL(
   "./fixtures/cli-broken-link.ts",
   import.meta.url
 ).pathname;
+const DEFECT_ENTRY = new URL("./fixtures/cli-defect.ts", import.meta.url)
+  .pathname;
 
 const CliTestLayer = Layer.mergeAll(
   TaskerCompiler.Default,
-  FileStore.Default,
+  FileStoreNodeLive,
   NodeContext.layer
 );
 
 /** A fake CommandExecutor that never spawns a real process, for testing `git` interactions */
 const fakeCommandExecutorLayer = (options: {
   readonly stdout?: string;
+  readonly stderr?: string;
   readonly exitCode: number;
 }): Layer.Layer<CommandExecutor.CommandExecutor> =>
   Layer.succeed(
@@ -56,7 +61,12 @@ const fakeCommandExecutorLayer = (options: {
         exitCode: Effect.succeed(CommandExecutor.ExitCode(options.exitCode)),
         isRunning: Effect.succeed(false),
         kill: () => Effect.void,
-        stderr: Stream.empty,
+        stderr:
+          options.stderr === undefined
+            ? Stream.empty
+            : Stream.fromChunk(
+                Chunk.of(new TextEncoder().encode(options.stderr))
+              ),
         stdin: undefined as never,
         stdout: Stream.fromChunk(
           Chunk.of(new TextEncoder().encode(options.stdout ?? ""))
@@ -97,6 +107,15 @@ describe("parseGitHubRepo", () => {
   });
 });
 
+describe("RepoRefFromString", () => {
+  it("encodes a RepoRef back to its <owner>/<name> slug", () => {
+    const encode = Schema.encodeSync(RepoRefFromString);
+    expect(encode({ owner: "acme", repo: "automations" })).toBe(
+      "acme/automations"
+    );
+  });
+});
+
 describe("export scanning", () => {
   it("collects default and named Project/Profile/Task exports", () => {
     const found = collectCompilables(fixture as Record<string, unknown>);
@@ -108,6 +127,19 @@ describe("export scanning", () => {
     expect(asCompilable("a string")).toBeUndefined();
     expect(asCompilable({ name: "close", but: "no" })).toBeUndefined();
     expect(asCompilable(undefined)).toBeUndefined();
+  });
+
+  it("surfaces a near-miss export as rejected, keeping its ParseError", () => {
+    const { compilables, rejected } = scanExports(
+      fixture as unknown as Record<string, unknown>
+    );
+    expect(compilables.map((entry) => entry.exportName).sort()).toEqual([
+      "default",
+      "greet",
+      "nightMode",
+    ]);
+    expect(rejected.map((entry) => entry.exportName)).toEqual(["nearMissTask"]);
+    expect(ParseResult.isParseError(rejected[0]!.error)).toBe(true);
   });
 
   it("accepts structurally-matching plain objects (cross-realm instances)", () => {
@@ -194,14 +226,59 @@ describe("detectRepoFromGit", () => {
     })
   );
 
-  it.effect("fails when git exits non-zero", () =>
+  it.effect("fails when git exits non-zero with no stderr", () =>
     Effect.gen(function* () {
       const error = yield* detectRepoFromGit().pipe(
         Effect.provide(fakeCommandExecutorLayer({ exitCode: 1 })),
         Effect.flip
       );
       expect(error).toBeInstanceOf(RepoDetectionError);
-      expect(error.message).toContain("exit code 1");
+      expect(error.message).toBe(
+        "`git remote get-url origin` failed with exit code 1"
+      );
+    })
+  );
+
+  it.effect("fails when git exits non-zero, including its stderr", () =>
+    Effect.gen(function* () {
+      const error = yield* detectRepoFromGit().pipe(
+        Effect.provide(
+          fakeCommandExecutorLayer({
+            exitCode: 128,
+            stderr: "fatal: No such remote 'origin'\n",
+          })
+        ),
+        Effect.flip
+      );
+      expect(error).toBeInstanceOf(RepoDetectionError);
+      expect(error.message).toBe(
+        "`git remote get-url origin` failed with exit code 128: fatal: No such remote 'origin'"
+      );
+    })
+  );
+
+  it.effect("reports a non-NotFound spawn failure with its own message", () =>
+    Effect.gen(function* () {
+      const failingExecutor = Layer.succeed(
+        CommandExecutor.CommandExecutor,
+        CommandExecutor.makeExecutor(() =>
+          Effect.fail({
+            _tag: "SystemError",
+            reason: "PermissionDenied",
+            module: "Command",
+            method: "spawn",
+            pathOrDescriptor: "git",
+            message: "spawn git EACCES",
+          } as never)
+        )
+      );
+      const error = yield* detectRepoFromGit().pipe(
+        Effect.provide(failingExecutor),
+        Effect.flip
+      );
+      expect(error).toBeInstanceOf(RepoDetectionError);
+      expect(error.message).toContain("spawn git EACCES");
+      expect(error.message).not.toContain("was not found on PATH");
     })
   );
 
@@ -545,6 +622,19 @@ describe("runCli (in-process)", () => {
       expect(exitCode).toBe(1);
     })
   );
+
+  it.effect("reports exit code 1 for a defect without laundering it into a CompileError", () =>
+    Effect.gen(function* () {
+      // The fixture bypasses schema validation to simulate a Match.exhaustive
+      // bug; runCli's Effect.catchAllDefect must still print it (with its
+      // real Cause/stack) and exit 1, rather than crashing the process or
+      // being caught by the CompileError handler.
+      const exitCode = yield* Effect.promise(() =>
+        runCli(["compile", DEFECT_ENTRY, "--repo", "acme/automations"])
+      );
+      expect(exitCode).toBe(1);
+    })
+  );
 });
 
 describe("CLI end-to-end (spawned)", () => {
@@ -661,7 +751,9 @@ describe("CLI end-to-end (spawned)", () => {
           "--repo",
           "acme/automations",
         ]);
-        expect(stderr).toBe("");
+        expect(stderr).toContain(
+          'warning: export "nearMissTask" looks like a DSL definition but failed to decode'
+        );
         expect(exitCode).toBe(0);
         expect(stdout).toContain("Compiled 3 export(s)");
         expect(stdout).toContain("10 file(s) written");
