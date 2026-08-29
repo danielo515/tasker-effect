@@ -23,11 +23,22 @@ import {
   Path,
 } from "@effect/platform";
 import { NodeContext } from "@effect/platform-node";
-import { Console, Effect, Either, Layer, Match, Option, Schema, Stream } from "effect";
+import {
+  Cause,
+  Console,
+  Effect,
+  Either,
+  Layer,
+  Match,
+  Option,
+  ParseResult,
+  Schema,
+  Stream,
+} from "effect";
 import { CompileError, TaskerCompiler, type CompiledFile, type RepoRef } from "./compiler.js";
 import { Profile, Project, Task } from "./profile.js";
-import { FileStore } from "./sync/node.js";
-import { StorageWriteError } from "./sync/contract.js";
+import { FileStoreNodeLive } from "./sync/node.js";
+import { FileStore, StorageWriteError } from "./sync/contract.js";
 
 // =============================================================================
 // Errors
@@ -73,32 +84,68 @@ export class RepoDetectionError extends Schema.TaggedError<RepoDetectionError>()
 // =============================================================================
 
 /**
+ * A GitHub `<owner>/<name>` slug, accepted with or without a trailing
+ * `.git` (the exact string a `git clone` URL's tail would produce). This is
+ * the single place the slug grammar is defined — both `--repo` (via
+ * {@link Options.withSchema}) and {@link parseGitHubRepo} decode through it,
+ * so the two cannot drift apart.
+ */
+export const RepoRefFromString = Schema.transformOrFail(
+  Schema.String,
+  Schema.Struct({ owner: Schema.String, repo: Schema.String }),
+  {
+    strict: true,
+    decode: (value, _options, ast) => {
+      const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(
+        value.trim()
+      );
+      return match === null
+        ? ParseResult.fail(
+            new ParseResult.Type(
+              ast,
+              value,
+              "--repo requires a GitHub repository as <owner>/<name>"
+            )
+          )
+        : ParseResult.succeed({ owner: match[1]!, repo: match[2]! });
+    },
+    encode: (repo) => ParseResult.succeed(`${repo.owner}/${repo.repo}`),
+  }
+);
+
+/**
  * Parse a GitHub remote URL into its owner/repo pair. Understands the
  * `git@github.com:owner/repo.git`, `ssh://git@github.com/owner/repo.git` and
  * `https://github.com/owner/repo(.git)` forms; anything else (including
- * non-GitHub hosts) yields undefined.
+ * non-GitHub hosts) yields undefined. The `<owner>/<name>` tail is decoded
+ * through {@link RepoRefFromString}, the same schema `--repo` uses.
  */
 export const parseGitHubRepo = (url: string): RepoRef | undefined => {
   const match =
-    /^(?:git@github\.com:|(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?github\.com\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(
+    /^(?:git@github\.com:|(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?github\.com\/)([^/\s]+\/[^/\s]+)\/?$/.exec(
       url.trim()
     );
   if (match === null) return undefined;
-  return { owner: match[1]!, repo: match[2]! };
+  return Either.getOrUndefined(
+    Schema.decodeUnknownEither(RepoRefFromString)(match[1]!)
+  );
 };
 
-/** Run `git remote get-url origin`, capturing exit code and stdout */
+/** Run `git remote get-url origin`, capturing stdout, stderr and exit code */
 const gitOriginRemote = Effect.scoped(
   Effect.gen(function* () {
     const process = yield* PlatformCommand.start(
       PlatformCommand.make("git", "remote", "get-url", "origin")
     );
-    const output = yield* process.stdout.pipe(
-      Stream.decodeText(),
-      Stream.mkString
+    const [output, stderr, exitCode] = yield* Effect.all(
+      [
+        process.stdout.pipe(Stream.decodeText(), Stream.mkString),
+        process.stderr.pipe(Stream.decodeText(), Stream.mkString),
+        process.exitCode,
+      ],
+      { concurrency: 3 }
     );
-    const exitCode = yield* process.exitCode;
-    return { exitCode, output };
+    return { exitCode, output, stderr };
   })
 );
 
@@ -108,17 +155,24 @@ const gitOriginRemote = Effect.scoped(
  */
 export const detectRepoFromGit = Effect.fn("cli.detectRepoFromGit")(
   function* () {
-    const { exitCode, output } = yield* gitOriginRemote.pipe(
+    const { exitCode, output, stderr } = yield* gitOriginRemote.pipe(
       Effect.mapError(
         (cause) =>
           new RepoDetectionError({
-            message: `Could not run \`git remote get-url origin\`: ${String(cause)}`,
+            message: `Could not run \`git remote get-url origin\`: ${
+              cause._tag === "SystemError" && cause.reason === "NotFound"
+                ? "`git` was not found on PATH"
+                : cause.message
+            }`,
           })
       )
     );
     if (exitCode !== 0) {
+      const detail = stderr.trim();
       return yield* new RepoDetectionError({
-        message: `\`git remote get-url origin\` failed with exit code ${exitCode}`,
+        message:
+          `\`git remote get-url origin\` failed with exit code ${exitCode}` +
+          (detail !== "" ? `: ${detail}` : ""),
       });
     }
     const repo = parseGitHubRepo(output);
@@ -141,45 +195,84 @@ export interface CompilableExport {
   readonly value: Project | Profile | Task;
 }
 
+/** A named export that looked like a DSL definition but failed to decode */
+export interface RejectedExport {
+  readonly exportName: string;
+  readonly error: ParseResult.ParseError;
+}
+
+/** Every export of a module, sorted into what compiled and what nearly did */
+export interface ScannedExports {
+  readonly compilables: Array<CompilableExport>;
+  readonly rejected: Array<RejectedExport>;
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-const decodeOrUndefined = <A, I>(schema: Schema.Schema<A, I>, value: unknown) =>
-  Either.getOrUndefined(Schema.decodeUnknownEither(schema)(value));
-
 /**
- * Recognize a value as a Project, Profile or Task. Instances are accepted
- * directly; structurally-matching plain objects (e.g. instances created by a
- * different copy of this library, where `instanceof` fails) are validated
- * through the schemas and re-instantiated.
+ * Recognize a value as a Project, Profile or Task, keeping the `ParseError`
+ * on a near-miss. Instances are accepted directly; structurally-matching
+ * plain objects (e.g. instances created by a different copy of this
+ * library, where `instanceof` fails) are validated through the schemas and
+ * re-instantiated. `undefined` means the value did not even have the shape
+ * (an array field) needed to try decoding it as one of the three.
  */
-export const asCompilable = (
+export const asCompilableEither = (
   value: unknown
-): Project | Profile | Task | undefined => {
+): Either.Either<Project | Profile | Task, ParseResult.ParseError> | undefined => {
   if (
     value instanceof Project ||
     value instanceof Profile ||
     value instanceof Task
   ) {
-    return value;
+    return Either.right(value);
   }
   if (!isRecord(value) || typeof value.name !== "string") return undefined;
-  if (Array.isArray(value.triggers)) return decodeOrUndefined(Profile, value);
-  if (Array.isArray(value.actions)) return decodeOrUndefined(Task, value);
+  if (Array.isArray(value.triggers)) {
+    return Schema.decodeUnknownEither(Profile)(value);
+  }
+  if (Array.isArray(value.actions)) {
+    return Schema.decodeUnknownEither(Task)(value);
+  }
   if (Array.isArray(value.profiles) || Array.isArray(value.tasks)) {
-    return decodeOrUndefined(Project, value);
+    return Schema.decodeUnknownEither(Project)(value);
   }
   return undefined;
+};
+
+/**
+ * Recognize a value as a Project, Profile or Task. Same dispatch as
+ * {@link asCompilableEither}, collapsing a decode failure to `undefined`.
+ */
+export const asCompilable = (value: unknown): Project | Profile | Task | undefined => {
+  const either = asCompilableEither(value);
+  return either === undefined ? undefined : Either.getOrUndefined(either);
 };
 
 /** Collect every compilable export (default and named) of a module */
 export const collectCompilables = (
   module: Record<string, unknown>
-): Array<CompilableExport> =>
-  Object.entries(module).flatMap(([exportName, raw]) => {
-    const value = asCompilable(raw);
-    return value === undefined ? [] : [{ exportName, value }];
-  });
+): Array<CompilableExport> => scanExports(module).compilables;
+
+/**
+ * Like {@link collectCompilables}, but also surfaces exports that looked
+ * like a DSL definition (had the right shape) yet failed schema validation,
+ * so callers can warn instead of silently dropping them.
+ */
+export const scanExports = (module: Record<string, unknown>): ScannedExports => {
+  const compilables: Array<CompilableExport> = [];
+  const rejected: Array<RejectedExport> = [];
+  for (const [exportName, raw] of Object.entries(module)) {
+    const either = asCompilableEither(raw);
+    if (either === undefined) continue;
+    Either.match(either, {
+      onLeft: (error) => rejected.push({ exportName, error }),
+      onRight: (value) => compilables.push({ exportName, value }),
+    });
+  }
+  return { compilables, rejected };
+};
 
 // =============================================================================
 // Compilation pipeline
@@ -254,7 +347,13 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
 
   const entryPath = yield* resolveEntry(options.entry);
   const module = yield* importEntry(entryPath);
-  const compilables = collectCompilables(module);
+  const { compilables, rejected } = scanExports(module);
+  for (const { exportName, error } of rejected) {
+    yield* Console.warn(
+      `warning: export "${exportName}" looks like a DSL definition but failed to decode: ` +
+        ParseResult.TreeFormatter.formatErrorSync(error)
+    );
+  }
   if (compilables.length === 0) {
     return yield* new NoCompilableExportsError({
       message:
@@ -266,14 +365,11 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
 
   // Only Project compiles need the repo (for the sync bootstrap in the
   // project XML); detect it lazily so Profile/Task-only entries never
-  // require git or --repo.
-  let repo = options.repo;
-  const resolveRepo = Effect.gen(function* () {
-    if (repo === undefined) {
-      repo = yield* detectRepoFromGit();
-    }
-    return repo;
-  });
+  // require git or --repo. Effect.cached both memoizes the result across
+  // multiple Project exports and single-flights a concurrent detection.
+  const resolveRepo = yield* Effect.cached(
+    options.repo !== undefined ? Effect.succeed(options.repo) : detectRepoFromGit()
+  );
 
   const written: Array<WrittenFile> = [];
   const seen = new Map<string, string>();
@@ -341,16 +437,7 @@ const outOption = Options.directory("out").pipe(
 );
 
 const repoOption = Options.text("repo").pipe(
-  Options.mapTryCatch(
-    (value): RepoRef => {
-      const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(value);
-      if (match === null) {
-        throw new Error(`Invalid repository: ${value}`);
-      }
-      return { owner: match[1]!, repo: match[2]! };
-    },
-    () => HelpDoc.p("--repo requires a GitHub repository as <owner>/<name>")
-  ),
+  Options.withSchema(RepoRefFromString),
   Options.withDescription(
     "GitHub repository (<owner>/<name>) embedded in the generated project " +
       "XML's sync bootstrap. Default: detected from `git remote get-url " +
@@ -405,7 +492,7 @@ const cli = Command.run(rootCommand, {
 
 const CliLive = Layer.mergeAll(
   TaskerCompiler.Default,
-  FileStore.Default,
+  FileStoreNodeLive,
   NodeContext.layer
 );
 
@@ -465,6 +552,13 @@ export const runCli = (argv: ReadonlyArray<string>): Promise<number> =>
       }),
       // @effect/cli already printed the validation error (with usage) itself.
       Effect.catchIf(ValidationError.isValidationError, () => Effect.succeed(1)),
+      // A genuine defect (e.g. a Match.exhaustive bug the compiler's own
+      // linker cannot catch) must not be reported as "Compilation failed" —
+      // that message implies a fixable DSL problem. Print the real Cause
+      // (stack included) instead, so an internal bug is diagnosable.
+      Effect.catchAllDefect((defect) =>
+        Console.error(Cause.pretty(Cause.die(defect))).pipe(Effect.as(1))
+      ),
       Effect.provide(CliLive)
     )
   );
