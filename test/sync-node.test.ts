@@ -3,9 +3,9 @@ import { Command, Error as PlatformError, FileSystem, Path } from "@effect/platf
 import { NodeCommandExecutor, NodeContext, NodePath } from "@effect/platform-node";
 import { Effect, Exit, Layer } from "effect";
 import {
+  FileStoreLive,
   FileStoreNodeLive,
-  makeFileStore,
-  makeZipExtractor,
+  ZipExtractorLive,
   ZipExtractorNodeLive,
   pullLatestProfiles,
 } from "../src/sync/node.js";
@@ -102,37 +102,45 @@ describe("FileStoreNodeLive", () => {
   );
 });
 
-describe("makeFileStore (BadArgument mapping)", () => {
+describe("FileStoreLive (BadArgument mapping)", () => {
   it.effect("writeText maps a BadArgument from makeDirectory to StorageWriteError", () =>
     Effect.gen(function* () {
-      const error = yield* makeFileStore.pipe(
-        Effect.flatMap((store) => store.writeText("/x/y.js", "hi")),
-        Effect.flip,
-        Effect.provide(
-          Layer.mergeAll(
-            stubFsLayer({ makeDirectory: () => Effect.fail(badArgument("bad path")) }),
-            NodePath.layer
+      const store = yield* FileStore;
+      const error = yield* store.writeText("/x/y.js", "hi").pipe(Effect.flip);
+      expect(error).toBeInstanceOf(StorageWriteError);
+    }).pipe(
+      Effect.provide(
+        FileStoreLive.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              stubFsLayer({ makeDirectory: () => Effect.fail(badArgument("bad path")) }),
+              NodePath.layer
+            )
           )
         )
-      );
-      expect(error).toBeInstanceOf(StorageWriteError);
-    })
+      )
+    )
   );
 
   it.effect("writeBytes maps a BadArgument from makeDirectory to StorageWriteError", () =>
     Effect.gen(function* () {
-      const error = yield* makeFileStore.pipe(
-        Effect.flatMap((store) => store.writeBytes("/x/y.bin", new Uint8Array([1]))),
-        Effect.flip,
-        Effect.provide(
-          Layer.mergeAll(
-            stubFsLayer({ makeDirectory: () => Effect.fail(badArgument("bad path")) }),
-            NodePath.layer
+      const store = yield* FileStore;
+      const error = yield* store
+        .writeBytes("/x/y.bin", new Uint8Array([1]))
+        .pipe(Effect.flip);
+      expect(error).toBeInstanceOf(StorageWriteError);
+    }).pipe(
+      Effect.provide(
+        FileStoreLive.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              stubFsLayer({ makeDirectory: () => Effect.fail(badArgument("bad path")) }),
+              NodePath.layer
+            )
           )
         )
-      );
-      expect(error).toBeInstanceOf(StorageWriteError);
-    })
+      )
+    )
   );
 });
 
@@ -203,23 +211,29 @@ describe("ZipExtractorNodeLive", () => {
   );
 });
 
-describe("makeZipExtractor (BadArgument mapping)", () => {
+describe("ZipExtractorLive (BadArgument mapping)", () => {
   it.effect(
     "extract maps a BadArgument from makeDirectory to ZipExtractError",
-    () =>
-      Effect.gen(function* () {
-        const stubFs = stubFsLayer({
-          makeDirectory: () => Effect.fail(badArgument("bad target dir")),
-        });
-        const error = yield* makeZipExtractor.pipe(
-          Effect.flatMap((extractor) => extractor.extract("/x/y.zip", "/x/out")),
-          Effect.flip,
-          Effect.provide(
-            Layer.mergeAll(stubFs, NodeCommandExecutor.layer.pipe(Layer.provide(stubFs)))
-          )
-        );
+    () => {
+      const stubFs = stubFsLayer({
+        makeDirectory: () => Effect.fail(badArgument("bad target dir")),
+      });
+      return Effect.gen(function* () {
+        const extractor = yield* ZipExtractor;
+        const error = yield* extractor
+          .extract("/x/y.zip", "/x/out")
+          .pipe(Effect.flip);
         expect(error).toBeInstanceOf(ZipExtractError);
-      })
+      }).pipe(
+        Effect.provide(
+          ZipExtractorLive.pipe(
+            Layer.provide(
+              Layer.mergeAll(stubFs, NodeCommandExecutor.layer.pipe(Layer.provide(stubFs)))
+            )
+          )
+        )
+      );
+    }
   );
 });
 
