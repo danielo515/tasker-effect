@@ -231,7 +231,7 @@ The `fmt` template exists because Tasker performs **no** `%var` replacement
 inside JavaScript — `"key=%OPENWEATHER_KEY"` in a plain string stays
 literal on-device. `fmt` compiles references to
 `"key=" + global("OPENWEATHER_KEY")`, and `v()` does the same for ordinary
-Tasker variables (ALL-CAPS → `global`, lowercase → `local`). It also works
+Tasker variables (any capital letter → `global`, all-lowercase → `local`). It also works
 inside `Action.js`, where references are spliced in as expressions.
 
 **Effect scripts** read secrets (and any other config) with the idiomatic
