@@ -59,7 +59,11 @@ export {
   TimeOfDay,
   DayOfWeek,
   VolumeStream,
+  ComparisonOp,
+  PresenceOp,
   ConditionOp,
+  Comparison,
+  Presence,
   Condition,
   isGlobalVariable,
   variableName,
@@ -145,6 +149,7 @@ export {
   // Builders (Action and Trigger double as builder namespaces)
   Action,
   Trigger,
+  type CondArgs,
   cond,
 } from "./profile.js";
 

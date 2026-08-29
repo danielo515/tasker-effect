@@ -45,8 +45,11 @@ export const VolumeStream = Schema.Literal(
 );
 export type VolumeStream = typeof VolumeStream.Type;
 
-/** Comparison operators available in conditions */
-export const ConditionOp = Schema.Literal(
+/**
+ * Operators that compare the variable against a value. Every one of these
+ * needs a `value`; {@link Comparison} makes that a required field.
+ */
+export const ComparisonOp = Schema.Literal(
   "eq",
   "neq",
   "lt",
@@ -54,9 +57,25 @@ export const ConditionOp = Schema.Literal(
   "lte",
   "gte",
   "contains",
-  "matches",
-  "isSet",
-  "notSet"
+  "matches"
+);
+export type ComparisonOp = typeof ComparisonOp.Type;
+
+/**
+ * Operators that only test whether the variable is set. These take no
+ * value; {@link Presence} has no `value` field at all.
+ */
+export const PresenceOp = Schema.Literal("isSet", "notSet");
+export type PresenceOp = typeof PresenceOp.Type;
+
+/**
+ * Every condition operator. Kept as a flat `Schema.Literal` so the public
+ * shape (including `.literals`) is unchanged; the operator/value invariant
+ * lives in {@link Comparison} / {@link Presence}, not here.
+ */
+export const ConditionOp = Schema.Literal(
+  ...ComparisonOp.literals,
+  ...PresenceOp.literals
 );
 export type ConditionOp = typeof ConditionOp.Type;
 
@@ -209,16 +228,40 @@ export const varNameOf = (value: VarName): string =>
   typeof value === "string" ? variableName(value) : value.name;
 
 /**
- * A condition over a Tasker variable. Variable names follow Tasker
- * conventions: ALL-CAPS names are globals, lowercase names are locals.
- * The leading % is optional; a {@link Secret} may stand in for the
- * variable (always a global).
+ * A condition comparing a Tasker variable against a value. `value` is
+ * required — the operator family guarantees it exists, so the compiler
+ * never has to invent an empty string for a missing comparand.
  */
-export class Condition extends Schema.Class<Condition>("Condition")({
+export class Comparison extends Schema.Class<Comparison>("Comparison")({
   variable: VarName,
-  op: ConditionOp,
-  value: Schema.optional(Schema.String),
+  op: ComparisonOp,
+  value: Schema.String,
 }) {}
+
+/**
+ * A condition testing only whether a Tasker variable is set. It carries no
+ * `value`, so `isSet`/`notSet` cannot be paired with a stray comparand.
+ */
+export class Presence extends Schema.Class<Presence>("Presence")({
+  variable: VarName,
+  op: PresenceOp,
+}) {}
+
+/**
+ * A condition over a Tasker variable: either a {@link Comparison} (operator
+ * plus a required value) or a {@link Presence} test (no value). Modelling it
+ * as a union rather than one class with an optional `value` means
+ * `cond("BATT", "lt")` is a *type* error rather than a condition that
+ * silently compiles to `parseFloat(...) < parseFloat("")`.
+ *
+ * Variable names follow Tasker conventions: ALL-CAPS names are globals,
+ * lowercase names are locals. The leading % is optional; a {@link Secret}
+ * may stand in for the variable (always a global). The encoded form is
+ * unchanged — the two members are discriminated by their `op` literal, so
+ * no `_tag` is added to the wire format.
+ */
+export const Condition = Schema.Union(Comparison, Presence);
+export type Condition = typeof Condition.Type;
 
 /**
  * Documentation annotations (description + examples) for an action/trigger
@@ -1200,17 +1243,36 @@ export const Action = {
   ) => new If({ condition, then, orElse }),
 } as const;
 
-/** Build a condition over a Tasker variable (or a Secret's global) */
-export const cond = (
-  variable: VarName,
-  op: ConditionOp,
-  value?: string
-): Condition =>
-  new Condition({
-    variable: asVarName(variable),
-    op,
-    ...(value !== undefined ? { value } : {}),
-  });
+/**
+ * The argument shapes {@link cond} accepts, as a disjoint union of tuples:
+ * a {@link PresenceOp} takes exactly two arguments, a {@link ComparisonOp}
+ * exactly three. The arity *and* the operator literal discriminate the two
+ * arms, so `cond("BATT", "lt")` and `cond("BATT", "isSet", "20")` are both
+ * rejected by the type checker — the mispaired call never reaches a runtime
+ * check. The labels are kept so editor signature help stays readable.
+ */
+export type CondArgs =
+  | readonly [variable: VarName, op: PresenceOp]
+  | readonly [variable: VarName, op: ComparisonOp, value: string];
+
+/**
+ * Build a condition over a Tasker variable (or a Secret's global).
+ *
+ * `cond("BATT", "isSet")` takes no value, `cond("BATT", "lt", "20")`
+ * requires one. Because {@link CondArgs} pairs each operator family with its
+ * own arity, `args.length` narrows the tuple union on its own: every branch
+ * has exactly the fields its condition class needs, so the body carries no
+ * type assertion and there is no path that builds a {@link Comparison}
+ * without a comparand.
+ */
+export function cond(...args: CondArgs): Condition {
+  if (args.length === 2) {
+    const [variable, op] = args;
+    return new Presence({ variable: asVarName(variable), op });
+  }
+  const [variable, op, value] = args;
+  return new Comparison({ variable: asVarName(variable), op, value });
+}
 
 /** Ergonomic factories for every trigger */
 export const Trigger = {

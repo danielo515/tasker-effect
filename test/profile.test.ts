@@ -3,6 +3,9 @@ import { Either, Schema } from "effect";
 import {
   Action,
   ActionSchema,
+  Comparison,
+  Condition,
+  Presence,
   Trigger,
   Task,
   Profile,
@@ -117,6 +120,43 @@ describe("Action builders", () => {
     expect(() => Action.vibrate(-5)).toThrow();
     expect(() => Action.flash("")).toThrow();
     expect(() => Action.vibratePattern("abc")).toThrow();
+  });
+});
+
+describe("cond", () => {
+  it("pairs a comparison operator with its required value", () => {
+    const condition = cond("%BATT", "lt", "20");
+    expect(condition).toBeInstanceOf(Comparison);
+    expect(condition).toEqual(
+      new Comparison({ variable: "BATT", op: "lt", value: "20" })
+    );
+  });
+
+  it("builds a value-less Presence for a presence operator", () => {
+    const condition = cond("%BATT", "isSet");
+    expect(condition).toBeInstanceOf(Presence);
+    expect(condition).toEqual(new Presence({ variable: "BATT", op: "isSet" }));
+    // There is no code path that reaches Comparison without a comparand, so
+    // a presence condition never carries an empty `value` to compare against.
+    expect("value" in condition).toBe(false);
+  });
+
+  it("accepts a Secret in the variable position", () => {
+    const API_KEY = secret("OPENWEATHER_KEY", "OpenWeather API key");
+    expect(cond(API_KEY, "isSet").variable).toBe(API_KEY);
+  });
+
+  it("encodes both members without a _tag discriminator", () => {
+    const encode = Schema.encodeSync(Condition);
+    expect(encode(cond("%BATT", "lt", "20"))).toEqual({
+      variable: "BATT",
+      op: "lt",
+      value: "20",
+    });
+    expect(encode(cond("%BATT", "isSet"))).toEqual({
+      variable: "BATT",
+      op: "isSet",
+    });
   });
 });
 

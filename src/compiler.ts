@@ -139,18 +139,26 @@ const emitJsCode = (code: Text): Array<string> => {
 /** Compile a Condition to a JavaScript boolean expression */
 export const conditionExpr = (condition: Condition): string => {
   const v = readVarExpr(varNameOf(condition.variable));
-  const value = condition.value ?? "";
-  return Match.value(condition.op).pipe(
-    Match.when("eq", () => `${v} === ${js(value)}`),
-    Match.when("neq", () => `${v} !== ${js(value)}`),
-    Match.when("lt", () => `parseFloat(${v}) < parseFloat(${js(value)})`),
-    Match.when("gt", () => `parseFloat(${v}) > parseFloat(${js(value)})`),
-    Match.when("lte", () => `parseFloat(${v}) <= parseFloat(${js(value)})`),
-    Match.when("gte", () => `parseFloat(${v}) >= parseFloat(${js(value)})`),
-    Match.when("contains", () => `String(${v}).indexOf(${js(value)}) !== -1`),
-    Match.when("matches", () => `new RegExp(${js(value)}).test(String(${v}))`),
-    Match.when("isSet", () => `(${v} !== undefined && ${v} !== "")`),
-    Match.when("notSet", () => `(${v} === undefined || ${v} === "")`),
+  // Matching on the whole condition (not just `op`) narrows the union, so
+  // `c.value` is a required string in every comparison arm — there is no
+  // missing comparand to paper over with "".
+  return Match.value(condition).pipe(
+    Match.when({ op: "eq" }, (c) => `${v} === ${js(c.value)}`),
+    Match.when({ op: "neq" }, (c) => `${v} !== ${js(c.value)}`),
+    Match.when({ op: "lt" }, (c) => `parseFloat(${v}) < parseFloat(${js(c.value)})`),
+    Match.when({ op: "gt" }, (c) => `parseFloat(${v}) > parseFloat(${js(c.value)})`),
+    Match.when({ op: "lte" }, (c) => `parseFloat(${v}) <= parseFloat(${js(c.value)})`),
+    Match.when({ op: "gte" }, (c) => `parseFloat(${v}) >= parseFloat(${js(c.value)})`),
+    Match.when(
+      { op: "contains" },
+      (c) => `String(${v}).indexOf(${js(c.value)}) !== -1`
+    ),
+    Match.when(
+      { op: "matches" },
+      (c) => `new RegExp(${js(c.value)}).test(String(${v}))`
+    ),
+    Match.when({ op: "isSet" }, () => `(${v} !== undefined && ${v} !== "")`),
+    Match.when({ op: "notSet" }, () => `(${v} === undefined || ${v} === "")`),
     Match.exhaustive
   );
 };
@@ -396,7 +404,7 @@ export const describeTrigger = (trigger: Trigger): string =>
     Match.tag(
       "VariableTrigger",
       (t) =>
-        `State > Variables > Variable Value: %${varNameOf(t.condition.variable)} ${t.condition.op} ${t.condition.value ?? ""}`
+        `State > Variables > Variable Value: %${varNameOf(t.condition.variable)} ${t.condition.op}${"value" in t.condition ? ` ${t.condition.value}` : ""}`
     ),
     Match.tag(
       "EventTrigger",
