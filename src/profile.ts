@@ -82,11 +82,14 @@ export type ConditionOp = typeof ConditionOp.Type;
 const percentLess = (name: string): string =>
   name.startsWith("%") ? name.slice(1) : name;
 
-/** Whether a Tasker variable name refers to a global (ALL-CAPS) variable */
-export const isGlobalVariable = (name: string): boolean => {
-  const bare = percentLess(name);
-  return bare === bare.toUpperCase();
-};
+/**
+ * Whether a Tasker variable name refers to a global variable. Tasker's rule
+ * is "contains at least one capital letter" — not "is all caps" — so mixed-
+ * case names like `%Wifi_Timeout` are globals too; only all-lowercase names
+ * are locals.
+ */
+export const isGlobalVariable = (name: string): boolean =>
+  /[A-Z]/.test(percentLess(name));
 
 /** Normalize a variable name by stripping the leading % */
 export const variableName = percentLess;
@@ -125,12 +128,27 @@ export class VariableRef extends Schema.TaggedClass<VariableRef>()(
   "VariableRef",
   {
     name: Schema.NonEmptyString,
+    // Explicit scope wins over the isGlobalVariable naming heuristic (see
+    // readVarExpr, compiler.ts). A heuristic can never separate a user
+    // global from an all-caps built-in Tasker event-local (e.g. %SMSRF) —
+    // this lets `l(name)` say so directly instead of routing through
+    // Action.js. Left unset (the `v()` default), the heuristic applies.
+    scope: Schema.optional(Schema.Literal("global", "local")),
   }
 ) {}
 
-/** Reference a Tasker variable (the leading % is optional) */
+/** Reference a Tasker variable (the leading % is optional), scope inferred by naming convention */
 export const v = (name: string): VariableRef =>
   new VariableRef({ name: variableName(name) });
+
+/**
+ * Reference a Tasker *local* variable explicitly, bypassing the
+ * {@link isGlobalVariable} naming heuristic — for built-in all-caps
+ * Tasker locals such as the SMS event's `%SMSRF`, which would otherwise
+ * compile to a `global()` read that never sees the value.
+ */
+export const l = (name: string): VariableRef =>
+  new VariableRef({ name: variableName(name), scope: "local" });
 
 /** One piece of an interpolated string: a literal, a secret or a variable */
 export const TextPart = Schema.Union(Schema.String, Secret, VariableRef);
@@ -209,6 +227,14 @@ export const fmt = (
  * A string-valued action field: a plain string, a whole secret/variable, or
  * an {@link fmt} interpolation. `Text` allows empty strings,
  * `NonEmptyText` does not.
+ *
+ * The non-emptiness check is construction-time only: `Schema.NonEmptyString`
+ * is a filter, not a brand, so `NonEmptyText.Type` and `Text.Type` are the
+ * same TypeScript type — a value typed `Text` that happens to be `""` will
+ * still typecheck wherever `NonEmptyText` is expected, and only throws (a
+ * `ParseError`) when the class actually constructs. Branding would force a
+ * smart constructor at every call site, which would cost the DSL's
+ * `Action.flash("hi")`-style ergonomics; the tradeoff is deliberate.
  */
 export const Text = Schema.Union(Schema.String, Secret, VariableRef, Interpolated);
 export type Text = typeof Text.Type;
@@ -218,10 +244,39 @@ export const NonEmptyText = Schema.Union(
   VariableRef,
   Interpolated
 );
+export type NonEmptyText = typeof NonEmptyText.Type;
+
+/**
+ * A raw-JavaScript escape-hatch code value: a literal source string, or an
+ * {@link fmt} interpolation whose secret/variable parts are spliced in as
+ * `global()`/`local()` expressions. Deliberately excludes a bare
+ * {@link Secret}/{@link VariableRef} — `Action.js(v("X"))` would otherwise
+ * "compile" to the dead expression statement `global("X");`, reading a
+ * Tasker variable and discarding it with no effect and no error. Narrowing
+ * this field (rather than reusing {@link NonEmptyText}) makes `emitJsCode`'s
+ * two-case tail exhaustive by construction.
+ */
+export const JsCode = Schema.Union(Schema.NonEmptyString, Interpolated);
+export type JsCode = typeof JsCode.Type;
 
 /** A variable-*name* position: a plain name or a secret (always a global) */
 export const VarName = Schema.Union(Schema.NonEmptyString, Secret);
 export type VarName = typeof VarName.Type;
+
+/**
+ * A *write*-side global variable name: a Tasker global name (must contain at
+ * least one capital letter, per {@link isGlobalVariable}) or a secret
+ * (always a global). Narrower than {@link VarName}, which also accepts
+ * locals for read positions like {@link Condition.variable} — writing
+ * through a name that doesn't parse as a global would compile to a `local()`
+ * write that no global read can ever see.
+ */
+export const GlobalName = Schema.NonEmptyString.pipe(
+  Schema.pattern(/^%?[A-Z][A-Z0-9_]*$/, { identifier: "GlobalName" })
+);
+export type GlobalName = typeof GlobalName.Type;
+export const GlobalVarName = Schema.Union(GlobalName, Secret);
+export type GlobalVarName = typeof GlobalVarName.Type;
 
 /** Resolve a variable-name position to the bare Tasker variable name */
 export const varNameOf = (value: VarName): string =>
@@ -254,9 +309,10 @@ export class Presence extends Schema.Class<Presence>("Presence")({
  * `cond("BATT", "lt")` is a *type* error rather than a condition that
  * silently compiles to `parseFloat(...) < parseFloat("")`.
  *
- * Variable names follow Tasker conventions: ALL-CAPS names are globals,
- * lowercase names are locals. The leading % is optional; a {@link Secret}
- * may stand in for the variable (always a global). The encoded form is
+ * Variable names follow Tasker conventions: names containing at least one
+ * capital letter are globals, all-lowercase names are locals. The leading %
+ * is optional; a {@link Secret} may stand in for the variable (always a
+ * global). The encoded form is
  * unchanged — the two members are discriminated by their `op` literal, so
  * no `_tag` is added to the wire format.
  */
@@ -329,7 +385,7 @@ export class VibratePattern extends Schema.TaggedClass<VibratePattern>()(
 
 /** Set a Tasker global variable */
 export class SetGlobal extends Schema.TaggedClass<SetGlobal>()("SetGlobal", {
-  name: VarName,
+  name: GlobalVarName,
   value: Text,
 }) {}
 
@@ -400,13 +456,13 @@ export class Shell extends Schema.TaggedClass<Shell>()("Shell", {
   timeoutSecs: Schema.optionalWith(Schema.Number.pipe(Schema.positive()), {
     default: () => 30,
   }),
-  outputGlobal: Schema.optional(VarName),
+  outputGlobal: Schema.optional(GlobalVarName),
 }) {}
 
 /** Read a file into a global variable */
 export class ReadFile extends Schema.TaggedClass<ReadFile>()("ReadFile", {
   path: NonEmptyText,
-  outputGlobal: VarName,
+  outputGlobal: GlobalVarName,
 }) {}
 
 /** Write text to a file */
@@ -431,7 +487,7 @@ export class HttpRequest extends Schema.TaggedClass<HttpRequest>()(
       { default: () => ({}) }
     ),
     body: Schema.optional(Text),
-    outputGlobal: Schema.optional(VarName),
+    outputGlobal: Schema.optional(GlobalVarName),
   }
 ) {}
 
@@ -489,7 +545,12 @@ export class SetAutoSync extends Schema.TaggedClass<SetAutoSync>()(
 /** Set the volume of an audio stream */
 export class SetVolume extends Schema.TaggedClass<SetVolume>()("SetVolume", {
   stream: VolumeStream,
-  level: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  level: Schema.Union(
+    Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+    VariableRef,
+    Secret,
+    Interpolated
+  ),
   display: Schema.optionalWith(Schema.Boolean, { default: () => false }),
   sound: Schema.optionalWith(Schema.Boolean, { default: () => false }),
 }) {}
@@ -678,7 +739,7 @@ export class SetDisplayTimeout extends Schema.TaggedClass<SetDisplayTimeout>()(
  * compiler); hand-written `global("...")` strings are not detected.
  */
 export class JavaScript extends Schema.TaggedClass<JavaScript>()("JavaScript", {
-  code: NonEmptyText,
+  code: JsCode,
 }) {}
 
 /** Conditional block over a Tasker variable */
@@ -698,54 +759,14 @@ export class If extends Schema.TaggedClass<If>()("If", {
   ),
 }) {}
 
-/** Union of every action */
-export type Action =
-  | Flash
-  | Popup
-  | Say
-  | Vibrate
-  | VibratePattern
-  | SetGlobal
-  | SetLocal
-  | PerformTask
-  | PerformTaskerTask
-  | EnableProfile
-  | Wait
-  | Shell
-  | ReadFile
-  | WriteFile
-  | HttpRequest
-  | BrowseUrl
-  | SendSms
-  | SetWifi
-  | SetBluetooth
-  | SetAirplaneMode
-  | SetMobileData
-  | SetAutoSync
-  | SetVolume
-  | MediaControl
-  | MusicPlay
-  | MusicStop
-  | SetClip
-  | SetWallpaper
-  | LaunchApp
-  | SendIntent
-  | SetSilentMode
-  | GoHome
-  | GetLocation
-  | SetCarMode
-  | SetNightMode
-  | SetStayOn
-  | SetAutoRotate
-  | SetAutoBrightness
-  | SetDisplayTimeout
-  | JavaScript
-  | If;
-
-/** Encoded (wire) form of an action */
-export type ActionEncoded = { readonly _tag: string } & Record<string, unknown>;
-
-const actionMembers = [
+// The non-recursive action leaves — every `Action` variant except `If`,
+// which recurses into `Action` itself through `then`/`orElse`. Keeping this
+// tuple separate lets `Action`/`ActionEncoded` be *derived* from the schemas
+// (via `Schema.Schema.Type`/`Encoded`) instead of hand-written and cast: the
+// hand-written union and the schema union could previously drift apart with
+// a clean typecheck (adding a class to `actionMembers` without adding it to
+// `Action` was not an error), because nothing tied the two together.
+const flatActionMembers = [
   Flash,
   Popup,
   Say,
@@ -786,13 +807,33 @@ const actionMembers = [
   SetAutoBrightness,
   SetDisplayTimeout,
   JavaScript,
-  If,
 ] as const;
+
+type FlatAction = Schema.Schema.Type<(typeof flatActionMembers)[number]>;
+type FlatActionEncoded = Schema.Schema.Encoded<
+  (typeof flatActionMembers)[number]
+>;
+
+/** Encoded (wire) form of an {@link If} action */
+interface IfEncoded {
+  readonly _tag: "If";
+  readonly condition: Schema.Schema.Encoded<typeof Condition>;
+  readonly then: ReadonlyArray<ActionEncoded>;
+  readonly orElse?: ReadonlyArray<ActionEncoded>;
+}
+
+/** Union of every action */
+export type Action = FlatAction | If;
+
+/** Encoded (wire) form of an action */
+export type ActionEncoded = FlatActionEncoded | IfEncoded;
+
+const actionMembers = [...flatActionMembers, If] as const;
 
 /** Schema accepting any action */
 export const ActionSchema: Schema.Schema<Action, ActionEncoded> = Schema.Union(
   ...actionMembers
-) as unknown as Schema.Schema<Action, ActionEncoded>;
+);
 
 // =============================================================================
 // Triggers (metadata describing when Tasker should run the compiled JS)
@@ -846,10 +887,14 @@ export class AppOpenedTrigger extends Schema.TaggedClass<AppOpenedTrigger>()(
 /** Active while the battery level is inside a range */
 export class BatteryLevelTrigger extends Schema.TaggedClass<BatteryLevelTrigger>()(
   "BatteryLevelTrigger",
-  {
+  Schema.Struct({
     from: Schema.Number.pipe(Schema.int(), Schema.between(0, 100)),
     to: Schema.Number.pipe(Schema.int(), Schema.between(0, 100)),
-  }
+  }).pipe(
+    Schema.filter((t) =>
+      t.from <= t.to ? undefined : "battery range `from` must not exceed `to`"
+    )
+  )
 ) {}
 
 /** Active while a wired or Bluetooth headset is plugged in */
@@ -1025,7 +1070,7 @@ const asVarName = (value: VarName): VarName =>
 /** Ergonomic factories for every action */
 export const Action = {
   flash: (text: Text, options?: { readonly long?: boolean }) =>
-    new Flash({ text, long: options?.long ?? false }),
+    new Flash({ text, long: options?.long }),
   popup: (
     title: Text,
     text: Text,
@@ -1034,8 +1079,8 @@ export const Action = {
     new Popup({
       title,
       text,
-      showOverKeyguard: options?.showOverKeyguard ?? false,
-      timeoutSecs: options?.timeoutSecs ?? 0,
+      showOverKeyguard: options?.showOverKeyguard,
+      timeoutSecs: options?.timeoutSecs,
     }),
   say: (
     text: Text,
@@ -1049,11 +1094,11 @@ export const Action = {
   ) =>
     new Say({
       text,
-      stream: options?.stream ?? "media",
-      pitch: options?.pitch ?? 5,
-      speed: options?.speed ?? 5,
-      ...(options?.engine !== undefined ? { engine: options.engine } : {}),
-      ...(options?.voice !== undefined ? { voice: options.voice } : {}),
+      stream: options?.stream,
+      pitch: options?.pitch,
+      speed: options?.speed,
+      engine: options?.engine,
+      voice: options?.voice,
     }),
   vibrate: (milliseconds: number) => new Vibrate({ milliseconds }),
   vibratePattern: (pattern: string) => new VibratePattern({ pattern }),
@@ -1069,7 +1114,7 @@ export const Action = {
   performTask: (task: Task, options?: { readonly priority?: number }) =>
     new PerformTask({
       taskName: task.name,
-      priority: options?.priority ?? 5,
+      priority: options?.priority,
     }),
   /** Call a task that only exists in the Tasker UI, by name (direct call) */
   performTaskerTask: (
@@ -1082,13 +1127,9 @@ export const Action = {
   ) =>
     new PerformTaskerTask({
       taskName,
-      priority: options?.priority ?? 5,
-      ...(options?.parameterOne !== undefined
-        ? { parameterOne: options.parameterOne }
-        : {}),
-      ...(options?.parameterTwo !== undefined
-        ? { parameterTwo: options.parameterTwo }
-        : {}),
+      priority: options?.priority,
+      parameterOne: options?.parameterOne,
+      parameterTwo: options?.parameterTwo,
     }),
   /** Enable/disable a DSL profile by reference */
   enableProfile: (profile: Profile, enable = true) =>
@@ -1107,16 +1148,17 @@ export const Action = {
   ) =>
     new Shell({
       command,
-      asRoot: options?.asRoot ?? false,
-      timeoutSecs: options?.timeoutSecs ?? 30,
-      ...(options?.outputGlobal !== undefined
-        ? { outputGlobal: asVarName(options.outputGlobal) }
-        : {}),
+      asRoot: options?.asRoot,
+      timeoutSecs: options?.timeoutSecs,
+      outputGlobal:
+        options?.outputGlobal !== undefined
+          ? asVarName(options.outputGlobal)
+          : undefined,
     }),
   readFile: (path: Text, outputGlobal: VarName) =>
     new ReadFile({ path, outputGlobal: asVarName(outputGlobal) }),
   writeFile: (path: Text, text: Text, options?: { readonly append?: boolean }) =>
-    new WriteFile({ path, text, append: options?.append ?? false }),
+    new WriteFile({ path, text, append: options?.append }),
   http: (
     method: HttpRequest["method"],
     url: Text,
@@ -1129,18 +1171,19 @@ export const Action = {
     new HttpRequest({
       method,
       url,
-      headers: options?.headers ?? {},
-      ...(options?.body !== undefined ? { body: options.body } : {}),
-      ...(options?.outputGlobal !== undefined
-        ? { outputGlobal: asVarName(options.outputGlobal) }
-        : {}),
+      headers: options?.headers,
+      body: options?.body,
+      outputGlobal:
+        options?.outputGlobal !== undefined
+          ? asVarName(options.outputGlobal)
+          : undefined,
     }),
   browseUrl: (url: Text) => new BrowseUrl({ url }),
   sendSms: (number: Text, text: Text, options?: { readonly store?: boolean }) =>
     new SendSms({
       number,
       text,
-      storeInMessagingApp: options?.store ?? false,
+      storeInMessagingApp: options?.store,
     }),
   setWifi: (on: boolean) => new SetWifi({ on }),
   setBluetooth: (on: boolean) => new SetBluetooth({ on }),
@@ -1149,14 +1192,14 @@ export const Action = {
   setAutoSync: (on: boolean) => new SetAutoSync({ on }),
   setVolume: (
     stream: VolumeStream,
-    level: number,
+    level: SetVolume["level"],
     options?: { readonly display?: boolean; readonly sound?: boolean }
   ) =>
     new SetVolume({
       stream,
       level,
-      display: options?.display ?? false,
-      sound: options?.sound ?? false,
+      display: options?.display,
+      sound: options?.sound,
     }),
   mediaControl: (action: MediaControl["action"]) => new MediaControl({ action }),
   musicPlay: (
@@ -1169,13 +1212,13 @@ export const Action = {
   ) =>
     new MusicPlay({
       path,
-      offsetSecs: options?.offsetSecs ?? 0,
-      loop: options?.loop ?? false,
-      stream: options?.stream ?? "media",
+      offsetSecs: options?.offsetSecs,
+      loop: options?.loop,
+      stream: options?.stream,
     }),
   musicStop: () => new MusicStop({}),
   setClip: (text: Text, options?: { readonly append?: boolean }) =>
-    new SetClip({ text, append: options?.append ?? false }),
+    new SetClip({ text, append: options?.append }),
   setWallpaper: (path: Text) => new SetWallpaper({ path }),
   launchApp: (
     app: Text,
@@ -1183,8 +1226,8 @@ export const Action = {
   ) =>
     new LaunchApp({
       app,
-      excludeFromRecents: options?.excludeFromRecents ?? false,
-      ...(options?.data !== undefined ? { data: options.data } : {}),
+      excludeFromRecents: options?.excludeFromRecents,
+      data: options?.data,
     }),
   sendIntent: (
     action: string,
@@ -1201,23 +1244,23 @@ export const Action = {
     new SendIntent({
       action,
       targetComp,
-      extras: options?.extras ?? [],
-      ...(options?.pkg !== undefined ? { pkg: options.pkg } : {}),
-      ...(options?.cls !== undefined ? { cls: options.cls } : {}),
-      ...(options?.category !== undefined ? { category: options.category } : {}),
-      ...(options?.data !== undefined ? { data: options.data } : {}),
-      ...(options?.mimeType !== undefined ? { mimeType: options.mimeType } : {}),
+      extras: options?.extras,
+      pkg: options?.pkg,
+      cls: options?.cls,
+      category: options?.category,
+      data: options?.data,
+      mimeType: options?.mimeType,
     }),
   silentMode: (mode: SetSilentMode["mode"]) => new SetSilentMode({ mode }),
-  goHome: (screen = 0) => new GoHome({ screen }),
+  goHome: (screen?: number) => new GoHome({ screen }),
   getLocation: (
     source: GetLocation["source"],
     options?: { readonly keepTracking?: boolean; readonly timeoutSecs?: number }
   ) =>
     new GetLocation({
       source,
-      keepTracking: options?.keepTracking ?? false,
-      timeoutSecs: options?.timeoutSecs ?? 100,
+      keepTracking: options?.keepTracking,
+      timeoutSecs: options?.timeoutSecs,
     }),
   setCarMode: (on: boolean) => new SetCarMode({ on }),
   setNightMode: (on: boolean) => new SetNightMode({ on }),
@@ -1230,15 +1273,15 @@ export const Action = {
     readonly seconds?: number;
   }) =>
     new SetDisplayTimeout({
-      hours: timeout.hours ?? 0,
-      minutes: timeout.minutes ?? 0,
-      seconds: timeout.seconds ?? 0,
+      hours: timeout.hours,
+      minutes: timeout.minutes,
+      seconds: timeout.seconds,
     }),
-  js: (code: Text) => new JavaScript({ code }),
+  js: (code: JsCode) => new JavaScript({ code }),
   when: (
     condition: Condition,
     then: ReadonlyArray<Action>,
-    orElse: ReadonlyArray<Action> = []
+    orElse?: ReadonlyArray<Action>
     // oxlint-disable-next-line unicorn/no-thenable -- If's then/else branches
   ) => new If({ condition, then, orElse }),
 } as const;
@@ -1286,47 +1329,36 @@ export const Trigger = {
   ) =>
     new TimeTrigger({
       from: new TimeOfDay(from),
-      days: options?.days ?? [],
-      ...(options?.to !== undefined ? { to: new TimeOfDay(options.to) } : {}),
-      ...(options?.repeatMinutes !== undefined
-        ? { repeatMinutes: options.repeatMinutes }
-        : {}),
+      days: options?.days,
+      to: options?.to !== undefined ? new TimeOfDay(options.to) : undefined,
+      repeatMinutes: options?.repeatMinutes,
     }),
   location: (latitude: number, longitude: number, radiusMeters: number) =>
     new LocationTrigger({ latitude, longitude, radiusMeters }),
-  wifiConnected: (ssid = "*") => new WifiConnectedTrigger({ ssid }),
-  bluetoothConnected: (name = "*") => new BluetoothConnectedTrigger({ name }),
+  wifiConnected: (ssid?: string) => new WifiConnectedTrigger({ ssid }),
+  bluetoothConnected: (name?: string) => new BluetoothConnectedTrigger({ name }),
   appOpened: (app: string) => new AppOpenedTrigger({ app }),
   batteryLevel: (from: number, to: number) => new BatteryLevelTrigger({ from, to }),
-  headsetPlugged: (kind: HeadsetPluggedTrigger["kind"] = "any") =>
+  headsetPlugged: (kind?: HeadsetPluggedTrigger["kind"]) =>
     new HeadsetPluggedTrigger({ kind }),
-  power: (source: PowerTrigger["source"] = "any") =>
-    new PowerTrigger({ source }),
+  power: (source?: PowerTrigger["source"]) => new PowerTrigger({ source }),
   calendarEntry: (options?: {
     readonly calendar?: string;
     readonly title?: string;
   }) =>
     new CalendarEntryTrigger({
-      ...(options?.calendar !== undefined ? { calendar: options.calendar } : {}),
-      ...(options?.title !== undefined ? { title: options.title } : {}),
+      calendar: options?.calendar,
+      title: options?.title,
     }),
   receivedText: (options?: {
     readonly kind?: ReceivedTextTrigger["kind"];
     readonly sender?: string;
   }) =>
     new ReceivedTextTrigger({
-      kind: options?.kind ?? "any",
-      ...(options?.sender !== undefined ? { sender: options.sender } : {}),
+      kind: options?.kind,
+      sender: options?.sender,
     }),
   variable: (condition: Condition) => new VariableTrigger({ condition }),
-  event: (event: string, parameter?: string) =>
-    new EventTrigger({
-      event,
-      ...(parameter !== undefined ? { parameter } : {}),
-    }),
-  state: (state: string, parameter?: string) =>
-    new StateTrigger({
-      state,
-      ...(parameter !== undefined ? { parameter } : {}),
-    }),
+  event: (event: string, parameter?: string) => new EventTrigger({ event, parameter }),
+  state: (state: string, parameter?: string) => new StateTrigger({ state, parameter }),
 } as const;
