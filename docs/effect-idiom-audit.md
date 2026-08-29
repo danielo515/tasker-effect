@@ -9,10 +9,19 @@
 > number of `sync/node.ts` findings may be partly addressed there. **One has since been withdrawn:**
 > the "capability layers self-provide `NodeContext`" entry was already resolved by PR #7 and its fix
 > would have been wrong — see the `src/sync/node.ts` entry below. That drops the count to 94
-> (11 high, 45 medium, 38 low). Re-checked as still open after `cea8b76`: `Effect.context`
+> (11 high, 45 medium, 38 low); the later `ProfileSync` `dependencies` entry brings it to 95
+> (11 high, 45 medium, 39 low). Re-checked as still open after `cea8b76`: `Effect.context`
 > re-provision (`sync/node.ts:82`) and the `FileStore`/`ZipExtractor` tag-subclasses (`:126`).
 > Everything in `src/compiler.ts`, `src/profile.ts`, `src/config.ts` and `tasks/` is unaffected by
 > PR #7.
+>
+> **Policy (owner's call, 2026-08-29):** the library is pre-1.0 with no consumers, so breaking
+> changes are preferred over compatibility shims. Fixes below are stated in their clean form —
+> earlier hedges ("keep a deprecated alias", "prefer the non-breaking widening") have been removed.
+> Layer findings were also revised for a fact the first draft under-used: `Effect.Service` generates
+> `DefaultWithoutDependencies` alongside `Default` **when the service declares `dependencies`**
+> (`Effect.d.ts:26578`) — none of `Tasker`, `ProfileSync`, `TaskerCompiler` does today, so every
+> open/closed layer pair in this repo is currently hand-rolled.
 
 Audited the full tree at `/home/user/tasker-effect`: `src/` (compiler, profile DSL, tasker-api, cli, config, runtime, sync/{contract,core,node,tasker}), the newer `tasks/popular/*` and `tasks/scripts/*`, `scripts/compile-tasks.ts`, `examples/`, and all 12 test files. Baseline on the audited tree: `bun run typecheck` clean, `bun run lint` clean (oxlint 1.78 with the ~90-rule `@effect/tsgo` recommended preset), `bun test` 189/189 passing. **Every finding a linter already enforces was excluded** — `try-catch-in-effect-gen`, `floating-effect`, `leaking-requirements`, `missing-layer-context`, `unsafe-effect-type-assertion`, `unnecessary-effect-gen`, `catch-to-ignore`, `global-*`, `prefer-schema-over-json` and the rest of the preset were checked against each candidate and anything they cover was dropped. What is listed below is therefore, by construction, what automation will not catch for you. Where a lint rule looks adjacent but stays silent, the entry says which rule and why. Most fixes were applied to a scratch tree and re-run through typecheck/lint/tests; where a proposed fix broke something, that is stated. Line numbers were re-anchored on the current tree; a handful of `src/profile.ts` anchors sit a few lines from older records because commit `dadd35a` (Condition → `Comparison | Presence`) shifted the file.
 
@@ -236,9 +245,9 @@ All 18 provider tests go through `makeTaskerConfigProvider(api, …)`, handing t
 
 ```ts
 export const taskerConfigLayer = (options?: TaskerConfigOptions): Layer.Layer<never, never, Tasker> => /* body unchanged, provide removed */;
-export const taskerConfigLayerLive = (options?: TaskerConfigOptions): Layer.Layer<never> =>
-  taskerConfigLayer(options).pipe(Layer.provide(Tasker.Default));
 ```
+
+No compatibility twin: nothing needs the closed variant — both shipped scripts hand the layer to `runInTasker`, which provides `Tasker.Default` last, and pre-1.0 policy is to break the signature rather than ship two spellings. This is the `DefaultWithoutDependencies` shape by hand: expose the open layer; the one edge that wants it closed closes it.
 
 Applied: typecheck/lint/189 green, `bun run compile` succeeds, and both scripts typecheck **unchanged**, because `runInTasker` already accepts `Effect<A, E, Tasker>` and provides `Tasker.Default` last (`runtime.ts:41-47`). `missing-layer-context` is satisfied (the annotation is accurate once provided) and `multiple-effect-provide` does not fire across modules; nothing detects a redundantly self-satisfied dependency.
 
@@ -254,6 +263,8 @@ export const SyncTaskerLive: Layer.Layer<ProfileSync> = ProfileSync.Default.pipe
 ```
 
 Applied: typecheck/lint/189 green, `SyncTaskerLive`'s public type unchanged, and the probe test passes for the right reason. Keep an assertion on `error.message`, not just `_tag` — `_tag` alone passes under the closed seam too. (Drop the "two Tasker instances" rationale: layer memoisation builds it once — verified.)
+
+This is the same open/closed pair `sync/node.ts` already ships as `FileStoreLive` / `FileStoreNodeLive` — the hand-rolled analogue of `Effect.Service`'s `DefaultWithoutDependencies` / `Default` (hand-rolled of necessity here: these implement the *contract* `Context.Tag`s, which by design carry no service class to hang generated statics on). Mirror the node module's naming so the two platforms read alike: keep `TaskerFileStore` / `TaskerZipExtractor` as the open `R = Tasker` layers per the sketch above, and let `SyncTaskerLive` remain the single place `Tasker.Default` is provided.
 
 **`src/sync/node.ts` — [RESOLVED on master] the Node capability layers already expose a dependency-free variant; this finding was stale when written.**
 Flagged during review by @danielo515 and confirmed: the audit was generated against `dadd35a`, which predates PR #7. On `cea8b76` the split this finding asked for already exists, with the opposite naming to what the entry assumed:
@@ -279,6 +290,24 @@ local(varName: string): string | undefined;    // :206
 ```
 
 Applied: `bun run typecheck` (src-only) stayed clean, and typechecking the scripts separately surfaced exactly one error — `battery-report.ts(20,33): TS2345` — which is the latent hole made visible. `unsafe-effect-type-assertion` stays silent because the `as` target is a function-typed API-record property, not an Effect.
+
+**`src/sync/core.ts:56` — [LOW] `ProfileSync` declares no `dependencies`, so both platforms restate the HTTP client and the tests' substitution seam is undeclared.**
+CLAUDE.md pins `FetchHttpClient.layer` as the client on **both** platforms, yet the choice is spelled out twice — `SyncNodeLive` (`node.ts:137`) and `SyncTaskerLive` (`tasker.ts:90`) each merge it in — and `test/sync.test.ts` substitutes a stub client through `ProfileSync.Default` only because no dependencies are declared, a fact nothing in the types records. Declaring the dependency makes `Effect.Service` generate the pair the repo hand-manages:
+
+```ts
+// core.ts — after
+import { FetchHttpClient, HttpClient } from "@effect/platform";
+export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
+  effect: /* unchanged */,
+  dependencies: [FetchHttpClient.layer],
+}) {}
+// ProfileSync.Default                    : R = FileStore | ZipExtractor      (client chosen once, here)
+// ProfileSync.DefaultWithoutDependencies : R = HttpClient | FileStore | ZipExtractor
+// node.ts:137 / tasker.ts:90 — drop FetchHttpClient.layer from the mergeAll (and the now-unused imports)
+// test/sync.test.ts:143,283,323 — Default → DefaultWithoutDependencies
+```
+
+Applied end to end: typecheck clean and 294/294 green **with the tests switched to `DefaultWithoutDependencies`**, which proves the stub client flows through the open layer; only the two dead `FetchHttpClient` imports need deleting for `--deny-warnings`. The device-bundle guard stays green — the fetch client is platform-free, it just moves from the platform modules into the service's declared dependencies. `layer-merge-all-with-dependencies` does not fire on the current shape; nothing type-level says "these two mergeAlls must pick the same client".
 
 **`src/sync/core.ts:83` — [MED] `downloadErrors` retypes `RequestError`/`ResponseError` structurally with `reason: string`, discarding the literal unions.**
 `ResponseError.reason` is `"StatusCode" | "Decode" | "EmptyBody"` and `RequestError.reason` is `"Transport" | "Encode" | "InvalidUrl"` (`HttpClientError.d.ts:32,49`). The hand-written parameter shapes widen `reason` to `string`, so `error.reason === "Statuscode"` — or any upstream rename — compiles and silently takes the `else` branch, turning every non-2xx download into a generic message with no status. `morning-briefing.ts:78` does the same comparison against the real inferred type and would break loudly. The `RequestError` handler erases `reason` entirely, so an `InvalidUrl` (a bug in the constructed asset URL) reads exactly like a network drop.
@@ -550,7 +579,7 @@ say: (text, options?) => new Say({ text, stream: options?.stream, pitch: options
 Verified on `Action.say`: typecheck clean, 189/189, and `Schema.encodeSync(Say)(Action.say("hi"))` byte-identical. Apply to the other builders. Keep `exactOptionalPropertyTypes: false`, which is what makes passing `undefined` typecheck. `prefer-unsafe-constructor`/`overridden-schema-constructor` are about construction mechanics, not wrappers restating defaults.
 
 **`src/sync/contract.ts:156` — [LOW] `FileStoreShape` forces an always-failing `writeBytes` stub on Tasker, deferring a statically-known impossibility to after the zip download.**
-Because `SyncTaskerLive` satisfies `ProfileSync` in full, the on-device service exposes `pullFromArtifacts`, which typechecks, downloads the whole artifact zip (`core.ts:190`) and only then dies at `files.writeBytes`. Splitting `writeBytes` into its own `BinaryFileStore` tag and moving `latestArtifact`/`pullFromArtifacts` into a separate service wired only into `SyncNodeLive` would remove the stub — but that is a breaking change across two public subpath exports plus the root barrel, and the current failure is at least a *typed* error, so nothing is laundered. Worth flagging as the stronger sibling of the same problem: `TaskerZipExtractor.extract` (`tasker.ts:69-71`) does `Effect.as([])`, i.e. it *succeeds* while discarding the real file list, so an on-device artifact sync silently returns `files: []`. Fail there instead: `ZipExtractError({ message: "extracted file list is not observable from Tasker", path: zipPath })`.
+Because `SyncTaskerLive` satisfies `ProfileSync` in full, the on-device service exposes `pullFromArtifacts`, which typechecks, downloads the whole artifact zip (`core.ts:190`) and only then dies at `files.writeBytes`. Split `writeBytes` into its own `BinaryFileStore` tag and move `latestArtifact`/`pullFromArtifacts` into a separate service wired only into `SyncNodeLive` — the stub disappears and "artifact sync is Node-only" becomes a type-level fact instead of a runtime failure. It breaks two public subpath exports plus the root barrel, which pre-1.0 policy accepts; until it lands, the current failure is at least a *typed* error, so nothing is laundered. Worth flagging as the stronger sibling of the same problem: `TaskerZipExtractor.extract` (`tasker.ts:69-71`) does `Effect.as([])`, i.e. it *succeeds* while discarding the real file list, so an on-device artifact sync silently returns `files: []`. Fail there instead: `ZipExtractError({ message: "extracted file list is not observable from Tasker", path: zipPath })`.
 
 **`src/profile.ts:196` — [LOW] `NonEmptyText` is not a type-level distinction, so builders typed `Text` accept values the class rejects at runtime.**
 `Schema.NonEmptyString` is a filter, not a brand, so `NonEmptyText.Type` and `Text.Type` are the same type; `Action.flash("")` typechecks and throws only at construction. There is also no exported `type NonEmptyText`, unlike `Text` (`:195`). Branding would force smart constructors at every call site and destroy the `Action.flash("hi")` ergonomics the DSL exists for, so the honest fix is: export the type alias, extend the doc comment at `:189-193` to say the check is construction-time only and why, and pin the behaviour with `expect(() => Action.flash("")).toThrow(ParseResult.ParseError)`. Separately tighten `Interpolated` (`:130`) so `new Interpolated({ parts: [""] })` — which satisfies `minItems(1)` and emits `""` — cannot fill a `NonEmptyText` field.
@@ -567,10 +596,10 @@ export class BatteryLevelTrigger extends Schema.TaggedClass<BatteryLevelTrigger>
 Applied: typecheck/lint/189 green, `(100,20)` now throws, `(100,100)` and decode round-trips unaffected. **Do not** extend this to `TimeTrigger` — `quiet.ts:15` deliberately uses a 22:30→06:30 wrap-around, which is legitimate. No rule models cross-field invariants.
 
 **`src/sync/node.ts:112` — [LOW] `Context.Tag` subclasses bolt on a fake `.Default` static, and the package exports two classes named `FileStore`.**
-`Context.Tag` deliberately has no `.Default` — that static is `Effect.Service`'s marker, which also generates `make`, `use` and a memoised layer. The root exports the contract's `FileStore` (`index.ts:224`) while `tasker-effect/sync/node` exports a subclass of the same name; they interoperate only because Effect resolves by `key`. `ZipExtractor`'s copy is additionally dead — nothing in `src/`, `tasks/`, `scripts/` or `test/` imports it. Prefer importing the tag from the contract and the layer by its real name (`FileStoreNodeLive`), matching how `sync/tasker.ts` already names things; if the subpath is public API, keep `export const FileStore = FileStoreTag` as a deprecated alias for one release and drop the `ZipExtractor` subclass outright. `class-self-mismatch` validates `Effect.Service`/`Schema.TaggedClass` declarations, not `Context.Tag` subclassing.
+`Context.Tag` deliberately has no `.Default` — that static is `Effect.Service`'s marker, which also generates `make`, `use` and a memoised layer. The root exports the contract's `FileStore` (`index.ts:224`) while `tasker-effect/sync/node` exports a subclass of the same name; they interoperate only because Effect resolves by `key`. `ZipExtractor`'s copy is additionally dead — nothing in `src/`, `tasks/`, `scripts/` or `test/` imports it. Delete both subclasses outright (pre-1.0 policy — no deprecated alias) and point the three call sites (`src/cli.ts:408`, `scripts/compile-tasks.ts:91`, `test/cli.test.ts`) at the contract tag plus `FileStoreNodeLive`. The fake `.Default` also mimics only half of what it apes: a real `Effect.Service` **with `dependencies` declared** generates `Default` *and* `DefaultWithoutDependencies`, and this module already hand-rolls that pair as `FileStoreLive`/`FileStoreNodeLive` — the subclass bolts a third spelling onto the same two layers. `class-self-mismatch` validates `Effect.Service`/`Schema.TaggedClass` declarations, not `Context.Tag` subclassing.
 
 **`src/config.ts:67` — [LOW] public option fields take raw millis where `Duration.DurationInput` is a strict superset.**
-Every sink is a Duration sink (`Effect.sleep`, `Effect.timeoutFail`, `Duration.format`), and `DurationInput` already admits a bare number as millis, so accepting it lets callers write `"2 minutes"` without breaking numeric callers. Note this renames the fields (`promptTimeoutMillis` → `promptTimeout`), so it is a breaking change to `TaskerConfigOptions` and touches `test/config.test.ts:40`. Pure polish — the unit-arithmetic and machine-units-in-messages arguments no longer apply on this tree.
+Every sink is a Duration sink (`Effect.sleep`, `Effect.timeoutFail`, `Duration.format`), and `DurationInput` already admits a bare number as millis, so numeric callers keep working. Do the rename with it (`promptTimeoutMillis` → `promptTimeout`, `pollIntervalMillis` → `pollInterval`) — a `Millis` suffix on a `DurationInput` field would be a standing lie — and update `test/config.test.ts:40`. Pure polish — the unit-arithmetic and machine-units-in-messages arguments no longer apply on this tree.
 
 **`src/config.ts:109` — [LOW] the documented action-timeout invariant is per-key, but `Config` evaluation prompts strictly serially.**
 `internal/configProvider.js:244-262` evaluates a Zip left-then-right and the other composites use `forEachSequential`; `Config` exposes no concurrency knob, and `withDefault` recovers each miss and continues. So N unanswered keys cost N × `promptTimeoutMillis`, and the stated condition ("action timeout > promptTimeoutMillis") is insufficient — the real one is "action timeout > unset-keys × promptTimeout". Both shipped scripts read 2 keys (240s worst case against 600s), so this is a **documentation** fix at `:24-27` and `:61-66`, not a timing change. **Do not** adopt a shared deadline captured at the first prompt: a user who spends 110s on key 1 would leave key 2 ten seconds, abandoning a dialog that is still on screen. If an aggregate cap is wanted, add an explicit `totalPromptBudgetMillis` that only short-circuits *before* issuing a new `performTask`.
