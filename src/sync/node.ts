@@ -119,9 +119,8 @@ export const ZipExtractorNodeLive: Layer.Layer<ZipExtractorTag> = ZipExtractorLi
 );
 
 /**
- * Compatibility service classes: same tags as the contract, with a `.Default`
- * layer pointing at the Node implementation so existing `FileStore.Default`
- * call sites (CLI, compile scripts) keep working.
+ * The contract ships bare `Context.Tag`s (it cannot pick a platform); these
+ * classes add a Node-bound `.Default` layer for desktop call sites.
  */
 export class FileStore extends FileStoreTag {
   static readonly Default: Layer.Layer<FileStoreTag> = FileStoreNodeLive;
