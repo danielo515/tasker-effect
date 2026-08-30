@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Cause, Effect, Exit, ParseResult } from "effect";
 import {
   type Action as ActionType,
   type Trigger as TriggerType,
@@ -53,6 +53,16 @@ describe("compileTaskToJs", () => {
     expect(jsSource).toContain('say("Time to wake up"');
     expect(jsSource).toContain('setGlobal("MODE", "day");');
     expect(jsSource).toContain('"use strict";');
+    expectValidJs(jsSource);
+  });
+
+  it("emits a variable read for a restorable setVolume level", () => {
+    const task = new Task({
+      name: "Restore Volume",
+      actions: [Action.setVolume("media", v("SAVED_MEDIA_VOL"))],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('mediaVol(global("SAVED_MEDIA_VOL"), false, false);');
     expectValidJs(jsSource);
   });
 
@@ -192,17 +202,12 @@ describe("compileTaskToJs", () => {
     expectValidJs(jsSource);
   });
 
-  it("raw JavaScript that is a bare secret/variable reference is emitted as an expression statement", () => {
+  it("a bare secret/variable reference is rejected as raw JavaScript code (would compile to a dead read-and-discard statement)", () => {
     const API_KEY = secret("RAW_JS_KEY", "key used as a whole code body");
-    const task = new Task({ name: "Custom", actions: [Action.js(API_KEY)] });
-    const jsSource = compileTaskToJs(task);
-    expect(jsSource).toContain('global("RAW_JS_KEY");');
-    expectValidJs(jsSource);
-
-    const varTask = new Task({ name: "Custom2", actions: [Action.js(v("myvar"))] });
-    const varJsSource = compileTaskToJs(varTask);
-    expect(varJsSource).toContain('local("myvar");');
-    expectValidJs(varJsSource);
+    // @ts-expect-error -- JsCode deliberately excludes bare Secret/VariableRef
+    expect(() => Action.js(API_KEY)).toThrow(ParseResult.ParseError);
+    // @ts-expect-error -- JsCode deliberately excludes bare Secret/VariableRef
+    expect(() => Action.js(v("myvar"))).toThrow(ParseResult.ParseError);
   });
 
   it("wraps everything in an error handler that flashes", () => {
@@ -488,6 +493,29 @@ describe("secrets", () => {
       JSON.parse(compileSecretsJson(project)).map((s: Secret) => s.name)
     ).toEqual(["ALPHA", "ZEBRA"]);
   });
+
+  it("sorts by code-point order, not ICU collation (API_KEY vs APIKEY)", () => {
+    // Under full-ICU/locale-aware collation, "API_KEY".localeCompare("APIKEY")
+    // is negative (locale orders "_" before "K"), while plain code-point
+    // comparison orders "APIKEY" first ("_" is 0x5F, "K" is 0x4B, so
+    // "API_KEY" > "APIKEY"). This pins the code-point order.
+    const project = new Project({
+      name: "P",
+      tasks: [
+        new Task({
+          name: "T",
+          actions: [
+            Action.flash(
+              fmt`${secret("API_KEY", "a")}${secret("APIKEY", "b")}`
+            ),
+          ],
+        }),
+      ],
+    });
+    expect(
+      JSON.parse(compileSecretsJson(project)).map((s: Secret) => s.name)
+    ).toEqual(["APIKEY", "API_KEY"]);
+  });
 });
 
 describe("task references", () => {
@@ -502,9 +530,7 @@ describe("task references", () => {
       actions: [Action.performTask(weather, { priority: 9 })],
     });
     const jsSource = compileTaskToJs(caller);
-    expect(jsSource).toContain(
-      'performTask("TE Dispatch", 9, "Weather Check", undefined);'
-    );
+    expect(jsSource).toContain('performTask("TE Dispatch", 9, "Weather Check");');
     expectValidJs(jsSource);
   });
 
@@ -519,7 +545,7 @@ describe("task references", () => {
       ],
     });
     const jsSource = compileTaskToJs(caller);
-    expect(jsSource).toContain('performTask("Hand Made", 7, "now", undefined);');
+    expect(jsSource).toContain('performTask("Hand Made", 7, "now");');
     expectValidJs(jsSource);
   });
 
@@ -557,6 +583,106 @@ describe("task references", () => {
     expect(message).toContain('Valid targets: "Other Task"');
   });
 
+  it("rejects a duplicate task name (the dispatcher's map literal would keep only the last)", () => {
+    const project = new Project({
+      name: "P",
+      tasks: [
+        new Task({ name: "Dup", actions: [Action.flash("a")] }),
+        new Task({ name: "Dup", actions: [Action.flash("b")] }),
+      ],
+    });
+    let error: unknown;
+    try {
+      compileProjectFiles(project, { repo: TEST_REPO });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(CompileError);
+    expect((error as CompileError).message).toContain('Duplicate task name "Dup"');
+  });
+
+  it("rejects a duplicate profile name", () => {
+    const makeProfile = (enterName: string) =>
+      new Profile({
+        name: "Dup",
+        triggers: [Trigger.wifiConnected()],
+        enter: new Task({ name: enterName, actions: [Action.flash("a")] }),
+      });
+    const project = new Project({
+      name: "P",
+      profiles: [makeProfile("Enter One"), makeProfile("Enter Two")],
+    });
+    let error: unknown;
+    try {
+      compileProjectFiles(project, { repo: TEST_REPO });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(CompileError);
+    expect((error as CompileError).message).toContain('Duplicate profile name "Dup"');
+  });
+
+  it("rejects a task name that collides with a profile name (the dispatcher resolves profiles first)", () => {
+    const project = new Project({
+      name: "P",
+      profiles: [
+        new Profile({
+          name: "Backup",
+          triggers: [Trigger.wifiConnected()],
+          enter: new Task({ name: "Backup Enter", actions: [Action.flash("a")] }),
+        }),
+      ],
+      tasks: [new Task({ name: "Backup", actions: [Action.flash("b")] })],
+    });
+    let error: unknown;
+    try {
+      compileProjectFiles(project, { repo: TEST_REPO });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(CompileError);
+    expect((error as CompileError).message).toContain(
+      '"Backup" is both a profile and a task'
+    );
+  });
+
+  it("rejects two definitions that slugify to the same filename", () => {
+    const project = new Project({
+      name: "P",
+      tasks: [
+        new Task({ name: "Night Mode", actions: [Action.flash("a")] }),
+        new Task({ name: "Night-Mode", actions: [Action.flash("b")] }),
+      ],
+    });
+    let error: unknown;
+    try {
+      compileProjectFiles(project, { repo: TEST_REPO });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(CompileError);
+    expect((error as CompileError).message).toContain(
+      'both slugify to filename "night-mode.js"'
+    );
+  });
+
+  it("rejects a name that slugifies to a reserved scaffold filename", () => {
+    const project = new Project({
+      name: "P",
+      tasks: [new Task({ name: "Dispatcher", actions: [Action.flash("a")] })],
+    });
+    let error: unknown;
+    try {
+      compileProjectFiles(project, { repo: TEST_REPO });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(CompileError);
+    expect((error as CompileError).message).toContain(
+      'slugifies to the reserved filename "dispatcher.js"'
+    );
+  });
+
   it.effect("TaskerCompiler.compileProject surfaces the linker CompileError", () =>
     Effect.gen(function* () {
       const project = new Project({
@@ -581,12 +707,12 @@ describe("task references", () => {
     })
   );
 
-  it.effect("TaskerCompiler.compileTask wraps an unexpected non-CompileError failure", () =>
+  it.effect("TaskerCompiler.compileTask is total — no CompileError channel — but a Match.exhaustive bug still surfaces as an undisguised defect", () =>
     Effect.gen(function* () {
       const brokenAction = { _tag: "NotARealAction" } as unknown as ActionType;
       // Bypass schema validation: this simulates an internal bug producing an
-      // action tag the compiler's Match.exhaustive does not know about,
-      // which is the only way to reach a non-CompileError failure.
+      // action tag the compiler's Match.exhaustive does not know about —
+      // the only way compileTask (a total function) can still fail.
       const task = new Task(
         { name: "Broken Task", actions: [brokenAction] },
         { disableValidation: true }
@@ -595,12 +721,41 @@ describe("task references", () => {
         const compiler = yield* TaskerCompiler;
         return yield* compiler.compileTask(task);
       });
-      const error = yield* program.pipe(
-        Effect.flip,
+      const exit = yield* program.pipe(
+        Effect.exit,
         Effect.provide(TaskerCompiler.Default)
       );
-      expect(error).toBeInstanceOf(CompileError);
-      expect(error.source).toBe("Broken Task");
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        // A defect (Cause.die), never a typed CompileError failure — the
+        // Match.exhaustive throw is not laundered into the error channel.
+        expect(Cause.isDie(exit.cause)).toBe(true);
+        expect(Cause.pretty(exit.cause)).toContain("Match/exhaustive");
+      }
+    })
+  );
+
+  it.effect("TaskerCompiler.compileProject lets a Match.exhaustive defect stay a defect (not laundered into CompileError)", () =>
+    Effect.gen(function* () {
+      const brokenAction = { _tag: "NotARealAction" } as unknown as ActionType;
+      const task = new Task(
+        { name: "Broken Task", actions: [brokenAction] },
+        { disableValidation: true }
+      );
+      const project = new Project({ name: "P", tasks: [task] });
+      const program = Effect.gen(function* () {
+        const compiler = yield* TaskerCompiler;
+        return yield* compiler.compileProject(project, { repo: TEST_REPO });
+      });
+      const exit = yield* program.pipe(
+        Effect.exit,
+        Effect.provide(TaskerCompiler.Default)
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(Cause.isDie(exit.cause)).toBe(true);
+        expect(Cause.pretty(exit.cause)).toContain("Match/exhaustive");
+      }
     })
   );
 

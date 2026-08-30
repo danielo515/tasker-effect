@@ -37,7 +37,7 @@ const makePromptingTasker = (options?: {
   };
 };
 
-const FAST = { pollIntervalMillis: 5, promptTimeoutMillis: 100 };
+const FAST = { pollInterval: 5, promptTimeout: 100 };
 
 // Tests that hit the prompt path use it.live: the provider polls the global
 // with real Clock sleeps, which the TestClock of it.effect would never
@@ -190,7 +190,7 @@ describe("makeTaskerConfigProvider", () => {
       // global: the user dismissed the dialog. The read must fail well
       // before the generous 5s prompt timeout — a regression to
       // timeout-only behavior trips the 1s guards below.
-      const GENEROUS = { pollIntervalMillis: 5, promptTimeoutMillis: 5_000 };
+      const GENEROUS = { pollInterval: 5, promptTimeout: 5_000 };
       const dismissedTasker = () => {
         let checks = 0;
         return makePromptingTasker({
@@ -255,8 +255,8 @@ describe("makeTaskerConfigProvider", () => {
           }),
       });
       const provider = yield* makeTaskerConfigProvider(api, {
-        pollIntervalMillis: 5,
-        promptTimeoutMillis: 5_000,
+        pollInterval: 5,
+        promptTimeout: 5_000,
       });
       const value = yield* Effect.withConfigProvider(
         Config.string("OPENWEATHER_KEY"),
@@ -285,8 +285,8 @@ describe("makeTaskerConfigProvider", () => {
           }),
       });
       const provider = yield* makeTaskerConfigProvider(api, {
-        pollIntervalMillis: 5,
-        promptTimeoutMillis: 5_000,
+        pollInterval: 5,
+        promptTimeout: 5_000,
       });
       const value = yield* Effect.withConfigProvider(
         Config.string("OPENWEATHER_KEY"),
@@ -314,8 +314,8 @@ describe("makeTaskerConfigProvider", () => {
           ),
       });
       const provider = yield* makeTaskerConfigProvider(api, {
-        pollIntervalMillis: 5,
-        promptTimeoutMillis: 50,
+        pollInterval: 5,
+        promptTimeout: 50,
       });
       const error = yield* Effect.withConfigProvider(
         Config.string("OPENWEATHER_KEY"),
@@ -406,8 +406,8 @@ describe("makeTaskerConfigProvider", () => {
         });
 
         const provider = yield* makeTaskerConfigProvider(api, {
-          pollIntervalMillis: 10,
-          promptTimeoutMillis: 5_000,
+          pollInterval: 10,
+          promptTimeout: 5_000,
         });
         const readKey = Effect.withConfigProvider(
           Config.string("OPENWEATHER_KEY"),
@@ -461,6 +461,59 @@ describe("makeTaskerConfigProvider", () => {
       expect(ConfigError.isConfigError(error)).toBe(true);
       // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
       expect(String(error)).toContain("no globals");
+    })
+  );
+
+  it.live(
+    "a transient global() failure during polling (per-tick and post-dismissal) does not escape as SourceUnavailable",
+    () =>
+      Effect.gen(function* () {
+        // First read (the initial "already set?" check) must succeed so we
+        // reach the poll loop; every read after that fails transiently —
+        // exercising both the per-tick orElseSucceed and the post-dismissal
+        // re-read's orElseSucceed. taskRunning is seen true once, then
+        // false, so the loop reaches the "last chance" read and, finding no
+        // answer, reports a prompt-dismissed MissingData rather than
+        // aborting on the bridge hiccup.
+        let globalCalls = 0;
+        let runningCalls = 0;
+        const { api } = makeTestTasker({
+          global: () => {
+            globalCalls++;
+            return globalCalls === 1
+              ? Effect.succeed("")
+              : Effect.fail(new TaskerCallError({ function: "global", message: "bridge hiccup" }));
+          },
+          performTask: () => Effect.succeed(true),
+          taskRunning: () => Effect.sync(() => ++runningCalls === 1),
+        });
+        const provider = yield* makeTaskerConfigProvider(api, FAST);
+        const error = yield* Effect.withConfigProvider(
+          Config.string("OPENWEATHER_KEY"),
+          provider
+        ).pipe(Effect.flip);
+        expect(ConfigError.isMissingDataOnly(error)).toBe(true);
+        // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+        expect(String(error)).toContain("ended without an answer");
+      })
+  );
+
+  it.effect("fails fast with MissingData when performTask() returns false (TE Config not imported)", () =>
+    Effect.gen(function* () {
+      const { api, calls } = makeTestTasker({
+        global: () => Effect.succeed(""),
+        performTask: () => Effect.succeed(false),
+      });
+      const provider = yield* makeTaskerConfigProvider(api, FAST);
+      const error = yield* Effect.withConfigProvider(
+        Config.string("OPENWEATHER_KEY"),
+        provider
+      ).pipe(Effect.flip);
+      expect(ConfigError.isMissingDataOnly(error)).toBe(true);
+      // oxlint-disable-next-line typescript/no-base-to-string -- ConfigError stringifies meaningfully at runtime
+      expect(String(error)).toContain("import tasker-effect.prj.xml");
+      // A hard "not started" negative must not burn the poll budget.
+      expect(calls.filter((call) => call.name === "performTask")).toHaveLength(1);
     })
   );
 

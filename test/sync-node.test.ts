@@ -17,8 +17,8 @@ import {
 } from "../src/sync/contract.js";
 
 /** A BadArgument PlatformError, as real Node FS operations essentially never raise */
-const badArgument = (message: string) =>
-  new PlatformError.BadArgument({ module: "FileSystem", method: "test", message });
+const badArgument = (description: string) =>
+  new PlatformError.BadArgument({ module: "FileSystem", method: "test", description });
 
 /** A stub FileSystem whose makeDirectory always fails, merged with a real Path */
 const stubFsLayer = (fs: Partial<FileSystem.FileSystem>) =>

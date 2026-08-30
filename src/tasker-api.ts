@@ -199,11 +199,11 @@ export type TaskerApiError = TaskerCallError | TaskerNotAvailableError;
 export interface TaskerRawApi {
   // --- Variables ---------------------------------------------------------
   /** Retrieve the value of a Tasker global variable (without the % prefix) */
-  global(varName: string): string;
+  global(varName: string): string | undefined;
   /** Set a Tasker global user variable */
   setGlobal(varName: string, newValue: string): void;
   /** Retrieve a scene-local variable */
-  local(varName: string): string;
+  local(varName: string): string | undefined;
   /** Set a scene-local variable */
   setLocal(varName: string, newValue: string): void;
 
@@ -680,24 +680,27 @@ const testDefault = (name: keyof TaskerRawApi): unknown => {
  * harmless defaults (true / "" / void), with optional per-function overrides.
  */
 export const makeTestTasker = (
-  overrides: Partial<TaskerApi> = {}
+  overrides: Partial<TaskerApi> & { readonly isAvailable?: Effect.Effect<boolean> } = {}
 ): { readonly api: TaskerShape; readonly calls: ReadonlyArray<RecordedCall> } => {
   const calls: Array<RecordedCall> = [];
   const api = Object.fromEntries(
     TASKER_FUNCTION_NAMES.map((name) => [
       name,
-      (...args: ReadonlyArray<unknown>) => {
-        calls.push({ name, args });
-        const override = overrides[name];
-        if (override !== undefined) {
-          return (override as (...a: ReadonlyArray<unknown>) => unknown)(...args);
-        }
-        return Effect.succeed(testDefault(name));
-      },
+      (...args: ReadonlyArray<unknown>) =>
+        Effect.suspend(() => {
+          calls.push({ name, args });
+          const override = overrides[name];
+          if (override !== undefined) {
+            return (override as (...a: ReadonlyArray<unknown>) => Effect.Effect<unknown, TaskerApiError>)(
+              ...args
+            );
+          }
+          return Effect.succeed(testDefault(name));
+        }),
     ])
   ) as unknown as TaskerApi;
   return {
-    api: { ...api, isAvailable: Effect.succeed(false) },
+    api: { ...api, isAvailable: overrides.isAvailable ?? Effect.succeed(false) },
     calls,
   };
 };
@@ -709,7 +712,7 @@ export const TaskerTest: Layer.Layer<Tasker> = Layer.sync(Tasker, () =>
 
 /** Layer with call recording and overrides for assertions in tests */
 export const makeTaskerTestLayer = (
-  overrides: Partial<TaskerApi> = {}
+  overrides: Partial<TaskerApi> & { readonly isAvailable?: Effect.Effect<boolean> } = {}
 ): { readonly layer: Layer.Layer<Tasker>; readonly calls: ReadonlyArray<RecordedCall> } => {
   const { api, calls } = makeTestTasker(overrides);
   return { layer: Layer.succeed(Tasker, new Tasker(api)), calls };

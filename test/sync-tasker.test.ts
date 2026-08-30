@@ -59,6 +59,18 @@ describe("TaskerFileStore", () => {
     })
   );
 
+  it.effect("writeText fails with StorageWriteError when writeFile returns false (refused)", () =>
+    Effect.gen(function* () {
+      g.writeFile = () => false;
+      const error = yield* Effect.gen(function* () {
+        const store = yield* FileStore;
+        yield* store.writeText("/sdcard/x.js", "content");
+      }).pipe(Effect.provide(TaskerFileStore), Effect.flip);
+      expect(error).toBeInstanceOf(StorageWriteError);
+      expect(error.message).toContain("returned false");
+    })
+  );
+
   it.effect("writeBytes is not supported on-device", () =>
     Effect.gen(function* () {
       const error = yield* Effect.gen(function* () {
@@ -76,19 +88,32 @@ describe("TaskerZipExtractor", () => {
     delete g.unzip;
   });
 
-  it.effect("extract calls the Tasker unzip builtin", () =>
+  it.effect("extract calls the Tasker unzip builtin, but the extracted file list is not observable", () =>
     Effect.gen(function* () {
       const calls: Array<unknown> = [];
       g.unzip = (zipPath: string, deleteZipAfter: boolean) => {
         calls.push([zipPath, deleteZipAfter]);
         return true;
       };
-      const files = yield* Effect.gen(function* () {
+      const error = yield* Effect.gen(function* () {
         const extractor = yield* ZipExtractor;
         return yield* extractor.extract("/sdcard/x.zip", "/sdcard/target");
-      }).pipe(Effect.provide(TaskerZipExtractor));
+      }).pipe(Effect.provide(TaskerZipExtractor), Effect.flip);
       expect(calls).toEqual([["/sdcard/x.zip", true]]);
-      expect(files).toEqual([]);
+      expect(error).toBeInstanceOf(ZipExtractError);
+      expect(error.message).toContain("not observable");
+    })
+  );
+
+  it.effect("extract fails with ZipExtractError when unzip returns false (refused)", () =>
+    Effect.gen(function* () {
+      g.unzip = () => false;
+      const error = yield* Effect.gen(function* () {
+        const extractor = yield* ZipExtractor;
+        return yield* extractor.extract("/sdcard/x.zip", "/sdcard/target");
+      }).pipe(Effect.provide(TaskerZipExtractor), Effect.flip);
+      expect(error).toBeInstanceOf(ZipExtractError);
+      expect(error.message).toContain("returned false");
     })
   );
 

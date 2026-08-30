@@ -80,7 +80,7 @@ export const Artifact = Schema.Struct({
   id: Schema.Number,
   name: Schema.String,
   size_in_bytes: Schema.Number,
-  created_at: Schema.String,
+  created_at: Schema.Date,
   expired: Schema.Boolean,
   archive_download_url: Schema.String,
   workflow_run: Schema.optional(
