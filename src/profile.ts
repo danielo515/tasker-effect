@@ -1022,6 +1022,16 @@ export const decodeProject = Schema.decodeUnknown(Project);
 const asVarName = (value: VarName): VarName =>
   typeof value === "string" ? variableName(value) : value;
 
+/**
+ * Spread-friendly optional field: `{}` when `value` is `undefined`, a
+ * single-key object otherwise. Keeps builders below from branching per
+ * optional field — each becomes one call instead of a ternary spread.
+ */
+const optional = <K extends string, V>(
+  key: K,
+  value: V | undefined
+): { readonly [P in K]?: V } => (value !== undefined ? { [key]: value } : {}) as never;
+
 /** Ergonomic factories for every action */
 export const Action = {
   flash: (text: Text, options?: { readonly long?: boolean }) =>
@@ -1046,15 +1056,17 @@ export const Action = {
       readonly pitch?: number;
       readonly speed?: number;
     }
-  ) =>
-    new Say({
+  ) => {
+    const { engine, voice, stream = "media", pitch = 5, speed = 5 } = options ?? {};
+    return new Say({
       text,
-      stream: options?.stream ?? "media",
-      pitch: options?.pitch ?? 5,
-      speed: options?.speed ?? 5,
-      ...(options?.engine !== undefined ? { engine: options.engine } : {}),
-      ...(options?.voice !== undefined ? { voice: options.voice } : {}),
-    }),
+      stream,
+      pitch,
+      speed,
+      ...optional("engine", engine),
+      ...optional("voice", voice),
+    });
+  },
   vibrate: (milliseconds: number) => new Vibrate({ milliseconds }),
   vibratePattern: (pattern: string) => new VibratePattern({ pattern }),
   setGlobal: (name: VarName, value: Text) =>
@@ -1202,11 +1214,11 @@ export const Action = {
       action,
       targetComp,
       extras: options?.extras ?? [],
-      ...(options?.pkg !== undefined ? { pkg: options.pkg } : {}),
-      ...(options?.cls !== undefined ? { cls: options.cls } : {}),
-      ...(options?.category !== undefined ? { category: options.category } : {}),
-      ...(options?.data !== undefined ? { data: options.data } : {}),
-      ...(options?.mimeType !== undefined ? { mimeType: options.mimeType } : {}),
+      ...optional("pkg", options?.pkg),
+      ...optional("cls", options?.cls),
+      ...optional("category", options?.category),
+      ...optional("data", options?.data),
+      ...optional("mimeType", options?.mimeType),
     }),
   silentMode: (mode: SetSilentMode["mode"]) => new SetSilentMode({ mode }),
   goHome: (screen = 0) => new GoHome({ screen }),

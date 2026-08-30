@@ -148,6 +148,22 @@ const decodeOrUndefined = <A, I>(schema: Schema.Schema<A, I>, value: unknown) =>
   Either.getOrUndefined(Schema.decodeUnknownEither(schema)(value));
 
 /**
+ * Shape-based recognition rules for {@link asCompilable}: the first rule
+ * whose `matches` predicate accepts the record's shape decodes it.
+ */
+const compilableMatchers: ReadonlyArray<{
+  readonly matches: (value: Record<string, unknown>) => boolean;
+  readonly decode: (value: unknown) => Project | Profile | Task | undefined;
+}> = [
+  { matches: (v) => Array.isArray(v.triggers), decode: (v) => decodeOrUndefined(Profile, v) },
+  { matches: (v) => Array.isArray(v.actions), decode: (v) => decodeOrUndefined(Task, v) },
+  {
+    matches: (v) => Array.isArray(v.profiles) || Array.isArray(v.tasks),
+    decode: (v) => decodeOrUndefined(Project, v),
+  },
+];
+
+/**
  * Recognize a value as a Project, Profile or Task. Instances are accepted
  * directly; structurally-matching plain objects (e.g. instances created by a
  * different copy of this library, where `instanceof` fails) are validated
@@ -164,12 +180,7 @@ export const asCompilable = (
     return value;
   }
   if (!isRecord(value) || typeof value.name !== "string") return undefined;
-  if (Array.isArray(value.triggers)) return decodeOrUndefined(Profile, value);
-  if (Array.isArray(value.actions)) return decodeOrUndefined(Task, value);
-  if (Array.isArray(value.profiles) || Array.isArray(value.tasks)) {
-    return decodeOrUndefined(Project, value);
-  }
-  return undefined;
+  return compilableMatchers.find((rule) => rule.matches(value))?.decode(value);
 };
 
 /** Collect every compilable export (default and named) of a module */

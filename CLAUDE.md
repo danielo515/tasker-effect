@@ -74,7 +74,16 @@ Linting runs on every PR (CI `verify` job) as ONE command: `bun run lint`.
 `bun run test:coverage` is what CI runs for the test step: `vitest.config.ts`
 sets `coverage.thresholds` to 100% for statements/branches/functions/lines
 over `src/**/*.ts` (v8 provider) — a PR that lowers coverage fails CI, not
-just the `bun run test` step used for quick local iteration.
+just the `bun run test` step used for quick local iteration. The same command
+also enforces a **CRAP score** gate via `@barney-media/crap-typescript-vitest`
+(`withCrapTypescriptVitest` wraps the vitest config): CRAP combines cyclomatic
+complexity with per-function coverage (`comp² × (1 - cov)³ + comp`), so at 100%
+coverage it reduces to cyclomatic complexity itself. Any function scoring above
+the `threshold: 8` in `vitest.config.ts` fails the run (exit code 2) — full
+coverage alone doesn't excuse a function from also being simple. Reduce a
+function's complexity (fewer branches — see the `optional()` helper in
+`src/profile.ts` for a pattern that replaces ternary-spread option handling)
+rather than raising the threshold.
 The Effect language service is `@effect/tsgo` (TS 7 native build); the
 `prepare` script patches the local `typescript` install (so `tsc`/editors
 get Effect diagnostics) and the local `oxlint`/`oxlint-tsgolint` installs
