@@ -214,6 +214,24 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
 /**
+ * Shape-based recognition rules for {@link asCompilableEither}: the first
+ * rule whose `matches` predicate accepts the record's shape decodes it.
+ */
+const compilableMatchers: ReadonlyArray<{
+  readonly matches: (value: Record<string, unknown>) => boolean;
+  readonly decode: (
+    value: unknown
+  ) => Either.Either<Project | Profile | Task, ParseResult.ParseError>;
+}> = [
+  { matches: (v) => Array.isArray(v.triggers), decode: Schema.decodeUnknownEither(Profile) },
+  { matches: (v) => Array.isArray(v.actions), decode: Schema.decodeUnknownEither(Task) },
+  {
+    matches: (v) => Array.isArray(v.profiles) || Array.isArray(v.tasks),
+    decode: Schema.decodeUnknownEither(Project),
+  },
+];
+
+/**
  * Recognize a value as a Project, Profile or Task, keeping the `ParseError`
  * on a near-miss. Instances are accepted directly; structurally-matching
  * plain objects (e.g. instances created by a different copy of this
@@ -232,16 +250,7 @@ export const asCompilableEither = (
     return Either.right(value);
   }
   if (!isRecord(value) || typeof value.name !== "string") return undefined;
-  if (Array.isArray(value.triggers)) {
-    return Schema.decodeUnknownEither(Profile)(value);
-  }
-  if (Array.isArray(value.actions)) {
-    return Schema.decodeUnknownEither(Task)(value);
-  }
-  if (Array.isArray(value.profiles) || Array.isArray(value.tasks)) {
-    return Schema.decodeUnknownEither(Project)(value);
-  }
-  return undefined;
+  return compilableMatchers.find((rule) => rule.matches(value))?.decode(value);
 };
 
 /**
