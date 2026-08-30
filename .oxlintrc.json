@@ -1,7 +1,14 @@
 {
   "$schema": "./node_modules/@effect/tsgo/oxlint-schema.json",
   "extends": ["./node_modules/@effect/tsgo/oxlint-presets/recommended.json"],
-  "ignorePatterns": ["dist", "dist-tasker", "coverage"],
+  "ignorePatterns": [
+    "dist",
+    "dist-tasker",
+    "coverage",
+    // Plain Node CI utility (no Effect/device runtime involved), same
+    // rationale as scripts/update-rolling-release.sh being a shell script.
+    "scripts/bundle-size-report.mjs"
+  ],
   "rules": {
     // DSL values are Schema.TaggedClass instances validated at construction;
     // `instanceof Task`/`Profile`/... in the compiler and CLI is the intended
