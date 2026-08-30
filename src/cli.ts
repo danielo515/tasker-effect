@@ -99,7 +99,11 @@ export const RepoRefFromString = Schema.transformOrFail(
       const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(
         value.trim()
       );
-      return match === null
+      // Both capture groups are mandatory in the pattern above, but
+      // RegExpExecArray indexing is typed `string | undefined` regardless —
+      // check the values themselves rather than asserting past that.
+      const [, owner, repo] = match ?? [];
+      return owner === undefined || repo === undefined
         ? ParseResult.fail(
             new ParseResult.Type(
               ast,
@@ -107,7 +111,7 @@ export const RepoRefFromString = Schema.transformOrFail(
               "--repo requires a GitHub repository as <owner>/<name>"
             )
           )
-        : ParseResult.succeed({ owner: match[1]!, repo: match[2]! });
+        : ParseResult.succeed({ owner, repo });
     },
     encode: (repo) => ParseResult.succeed(`${repo.owner}/${repo.repo}`),
   }
@@ -125,10 +129,9 @@ export const parseGitHubRepo = (url: string): RepoRef | undefined => {
     /^(?:git@github\.com:|(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?github\.com\/)([^/\s]+\/[^/\s]+)\/?$/.exec(
       url.trim()
     );
-  if (match === null) return undefined;
-  return Either.getOrUndefined(
-    Schema.decodeUnknownEither(RepoRefFromString)(match[1]!)
-  );
+  const slug = match?.[1];
+  if (slug === undefined) return undefined;
+  return Either.getOrUndefined(Schema.decodeUnknownEither(RepoRefFromString)(slug));
 };
 
 /** Run `git remote get-url origin`, capturing stdout, stderr and exit code */

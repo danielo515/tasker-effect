@@ -297,6 +297,20 @@ describe("detectRepoFromGit", () => {
       expect(error.message).toContain("not a GitHub repository URL");
     })
   );
+
+  // The tests above exercise gitOriginRemote's concurrent stdout/stderr/
+  // exitCode read against a fake CommandExecutor. This one runs a real
+  // `git remote get-url origin` subprocess (this repo's own checkout) to
+  // confirm that concurrency actually works end to end, not just against a
+  // stub that hands back already-buffered streams.
+  it.live("resolves this repo's own origin via a real git subprocess", () =>
+    Effect.gen(function* () {
+      // Don't hardcode the owner: a fork's origin legitimately differs.
+      const repo = yield* detectRepoFromGit().pipe(Effect.provide(NodeContext.layer));
+      expect(repo.repo).toBe("tasker-effect");
+      expect(repo.owner.length).toBeGreaterThan(0);
+    })
+  );
 });
 
 describe("formatCliError", () => {

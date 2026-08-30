@@ -67,6 +67,12 @@ export const TaskerZipExtractor: Layer.Layer<ZipExtractor> = Layer.effect(
   Effect.gen(function* () {
     const tasker = yield* Tasker;
     const extractor: ZipExtractorShape = {
+      // Both outcomes of Tasker's unzip() end in failure, for different
+      // reasons: `false` means the extraction was refused, and `true` means
+      // it succeeded but Tasker never exposes *which* files landed — and
+      // ProfileSync's contract requires that file list. So there is no
+      // success path to reach here; this always fails, distinguishing the
+      // two causes only for a clearer message.
       extract: (zipPath, _targetDir) =>
         tasker.unzip(zipPath, true).pipe(
           Effect.flatMap((unzipped) =>

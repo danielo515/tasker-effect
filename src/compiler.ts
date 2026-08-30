@@ -1150,8 +1150,11 @@ export const collectProjectSecrets = (project: Project): Array<Secret> => {
   for (const task of project.tasks) {
     addFrom(`task "${task.name}"`, task.actions);
   }
+  // Arr.sort accepts any Iterable, so the Map's value iterator needs no
+  // array-copy first — it isn't a defensive copy either: Arr.sort never
+  // mutates its input.
   return Arr.sort(
-    [...byName.values()],
+    byName.values(),
     Order.mapInput(Order.string, (s: Secret) => s.name)
   );
 };

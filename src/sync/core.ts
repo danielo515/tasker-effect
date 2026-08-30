@@ -49,36 +49,35 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
     const files = yield* FileStore;
     const extractor = yield* ZipExtractor;
 
-    const getSchemaErrors = (url: string) => ({
-      RequestError: (error: HttpClientError.RequestError) =>
-        Effect.fail(new GitHubApiError({ message: error.message, url })),
-      ResponseError: (error: HttpClientError.ResponseError) =>
-        Effect.fail(
-          error.reason === "StatusCode"
-            ? new GitHubApiError({
-                message: `GitHub API returned ${error.response.status}`,
-                url,
-                status: error.response.status,
-              })
-            : new GitHubApiError({ message: error.message, url })
-        ),
-      ParseError: (error: { readonly message: string }) =>
-        Effect.fail(
-          new GitHubApiError({
-            message: `Unexpected GitHub API payload: ${error.message}`,
-            url,
-          })
-        ),
-    });
-
-    const getSchema = <A, I>(
+    /** Fetch `url` as JSON and decode it against `schema`, mapping every failure to `GitHubApiError`. */
+    const fetchDecoded = <A, I>(
       schema: Schema.Schema<A, I>,
       url: string,
       token: string | undefined
     ) =>
       client.get(url, { headers: apiHeaders(token) }).pipe(
         Effect.flatMap(HttpClientResponse.schemaBodyJson(schema)),
-        Effect.catchTags(getSchemaErrors(url))
+        Effect.catchTags({
+          RequestError: (error: HttpClientError.RequestError) =>
+            Effect.fail(new GitHubApiError({ message: error.message, url })),
+          ResponseError: (error: HttpClientError.ResponseError) =>
+            Effect.fail(
+              error.reason === "StatusCode"
+                ? new GitHubApiError({
+                    message: `GitHub API returned ${error.response.status}`,
+                    url,
+                    status: error.response.status,
+                  })
+                : new GitHubApiError({ message: error.message, url })
+            ),
+          ParseError: (error: { readonly message: string }) =>
+            Effect.fail(
+              new GitHubApiError({
+                message: `Unexpected GitHub API payload: ${error.message}`,
+                url,
+              })
+            ),
+        })
       );
 
     const downloadErrors = (url: string) => ({
@@ -123,7 +122,7 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
         const suffixes = options.assetSuffixes ?? DEFAULT_ASSET_SUFFIXES;
         const url = `https://api.github.com/repos/${options.owner}/${options.repo}/releases/latest`;
 
-        const release = yield* getSchema(Release, url, options.token);
+        const release = yield* fetchDecoded(Release, url, options.token);
 
         const assets = release.assets.filter((asset) =>
           suffixes.some((suffix) => asset.name.endsWith(suffix))
@@ -144,7 +143,7 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
           )
         );
 
-        const ordered = [...downloaded].sort(
+        const ordered = downloaded.toSorted(
           (a, b) => Number(commitLast.has(a.name)) - Number(commitLast.has(b.name))
         );
         yield* Effect.forEach(
@@ -174,7 +173,7 @@ export class ProfileSync extends Effect.Service<ProfileSync>()("ProfileSync", {
       const name = options.artifactName ?? "tasker-js";
       const url = `https://api.github.com/repos/${options.owner}/${options.repo}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=10`;
 
-      const response = yield* getSchema(ArtifactsResponse, url, options.token);
+      const response = yield* fetchDecoded(ArtifactsResponse, url, options.token);
 
       const live = response.artifacts.filter((artifact) => !artifact.expired);
       if (!Arr.isNonEmptyReadonlyArray(live)) {
