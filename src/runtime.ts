@@ -21,15 +21,7 @@
  */
 
 import { Cause, Effect } from "effect";
-import { Tasker, raw } from "./tasker-api.js";
-
-const tryFlash = (message: string): void => {
-  try {
-    raw.flash(message);
-  } catch {
-    // Off-device (no Tasker globals): nothing sensible to do with the toast.
-  }
-};
+import { Tasker } from "./tasker-api.js";
 
 /**
  * Run an Effect program with the live Tasker service provided.
@@ -45,20 +37,16 @@ export const runInTasker = <A, E>(
 ): Promise<A> =>
   Effect.runPromise(
     program.pipe(
-      Effect.provide(Tasker.Default),
       Effect.tapErrorCause((cause) =>
-        Effect.sync(() => tryFlash(`tasker-effect: ${Cause.pretty(cause)}`))
+        Tasker.use((t) => t.flash(`tasker-effect: ${Cause.pretty(cause)}`)).pipe(
+          Effect.ignore
+        )
       ),
       Effect.ensuring(
-        Effect.sync(() => {
-          if (options?.exitWhenDone === true) {
-            try {
-              raw.exit();
-            } catch {
-              // Off-device: exit() does not exist.
-            }
-          }
-        })
-      )
+        options?.exitWhenDone === true
+          ? Tasker.use((t) => t.exit()).pipe(Effect.ignore)
+          : Effect.void
+      ),
+      Effect.provide(Tasker.Default)
     )
   );

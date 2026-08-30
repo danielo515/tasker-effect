@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Either, Schema } from "effect";
+import { Either, ParseResult, Schema } from "effect";
 import {
   Action,
   ActionSchema,
@@ -223,6 +223,10 @@ describe("Trigger builders", () => {
 
   it("battery trigger validates range", () => {
     expect(() => Trigger.batteryLevel(0, 150)).toThrow();
+  });
+
+  it("battery trigger rejects a reversed range (from > to)", () => {
+    expect(() => Trigger.batteryLevel(60, 40)).toThrow(ParseResult.ParseError);
   });
 
   it("location trigger validates coordinates", () => {

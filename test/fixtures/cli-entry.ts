@@ -26,6 +26,16 @@ export const nightMode = new Profile({
 export const notCompilable = "just a string";
 export const alsoIgnored = { name: "looks close", but: "is not a DSL value" };
 
+/**
+ * Looks exactly like a Task (name + actions array) but the action doesn't
+ * decode — this is the "near miss" the scanner should surface as a
+ * rejected export with its ParseError, not silently drop.
+ */
+export const nearMissTask = {
+  name: "Near Miss",
+  actions: [{ _tag: "NotARealAction" }],
+};
+
 /** Default Project export */
 export default new Project({
   name: "Fixture Project",

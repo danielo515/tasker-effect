@@ -22,9 +22,12 @@
  * waiting out the full prompt timeout.
  *
  * Invariant: the JavaScript action hosting the program must have a timeout
- * **greater than** `promptTimeoutMillis` (the generated `TE Dispatch` uses
- * 600s vs the 120s default) — otherwise Tasker kills the script before the
- * provider can fail over.
+ * **greater than** `promptTimeout` multiplied by the number of distinct
+ * unset keys a run may prompt for (the generated `TE Dispatch` uses 600s vs
+ * the 120s default) — each unset key prompts and polls in turn, so the
+ * total time a run can spend prompting scales with how many keys are unset,
+ * not just a single prompt's timeout — otherwise Tasker kills the script
+ * before the provider can fail over.
  *
  * Prompt labels come from the {@link Secret} declarations passed to the
  * layer; unknown keys prompt with the bare global name.
@@ -42,7 +45,9 @@ import {
   Exit,
   HashSet,
   Layer,
+  Option,
   Ref,
+  Schema,
 } from "effect";
 import { CONFIG_TASK_NAME } from "./compiler.js";
 import type { Secret } from "./profile.js";
@@ -59,25 +64,29 @@ export interface TaskerConfigOptions {
   /** Declared secrets, used for human-readable prompt labels */
   readonly secrets?: ReadonlyArray<Secret>;
   /**
-   * How long to wait for a prompt answer. Default: 120s. Must stay below the
-   * timeout of the JavaScript action hosting the program (the generated
-   * `TE Dispatch` uses 600s), or Tasker kills the script before the provider
-   * can fail over to `Config.withDefault` / `Config.option`.
+   * How long to wait for a prompt answer. Default: 120s. The timeout of the
+   * JavaScript action hosting the program (the generated `TE Dispatch` uses
+   * 600s) must exceed this multiplied by the number of distinct keys a run
+   * may prompt for, or Tasker kills the script before the provider can fail
+   * over to `Config.withDefault` / `Config.option`.
    */
-  readonly promptTimeoutMillis?: number;
+  readonly promptTimeout?: Duration.DurationInput;
   /** How often to poll the global while waiting. Default: 1s */
-  readonly pollIntervalMillis?: number;
+  readonly pollInterval?: Duration.DurationInput;
 }
 
 /** Prompt task priority when the caller's %priority cannot be read */
 const FALLBACK_PROMPT_PRIORITY = 5;
 
+/** A non-negative integer priority, decoded strictly from Tasker's %priority text. */
+const Priority = Schema.compose(Schema.NonEmptyString, Schema.NumberFromString).pipe(
+  Schema.int(),
+  Schema.nonNegative()
+);
+
 /** Parse Tasker's %priority local; undefined for unset/garbage values. */
-const parsePriority = (value: string | undefined): number | undefined => {
-  if (value === undefined || value === "") return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
-};
+const parsePriority = (value: string | undefined): number | undefined =>
+  Schema.decodeUnknownOption(Priority)(value).pipe(Option.getOrUndefined);
 
 const globalNameOf = (path: ReadonlyArray<string>): string =>
   path.join("_").toUpperCase();
@@ -105,8 +114,8 @@ export const makeTaskerConfigProvider = (
     const labels = new Map(
       (options?.secrets ?? []).map((secret) => [secret.name, secret.description])
     );
-    const pollInterval = options?.pollIntervalMillis ?? 1_000;
-    const timeout = options?.promptTimeoutMillis ?? 120_000;
+    const pollInterval = Duration.decode(options?.pollInterval ?? Duration.seconds(1));
+    const timeout = Duration.decode(options?.promptTimeout ?? Duration.seconds(120));
     const inFlight = yield* Ref.make(
       new Map<string, Deferred.Deferred<string, ConfigError.ConfigError>>()
     );
@@ -117,12 +126,9 @@ export const makeTaskerConfigProvider = (
     ): Effect.Effect<string | undefined, ConfigError.ConfigError> =>
       tasker.global(name).pipe(
         Effect.mapError((error) => sourceUnavailable(path, name, error)),
-        Effect.map((value) => {
-          // Tasker returns undefined for unset globals despite the binding's
-          // string type; treat empty as unset either way.
-          const text: string | undefined = value;
-          return text === undefined || text === "" ? undefined : text;
-        })
+        // Tasker returns undefined for unset globals; treat empty as unset
+        // either way.
+        Effect.map((value) => (value === undefined || value === "" ? undefined : value))
       );
 
     /**
@@ -155,8 +161,7 @@ export const makeTaskerConfigProvider = (
           // priority would leave TE Config queued frozen behind the very
           // task that is polling for its answer. Priority is an optimization,
           // not a correctness requirement — any failure reading it falls
-          // back to the constant. Like `global`, the binding returns
-          // undefined for unset locals despite the string type.
+          // back to the constant.
           const callerPriority = yield* tasker.local("priority").pipe(
             Effect.map(parsePriority),
             Effect.orElseSucceed(() => undefined)
@@ -165,10 +170,17 @@ export const makeTaskerConfigProvider = (
             callerPriority !== undefined
               ? callerPriority + 1
               : FALLBACK_PROMPT_PRIORITY;
-          yield* tasker
+          const started = yield* tasker
             .performTask(CONFIG_TASK_NAME, promptPriority, name, labels.get(name) ?? name)
             .pipe(Effect.mapError((error) => sourceUnavailable(path, name, error)));
-          const attempts = Math.max(1, Math.ceil(timeout / pollInterval));
+          if (!started) {
+            return yield* Effect.fail(
+              ConfigError.MissingData(
+                [...path],
+                `${CONFIG_TASK_NAME} could not be started for %${name} — import tasker-effect.prj.xml`
+              )
+            );
+          }
           // Dismissal detection: taskRunning(TE Config) flipping true → false
           // with the global still unset means the dialog ended without an
           // answer. Deliberately conservative: if we never observe the task
@@ -178,22 +190,28 @@ export const makeTaskerConfigProvider = (
           // instances (two keys prompting at once) a dismissal of one is
           // masked by the other and that waiter falls back to the timeout.
           let seenRunning = false;
-          for (let i = 0; i < attempts; i++) {
-            yield* Effect.sleep(Duration.millis(pollInterval));
-            const value = yield* readGlobal(path, name);
-            if (value !== undefined) return value;
-            const running = yield* tasker.taskRunning(CONFIG_TASK_NAME).pipe(
-              // A taskRunning failure must not fail the read: treat it as
-              // "still running" and let the overall timeout govern.
-              Effect.orElseSucceed(() => true)
-            );
-            if (running) {
-              seenRunning = true;
-            } else if (seenRunning) {
+          const pollOnce: Effect.Effect<string | undefined, ConfigError.ConfigError> =
+            Effect.gen(function* () {
+              yield* Effect.sleep(pollInterval);
+              // A transient read failure during polling must not abort the
+              // whole wait — treat it as "no answer yet" and let the overall
+              // timeout govern.
+              const value = yield* readGlobal(path, name).pipe(Effect.orElseSucceed(() => undefined));
+              if (value !== undefined) return value;
+              const running = yield* tasker.taskRunning(CONFIG_TASK_NAME).pipe(
+                // A taskRunning failure must not fail the read: treat it as
+                // "still running" and let the overall timeout govern.
+                Effect.orElseSucceed(() => true)
+              );
+              if (running) {
+                seenRunning = true;
+                return undefined;
+              }
+              if (!seenRunning) return undefined;
               // The store action sets the global just before the task ends;
               // one final read closes the race where the task finished
               // between the global read above and the taskRunning check.
-              const last = yield* readGlobal(path, name);
+              const last = yield* readGlobal(path, name).pipe(Effect.orElseSucceed(() => undefined));
               if (last !== undefined) return last;
               return yield* Effect.fail(
                 ConfigError.MissingData(
@@ -201,13 +219,17 @@ export const makeTaskerConfigProvider = (
                   `The ${CONFIG_TASK_NAME} prompt for Tasker global %${name} ended without an answer (dismissed?)`
                 )
               );
-            }
-          }
-          return yield* Effect.fail(
-            ConfigError.MissingData(
-              [...path],
-              `Tasker global %${name} is unset and the prompt was not answered within ${timeout}ms`
-            )
+            });
+          return yield* pollOnce.pipe(
+            Effect.repeat({ until: (v): v is string => v !== undefined }),
+            Effect.timeoutFail({
+              duration: timeout,
+              onTimeout: () =>
+                ConfigError.MissingData(
+                  [...path],
+                  `Tasker global %${name} is unset and the prompt was not answered within ${Duration.format(timeout)}`
+                ),
+            })
           );
         });
 
@@ -215,34 +237,27 @@ export const makeTaskerConfigProvider = (
         // the owner being interrupted mid-poll — the Deferred must be
         // completed and the in-flight entry removed, or every deduped waiter
         // hangs forever and the stale entry wedges all future reads of the
-        // key. Interruption is only observable inside restore(), so the
-        // completion + cleanup below are guaranteed to run.
+        // key.
         const cleanup = Ref.update(inFlight, (map) => {
           const next = new Map(map);
           next.delete(name);
           return next;
         });
-        const result: Exit.Exit<string, ConfigError.ConfigError> =
-          yield* Effect.uninterruptibleMask((restore) =>
-            restore(attempt).pipe(
-              Effect.exit,
-              Effect.tap((exit) =>
-                Deferred.done(
-                  deferred,
-                  Exit.isInterrupted(exit)
-                    ? Exit.fail(
-                        ConfigError.MissingData(
-                          [...path],
-                          `The prompt for Tasker global %${name} was interrupted before an answer arrived`
-                        )
-                      )
-                    : exit
-                )
-              ),
-              Effect.tap(() => cleanup)
-            )
-          );
-        return yield* result;
+        return yield* attempt.pipe(
+          Effect.onExit((exit) =>
+            Deferred.done(
+              deferred,
+              Exit.isInterrupted(exit)
+                ? Exit.fail(
+                    ConfigError.MissingData(
+                      [...path],
+                      `The prompt for Tasker global %${name} was interrupted before an answer arrived`
+                    )
+                  )
+                : exit
+            ).pipe(Effect.zipRight(cleanup))
+          )
+        );
       });
 
     const load = <A>(

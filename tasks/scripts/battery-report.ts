@@ -17,7 +17,7 @@ const program = Effect.gen(function* () {
   const tasker = yield* Tasker;
 
   const battery = yield* tasker.global("BATT");
-  const level = Number.parseInt(battery, 10);
+  const level = Number.parseInt(battery ?? "", 10);
 
   if (Number.isNaN(level)) {
     yield* tasker.flash("Battery level unknown");

@@ -6,13 +6,18 @@
  * silencer. Compile with `bun run compile` alongside the other automations.
  */
 
-import { Action, Trigger, Task, Profile } from "../../src/index.js";
+import { Action, Trigger, Task, Profile, cond } from "../../src/index.js";
 
-/** Silence the phone and cut radios overnight (22:30 → 06:30). */
+/**
+ * Silence the phone and cut radios while it is night, per %NIGHT_WINDOW.
+ * Driven by tasks/scripts/adaptive-night-mode.ts, which computes sunset/
+ * sunrise and flips the global — a Time context can't be moved by
+ * `enableProfile`, so the window itself lives in a variable trigger.
+ */
 export const nightMode = new Profile({
   name: "Night Mode",
   description: "Silence the phone and cut radios overnight",
-  triggers: [Trigger.time({ hour: 22, minute: 30 }, { to: { hour: 6, minute: 30 } })],
+  triggers: [Trigger.variable(cond("%NIGHT_WINDOW", "eq", "1"))],
   enter: new Task({
     name: "Night Mode On",
     actions: [

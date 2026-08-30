@@ -14,7 +14,6 @@
 import {
   Command,
   CommandExecutor,
-  FetchHttpClient,
   FileSystem,
   Path,
 } from "@effect/platform";
@@ -25,13 +24,11 @@ import {
   StorageWriteError,
   ZipExtractor as ZipExtractorTag,
   ZipExtractError,
-  type SyncOptions,
-  type SyncResult,
   type FileStoreShape,
+  type SyncOptions,
   type ZipExtractorShape,
 } from "./contract.js";
 import { ProfileSync } from "./core.js";
-import type { DownloadError, GitHubApiError, NothingToSyncError } from "./contract.js";
 
 /** FileStore backed by `FileSystem`/`Path`, undecided which implementation */
 export const FileStoreLive: Layer.Layer<
@@ -79,14 +76,14 @@ export const ZipExtractorLive: Layer.Layer<
 > = Layer.effect(
   ZipExtractorTag,
   Effect.gen(function* () {
-    const context = yield* Effect.context<CommandExecutor.CommandExecutor>();
     const fs = yield* FileSystem.FileSystem;
+    const executor = yield* CommandExecutor.CommandExecutor;
 
     return {
       extract: (zipPath, targetDir) =>
         Effect.gen(function* () {
           yield* fs.makeDirectory(targetDir, { recursive: true });
-          const exitCode = yield* Command.exitCode(
+          const exitCode = yield* executor.exitCode(
             Command.make("unzip", "-o", zipPath, "-d", targetDir)
           );
           if (exitCode !== 0) {
@@ -106,8 +103,7 @@ export const ZipExtractorLive: Layer.Layer<
               Effect.fail(
                 new ZipExtractError({ message: error.message, path: zipPath })
               ),
-          }),
-          Effect.provide(context)
+          })
         ),
     } satisfies ZipExtractorShape;
   })
@@ -118,37 +114,16 @@ export const ZipExtractorNodeLive: Layer.Layer<ZipExtractorTag> = ZipExtractorLi
   Layer.provide(NodeContext.layer)
 );
 
-/**
- * Compatibility service classes: same tags as the contract, with a `.Default`
- * layer pointing at the Node implementation so existing `FileStore.Default`
- * call sites (CLI, compile scripts) keep working.
- */
-export class FileStore extends FileStoreTag {
-  static readonly Default: Layer.Layer<FileStoreTag> = FileStoreNodeLive;
-}
-
-export class ZipExtractor extends ZipExtractorTag {
-  static readonly Default: Layer.Layer<ZipExtractorTag> = ZipExtractorNodeLive;
-}
-
 /** Everything ProfileSync needs, desktop edition */
 export const SyncNodeLive: Layer.Layer<ProfileSync> = ProfileSync.Default.pipe(
-  Layer.provide(
-    Layer.mergeAll(FetchHttpClient.layer, FileStoreNodeLive, ZipExtractorNodeLive)
-  )
+  Layer.provide(Layer.mergeAll(FileStoreNodeLive, ZipExtractorNodeLive))
 );
 
 /**
  * One-shot convenience: pull the latest release assets using the Node/Bun
  * services.
  */
-export const pullLatestProfiles = (
-  options: SyncOptions
-): Effect.Effect<
-  SyncResult,
-  GitHubApiError | DownloadError | NothingToSyncError | StorageWriteError
-> =>
-  Effect.gen(function* () {
-    const sync = yield* ProfileSync;
-    return yield* sync.pullLatestProfiles(options);
-  }).pipe(Effect.provide(SyncNodeLive));
+export const pullLatestProfiles = (options: SyncOptions) =>
+  ProfileSync.use((sync) => sync.pullLatestProfiles(options)).pipe(
+    Effect.provide(SyncNodeLive)
+  );

@@ -7,7 +7,7 @@
  * automations.
  */
 
-import { Action, Trigger, Task, Profile } from "../../src/index.js";
+import { Action, Trigger, Task, Profile, cond, l } from "../../src/index.js";
 
 /**
  * Turn on Android car mode while connected to the car stereo. The Bluetooth
@@ -35,9 +35,10 @@ export const drivingMode = new Profile({
 });
 
 /**
- * Auto-reply to incoming texts while %DRIVING is set. Raw JS is needed
- * because the DSL's SendSms takes a literal number; the sender is only known
- * at runtime (Tasker's %SMSRF event-local variable).
+ * Auto-reply to incoming texts while %DRIVING is set. Tasker's %SMSRF is an
+ * all-caps event-*local* (the sender's number), so `l("SMSRF")` is needed
+ * to read it as a local — the usual naming heuristic (`v()`) would treat an
+ * all-caps name as a global and read nothing.
  */
 export const drivingAutoReply = new Profile({
   name: "Driving Auto Reply",
@@ -46,14 +47,9 @@ export const drivingAutoReply = new Profile({
   enter: new Task({
     name: "Driving Reply",
     actions: [
-      Action.js(
-        [
-          'var sender = local("SMSRF");',
-          'if (global("DRIVING") === "1" && sender) {',
-          '  sendSMS(sender, "I\'m driving right now — I\'ll get back to you soon.", false);',
-          "}",
-        ].join("\n")
-      ),
+      Action.when(cond("%DRIVING", "eq", "1"), [
+        Action.sendSms(l("SMSRF"), "I'm driving right now — I'll get back to you soon."),
+      ]),
     ],
   }),
 });

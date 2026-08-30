@@ -8,14 +8,14 @@
  * needs no bundler and no runtime dependencies.
  */
 
-import { Effect, Match, Schema } from "effect";
+import { Array as Arr, Effect, Match, Order, Schema } from "effect";
 import {
   type Action,
+  type JsCode,
   type Text,
   type Trigger,
   type VolumeStream,
   Condition,
-  Interpolated,
   Profile,
   Project,
   Secret,
@@ -75,6 +75,16 @@ export interface CompileProjectOptions {
 /** Quote a value as a JavaScript literal */
 const js = (value: unknown): string => JSON.stringify(value);
 
+/**
+ * Sanitize a user-supplied string for interpolation into a `/** ... *\/`
+ * block comment: a `*\/` inside a name/description would otherwise close the
+ * comment early, either breaking the file or escaping into live top-level
+ * code, and a newline would otherwise let the string smuggle its own
+ * comment-close sequence across lines.
+ */
+const commentSafe = (v: string): string =>
+  v.replace(/\*\//g, "*\\/").replace(/[\r\n]+/g, " ");
+
 /** Turn a name into a safe kebab-case file slug */
 export const slugify = (name: string): string =>
   name
@@ -87,9 +97,15 @@ const indentLines = (lines: ReadonlyArray<string>, spaces: number): Array<string
   return lines.map((line) => (line === "" ? line : pad + line));
 };
 
-/** Expression reading a Tasker variable (global vs local by naming convention) */
-const readVarExpr = (name: string): string =>
-  isGlobalVariable(name)
+/**
+ * Expression reading a Tasker variable. An explicit `scope` (set by
+ * {@link VariableRef}'s `l()`/`v()` builders) wins; otherwise falls back to
+ * the {@link isGlobalVariable} naming heuristic, which cannot separate a
+ * user global from an all-caps built-in Tasker local (e.g. the SMS event's
+ * `%SMSRF`).
+ */
+const readVarExpr = (name: string, scope?: "global" | "local"): string =>
+  (scope ?? (isGlobalVariable(name) ? "global" : "local")) === "global"
     ? `global(${js(variableName(name))})`
     : `local(${js(variableName(name))})`;
 
@@ -102,14 +118,14 @@ const readVarExpr = (name: string): string =>
 export const emitText = (value: Text): string => {
   if (typeof value === "string") return js(value);
   if (value instanceof Secret) return `global(${js(value.name)})`;
-  if (value instanceof VariableRef) return readVarExpr(value.name);
+  if (value instanceof VariableRef) return readVarExpr(value.name, value.scope);
   return value.parts
     .map((part) =>
       typeof part === "string"
         ? js(part)
         : part instanceof Secret
           ? `global(${js(part.name)})`
-          : readVarExpr(part.name)
+          : readVarExpr(part.name, part.scope)
     )
     .join(" + ");
 };
@@ -119,22 +135,19 @@ export const emitText = (value: Text): string => {
  * and variable references are spliced in as `global()`/`local()`
  * expressions.
  */
-const emitJsCode = (code: Text): Array<string> => {
-  if (typeof code === "string") return code.split("\n");
-  if (code instanceof Interpolated) {
-    return code.parts
-      .map((part) =>
-        typeof part === "string"
-          ? part
-          : part instanceof Secret
-            ? `global(${js(part.name)})`
-            : readVarExpr(part.name)
-      )
-      .join("")
-      .split("\n");
-  }
-  return [`${emitText(code)};`];
-};
+const emitJsCode = (code: JsCode): Array<string> =>
+  typeof code === "string"
+    ? code.split("\n")
+    : code.parts
+        .map((part) =>
+          typeof part === "string"
+            ? part
+            : part instanceof Secret
+              ? `global(${js(part.name)})`
+              : readVarExpr(part.name, part.scope)
+        )
+        .join("")
+        .split("\n");
 
 /** Compile a Condition to a JavaScript boolean expression */
 export const conditionExpr = (condition: Condition): string => {
@@ -179,11 +192,27 @@ const VOLUME_FN: Record<VolumeStream, string> = {
 const opt = (value: Text | undefined): string =>
   value === undefined ? "undefined" : emitText(value);
 
+/**
+ * Drop trailing `"undefined"` argument holes so an omitted optional Tasker
+ * argument shortens the call instead of forwarding the literal identifier
+ * `undefined` (whether the bridge coerces that to null or to the string
+ * "undefined" cannot be checked from this repo — fewer arguments is the
+ * documented default path). Only sound where every trailing hole came from
+ * `opt()` on a simple optional value — not `sendIntent`'s trailing `extras`
+ * array or `loadApp`'s trailing boolean, so use this only for `PerformTask`
+ * and `PerformTaskerTask`.
+ */
+const trimTrailingUndefined = (args: ReadonlyArray<string>): Array<string> => {
+  let end = args.length;
+  while (end > 0 && args[end - 1] === "undefined") end--;
+  return args.slice(0, end);
+};
+
 /** Compile one action to JavaScript source lines (unindented) */
 export const emitAction = (action: Action): Array<string> =>
-  // The chain is split across two .pipe calls because a single call cannot
+  // The chain is split across three .pipe calls because a single call cannot
   // type it: Pipeable's pipe() is overloaded for at most 21 functions, and
-  // this match has 35 tags + Match.exhaustive. Merging them makes inference
+  // this match has 41 tags + Match.exhaustive. Merging them makes inference
   // collapse to `never` (verified: tsc rejects the merged chain).
   // @effect-diagnostics-next-line unnecessaryPipeChain:off
   Match.value(action).pipe(
@@ -208,10 +237,10 @@ export const emitAction = (action: Action): Array<string> =>
     // the target task name (%par2 stays free for its exit switch), so this
     // variant cannot forward custom parameters.
     Match.tag("PerformTask", (a) => [
-      `performTask(${js(DISPATCH_TASK_NAME)}, ${a.priority}, ${js(a.taskName)}, undefined);`,
+      `performTask(${trimTrailingUndefined([js(DISPATCH_TASK_NAME), String(a.priority), js(a.taskName), "undefined"]).join(", ")});`,
     ]),
     Match.tag("PerformTaskerTask", (a) => [
-      `performTask(${js(a.taskName)}, ${a.priority}, ${opt(a.parameterOne)}, ${opt(a.parameterTwo)});`,
+      `performTask(${trimTrailingUndefined([js(a.taskName), String(a.priority), opt(a.parameterOne), opt(a.parameterTwo)]).join(", ")});`,
     ]),
     Match.tag("EnableProfile", (a) => [
       `enableProfile(${js(a.profileName)}, ${a.enable});`,
@@ -264,7 +293,7 @@ export const emitAction = (action: Action): Array<string> =>
     Match.tag("SetMobileData", (a) => [`mobileData(${a.on});`]),
     Match.tag("SetAutoSync", (a) => [`setAutoSync(${a.on});`]),
     Match.tag("SetVolume", (a) => [
-      `${VOLUME_FN[a.stream]}(${a.level}, ${a.display}, ${a.sound});`,
+      `${VOLUME_FN[a.stream]}(${typeof a.level === "number" ? a.level : emitText(a.level)}, ${a.display}, ${a.sound});`,
     ]),
     Match.tag("MediaControl", (a) => [`mediaControl(${js(a.action)});`]),
     Match.tag("MusicPlay", (a) => [
@@ -320,8 +349,8 @@ export const emitAction = (action: Action): Array<string> =>
 
 const header = (title: string, description?: string): Array<string> => [
   "/**",
-  ` * ${title}`,
-  ...(description !== undefined ? [` * ${description}`] : []),
+  ` * ${commentSafe(title)}`,
+  ...(description !== undefined ? [` * ${commentSafe(description)}`] : []),
   " *",
   " * Generated by tasker-effect. Do not edit by hand.",
   " * Run in Tasker with a JavaScript action pointing at this file.",
@@ -531,7 +560,7 @@ export const compileDispatcherJs = (project: Project): string => {
 
   return [
     ...header(
-      `Dispatcher: ${project.name}`,
+      `Dispatcher: ${commentSafe(project.name)}`,
       "Single entry point that runs the mapped file for the calling profile or %par1."
     ),
     '"use strict";',
@@ -698,7 +727,7 @@ export const syncBootstrapJs = (
  */
 const scaffoldHeader = (title: string): Array<string> => [
   "/**",
-  ` * ${title}`,
+  ` * ${commentSafe(title)}`,
   " *",
   " * Generated by tasker-effect. Do not edit by hand.",
   " * Evaluated by the imported TE Config task's stub scriptlet; the stub's",
@@ -1121,8 +1150,25 @@ export const collectProjectSecrets = (project: Project): Array<Secret> => {
   for (const task of project.tasks) {
     addFrom(`task "${task.name}"`, task.actions);
   }
-  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // Arr.sort accepts any Iterable, so the Map's value iterator needs no
+  // array-copy first — it isn't a defensive copy either: Arr.sort never
+  // mutates its input.
+  return Arr.sort(
+    byName.values(),
+    Order.mapInput(Order.string, (s: Secret) => s.name)
+  );
 };
+
+/**
+ * The wire shape of `secrets.json`: a named, exported contract a test or
+ * third-party generator can decode against. Renaming a `Secret` field
+ * already fails typecheck here, and the two device-side consumers are
+ * emitted ES5 that cannot use a Schema either way — this buys a documented
+ * contract, not drift protection.
+ */
+export const SecretManifest = Schema.Array(
+  Schema.Struct({ name: Schema.String, description: Schema.String })
+);
 
 /**
  * The secrets manifest shipped with the release assets and synced to the
@@ -1132,10 +1178,7 @@ export const collectProjectSecrets = (project: Project): Array<Secret> => {
  */
 export const compileSecretsJson = (project: Project): string =>
   `${JSON.stringify(
-    collectProjectSecrets(project).map(({ name, description }) => ({
-      name,
-      description,
-    })),
+    Schema.encodeSync(SecretManifest)(collectProjectSecrets(project)),
     null,
     2
   )}\n`;
@@ -1161,21 +1204,46 @@ const collectTaskRefs = (actions: ReadonlyArray<Action>): Array<string> => {
 
 /**
  * Fail compilation if any DSL `PerformTask` references a task that is not in
- * `project.tasks` — those are the only names the dispatcher's task map knows.
- * Only Project compilation can run this check: a standalone task or profile
- * has no surrounding project to resolve references against.
+ * `project.tasks` — those are the only names the dispatcher's task map
+ * knows — if a task name duplicates another task or profile name, or if a
+ * name is reused within `project.tasks` or within `project.profiles` (the
+ * dispatcher's map literals silently keep only the last key). Every problem
+ * found is reported together in one `CompileError`, rather than stopping at
+ * the first. Only Project compilation can run this check: a standalone task
+ * or profile has no surrounding project to resolve references against.
  */
 const checkTaskReferences = (project: Project): void => {
   const targets = project.tasks.map((task) => task.name);
   const targetList =
     targets.length > 0 ? targets.map((name) => `"${name}"`).join(", ") : "(none)";
+  const problems: Array<string> = [];
+
+  const findDuplicates = (label: string, names: ReadonlyArray<string>): void => {
+    const seen = new Set<string>();
+    for (const name of names) {
+      if (seen.has(name)) problems.push(`Duplicate ${label} name "${name}"`);
+      seen.add(name);
+    }
+  };
+  findDuplicates("task", targets);
+  findDuplicates("profile", project.profiles.map((profile) => profile.name));
+
+  // The dispatcher resolves PROFILES before TASKS (compileDispatcherJs), so
+  // a name shared between both is ambiguous: performTask(name) would
+  // silently run the profile's enter file instead of the standalone task.
+  const profileNames = new Set(project.profiles.map((profile) => profile.name));
+  for (const task of project.tasks) {
+    if (profileNames.has(task.name)) {
+      problems.push(
+        `"${task.name}" is both a profile and a task; the dispatcher resolves %par1 against profiles first`
+      );
+    }
+  }
+
   const check = (owner: string, task: Task): void => {
     for (const ref of collectTaskRefs(task.actions)) {
       if (!targets.includes(ref)) {
-        throw new CompileError({
-          message: `${owner} references unknown task "${ref}". Valid targets: ${targetList}`,
-          source: project.name,
-        });
+        problems.push(`${owner} references unknown task "${ref}"`);
       }
     }
   };
@@ -1188,6 +1256,61 @@ const checkTaskReferences = (project: Project): void => {
   for (const task of project.tasks) {
     check(`Task "${task.name}"`, task);
   }
+
+  if (problems.length > 0) {
+    throw new CompileError({
+      message: `${problems.join("; ")}. Valid targets: ${targetList}`,
+      source: project.name,
+    });
+  }
+};
+
+/** Reserved scaffold filenames a task/profile's slugified name must not collide with */
+const RESERVED_FILENAMES: ReadonlySet<string> = new Set([
+  DISPATCHER_FILENAME,
+  CONFIG_SCAN_FILENAME,
+  CONFIG_LABEL_FILENAME,
+  SECRETS_FILENAME,
+  TASKER_PROJECT_XML_FILENAME,
+  SYNC_SCRIPT_FILENAME,
+  "README.md",
+]);
+
+/**
+ * Fail compilation if two definitions would slugify to the same emitted
+ * filename, or if one slugifies to a reserved scaffold filename — either
+ * way, one `CompiledFile` would silently overwrite another's (or the
+ * scaffold's) content, with the dispatcher then routing both source names to
+ * just one file. Every collision is reported together in one `CompileError`.
+ */
+const checkFilenames = (project: Project): void => {
+  const claimed = new Map<string, string>();
+  const problems: Array<string> = [];
+  const claim = (filename: string, owner: string): void => {
+    if (RESERVED_FILENAMES.has(filename)) {
+      problems.push(`${owner} slugifies to the reserved filename "${filename}"`);
+      return;
+    }
+    const existing = claimed.get(filename);
+    if (existing !== undefined) {
+      problems.push(`${owner} and ${existing} both slugify to filename "${filename}"`);
+      return;
+    }
+    claimed.set(filename, owner);
+  };
+  for (const profile of project.profiles) {
+    const slug = slugify(profile.name);
+    claim(`${slug}.enter.js`, `Profile "${profile.name}" (enter)`);
+    if (profile.exit !== undefined) {
+      claim(`${slug}.exit.js`, `Profile "${profile.name}" (exit)`);
+    }
+  }
+  for (const task of project.tasks) {
+    claim(`${slugify(task.name)}.js`, `Task "${task.name}"`);
+  }
+  if (problems.length > 0) {
+    throw new CompileError({ message: problems.join("; "), source: project.name });
+  }
 };
 
 /** Compile a whole project to JS files plus a setup README */
@@ -1196,6 +1319,7 @@ export const compileProjectFiles = (
   options: CompileProjectOptions
 ): Array<CompiledFile> => {
   checkTaskReferences(project);
+  checkFilenames(project);
   const files: Array<CompiledFile> = [];
   for (const profile of project.profiles) {
     files.push(...compileProfileFiles(profile));
@@ -1269,13 +1393,26 @@ export const compileProjectFiles = (
 // Compiler service
 // =============================================================================
 
-const tryCompile = <A>(run: () => A, source: string): Effect.Effect<A, CompileError> =>
+/**
+ * Run a throwing pure function as an Effect, converting a genuine
+ * `CompileError` into a typed failure but letting anything else — in
+ * particular a `Match.exhaustive` defect from an internal bug the compiler's
+ * own linker cannot catch — re-throw and stay a defect. Effect.try's
+ * `catch` normally *must* return an `E`; throwing from inside it here is
+ * deliberate: the exception propagates out of the surrounding
+ * `Effect.suspend` the same way an `Effect.sync` thunk's throw would, so the
+ * fiber runtime records it as `Cause.die`, not a laundered typed error. This
+ * is the only place a throwing pure compiler function is wrapped —
+ * `compileTaskToJs`/`compileProfileFiles` are actually total (no `throw`
+ * site of their own) and are run with plain `Effect.sync` below.
+ */
+const tryCompile = <A>(run: () => A): Effect.Effect<A, CompileError> =>
   Effect.try({
     try: run,
-    catch: (cause) =>
-      cause instanceof CompileError
-        ? cause
-        : new CompileError({ message: String(cause), source }),
+    catch: (cause) => {
+      if (cause instanceof CompileError) return cause;
+      throw cause;
+    },
   });
 
 /**
@@ -1286,24 +1423,19 @@ export class TaskerCompiler extends Effect.Service<TaskerCompiler>()(
   "TaskerCompiler",
   {
     sync: () => ({
-      compileTask: (task: Task): Effect.Effect<CompiledFile, CompileError> =>
-        tryCompile(
-          () => ({
-            filename: `${slugify(task.name)}.js`,
-            content: compileTaskToJs(task),
-            kind: "task-js" as const,
-          }),
-          task.name
-        ),
-      compileProfile: (
-        profile: Profile
-      ): Effect.Effect<Array<CompiledFile>, CompileError> =>
-        tryCompile(() => compileProfileFiles(profile), profile.name),
+      compileTask: (task: Task): Effect.Effect<CompiledFile> =>
+        Effect.sync(() => ({
+          filename: `${slugify(task.name)}.js`,
+          content: compileTaskToJs(task),
+          kind: "task-js" as const,
+        })),
+      compileProfile: (profile: Profile): Effect.Effect<Array<CompiledFile>> =>
+        Effect.sync(() => compileProfileFiles(profile)),
       compileProject: (
         project: Project,
         options: CompileProjectOptions
       ): Effect.Effect<Array<CompiledFile>, CompileError> =>
-        tryCompile(() => compileProjectFiles(project, options), project.name),
+        tryCompile(() => compileProjectFiles(project, options)),
     }),
   }
 ) {}

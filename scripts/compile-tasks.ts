@@ -12,11 +12,12 @@
  */
 
 import { FileSystem, Path } from "@effect/platform";
-import { NodeContext } from "@effect/platform-node";
+import { NodeContext, NodeRuntime } from "@effect/platform-node";
 import { Effect, Layer, Schema } from "effect";
 import { detectRepoFromGit } from "../src/cli.js";
 import { TaskerCompiler } from "../src/compiler.js";
-import { FileStore } from "../src/sync/node.js";
+import { FileStoreNodeLive } from "../src/sync/node.js";
+import { FileStore } from "../src/sync/contract.js";
 import { automations } from "../tasks/automations.js";
 
 const OUTPUT_DIR = "dist-tasker";
@@ -85,21 +86,10 @@ const main = Effect.gen(function* () {
   });
 });
 
-void Effect.runPromise(
+NodeRuntime.runMain(
   main.pipe(
     Effect.provide(
-      Layer.mergeAll(TaskerCompiler.Default, FileStore.Default, NodeContext.layer)
-    ),
-    Effect.catchAllCause((cause) =>
-      Effect.logError("Compilation failed", cause).pipe(
-        Effect.andThen(Effect.sync(() => {
-          process.exitCode = 1;
-        }))
-      )
+      Layer.mergeAll(TaskerCompiler.Default, FileStoreNodeLive, NodeContext.layer)
     )
   )
-).catch(() => {
-  // All failures are logged and handled above; this only guards against the
-  // runtime itself failing to start.
-  process.exitCode = 1;
-});
+);
