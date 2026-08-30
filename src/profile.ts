@@ -814,6 +814,13 @@ type FlatActionEncoded = Schema.Schema.Encoded<
   (typeof flatActionMembers)[number]
 >;
 
+// A plain interface, not a schema, on purpose: `If`'s own field is already
+// a real Schema.TaggedClass, validated at runtime by `If` itself via
+// `condition`/`then`/`orElse`. This interface exists only to give
+// `Schema.suspend`'s explicit `Schema.Schema<Action, ActionEncoded>`
+// annotation (above, in `If`'s `then`/`orElse` fields) a type to close the
+// cycle with: `ActionEncoded` needs `If`'s encoded shape, and `If`'s schema
+// needs `ActionEncoded` — deriving both from one schema union is circular.
 /** Encoded (wire) form of an {@link If} action */
 interface IfEncoded {
   readonly _tag: "If";

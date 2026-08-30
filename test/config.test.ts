@@ -498,7 +498,7 @@ describe("makeTaskerConfigProvider", () => {
       })
   );
 
-  it.live("fails fast with MissingData when performTask() returns false (TE Config not imported)", () =>
+  it.effect("fails fast with MissingData when performTask() returns false (TE Config not imported)", () =>
     Effect.gen(function* () {
       const { api, calls } = makeTestTasker({
         global: () => Effect.succeed(""),
