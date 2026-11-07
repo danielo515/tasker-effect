@@ -12,12 +12,14 @@ import { Array as Arr, Effect, Match, Order, Schema } from "effect";
 import {
   type Action,
   type JsCode,
+  type ShowScene,
   type Text,
   type Trigger,
   type VolumeStream,
   Condition,
   Profile,
   Project,
+  SCENE_JS_DIR_PLACEHOLDER,
   Secret,
   Task,
   VariableRef,
@@ -208,11 +210,29 @@ const trimTrailingUndefined = (args: ReadonlyArray<string>): Array<string> => {
   return args.slice(0, end);
 };
 
+/**
+ * `ShowScene`: resolve the device JS directory (same %TE_JS_DIR convention as
+ * the dispatcher), read the synced layout JSON, substitute the directory
+ * placeholder and hand the JSON to the generic `TE Show Scene` scaffolding
+ * task as `%par1`.
+ */
+const emitShowScene = (a: ShowScene): Array<string> => [
+  '__out = global("TE_JS_DIR");',
+  `if (__out === undefined || __out === "") __out = ${js(DEFAULT_DEVICE_JS_DIR)};`,
+  'if (__out.charAt(__out.length - 1) !== "/") __out = __out + "/";',
+  `var __scene = readFile(__out + ${js(a.file)});`,
+  'if (__scene === undefined || __scene === "") {',
+  `  flash(${js(`tasker-effect: could not read scene ${a.file}`)});`,
+  "} else {",
+  `  performTask(${js(SHOW_SCENE_TASK_NAME)}, ${a.priority}, __scene.split(${js(SCENE_JS_DIR_PLACEHOLDER)}).join(__out));`,
+  "}",
+];
+
 /** Compile one action to JavaScript source lines (unindented) */
 export const emitAction = (action: Action): Array<string> =>
   // The chain is split across three .pipe calls because a single call cannot
   // type it: Pipeable's pipe() is overloaded for at most 21 functions, and
-  // this match has 41 tags + Match.exhaustive. Merging them makes inference
+  // this match has 42 tags + Match.exhaustive. Merging them makes inference
   // collapse to `never` (verified: tsc rejects the merged chain).
   // @effect-diagnostics-next-line unnecessaryPipeChain:off
   Match.value(action).pipe(
@@ -242,6 +262,7 @@ export const emitAction = (action: Action): Array<string> =>
     Match.tag("PerformTaskerTask", (a) => [
       `performTask(${trimTrailingUndefined([js(a.taskName), String(a.priority), opt(a.parameterOne), opt(a.parameterTwo)]).join(", ")});`,
     ]),
+    Match.tag("ShowScene", emitShowScene),
     Match.tag("EnableProfile", (a) => [
       `enableProfile(${js(a.profileName)}, ${a.enable});`,
     ]),
@@ -509,6 +530,9 @@ export const SYNC_TASK_NAME = "TE Sync";
 /** Name of the secrets-prompting task created by the import XML */
 export const CONFIG_TASK_NAME = "TE Config";
 
+/** Name of the generic Scenes v2 task created by the import XML */
+export const SHOW_SCENE_TASK_NAME = "TE Show Scene";
+
 /** Name of the periodic sync profile created by the import XML */
 export const SYNC_PROFILE_NAME = "TE Sync";
 
@@ -530,7 +554,7 @@ export const CONFIG_LABEL_FILENAME = "te-config-label.js";
  * stamp against its own baked-in version and flashes a re-import warning
  * (without blocking dispatch) when the imported XML is older.
  */
-export const SCAFFOLD_VERSION = 2;
+export const SCAFFOLD_VERSION = 3;
 
 /**
  * Compile the dispatcher: a single JS file that resolves which compiled file
@@ -917,6 +941,7 @@ const DISPATCH_TASK_ID = 1;
 const SYNC_TASK_ID = 2;
 const CONFIG_TASK_ID = 3;
 const SYNC_PROFILE_ID = 4;
+const SHOW_SCENE_TASK_ID = 5;
 
 /** Options for the generated project XML */
 export interface TaskerProjectXmlOptions {
@@ -942,6 +967,9 @@ export interface TaskerProjectXmlOptions {
  *   lives in the synced te-config-*.js files; the XML holds only stubs that
  *   `eval` them (polling on first run), so logic fixes never need a
  *   re-import.
+ * - Task `TE Show Scene`: Show Scene v2 (479) with the layout JSON from
+ *   `%par1`, used by the compiled `ShowScene` action — scenes themselves
+ *   ship as synced JSON files, never in the XML.
  * - Profile `TE Sync`: Time context repeating every 6 hours, enter task
  *   `TE Sync`.
  *
@@ -986,7 +1014,7 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
     "\t\t<cdate>1</cdate>",
     "\t\t<name>Tasker Effect</name>",
     `\t\t<pids>${SYNC_PROFILE_ID}</pids>`,
-    `\t\t<tids>${DISPATCH_TASK_ID},${SYNC_TASK_ID},${CONFIG_TASK_ID}</tids>`,
+    `\t\t<tids>${DISPATCH_TASK_ID},${SYNC_TASK_ID},${CONFIG_TASK_ID},${SHOW_SCENE_TASK_ID}</tids>`,
     "\t</Project>",
     // TE Dispatch: run the dispatcher file (Auto Exit on). The 600s action
     // timeout must exceed the config provider's default promptTimeoutMillis
@@ -1044,6 +1072,36 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
       ...xmlAction(6, 40, []),
       ...xmlAction(7, 38, []),
     ]),
+    // TE Show Scene: Show Scene v2 (code 479) with the layout JSON passed in
+    // %par1 by the compiled ShowScene action. Argument layout copied from a
+    // real Tasker 6.7 export; every argument except Name/JSON (arg1) keeps
+    // its default, so the layout's own defaultDisplayMode applies.
+    ...xmlTask(SHOW_SCENE_TASK_ID, SHOW_SCENE_TASK_NAME, [
+      ...xmlAction(0, 479, [
+        '\t\t\t<Bundle sr="arg0">',
+        '\t\t\t\t<Vals sr="val">',
+        "\t\t\t\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES>&lt;StringArray sr=\"\"/&gt;</net.dinglisch.android.tasker.RELEVANT_VARIABLES>",
+        "\t\t\t\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>[Ljava.lang.String;</net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>",
+        "\t\t\t\t</Vals>",
+        "\t\t\t</Bundle>",
+        strArg(1, "%par1"),
+        strArg(10, ""),
+        strArg(11, ""),
+        intArg(12, 0),
+        intArg(13, 0),
+        intArg(14, 0),
+        strArg(15, ""),
+        intArg(16, 1),
+        strArg(2, ""),
+        strArg(3, ""),
+        strArg(4, ""),
+        strArg(5, ""),
+        strArg(6, ""),
+        strArg(7, ""),
+        intArg(8, 1),
+        strArg(9, ""),
+      ]),
+    ]),
     "</TaskerData>",
     "",
   ].join("\n");
@@ -1055,7 +1113,8 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
   `1. Import \`${TASKER_PROJECT_XML_FILENAME}\` once in Tasker (long-press the home`,
   "   icon at the bottom left → Import Project). This creates the shared task",
   `   \`${DISPATCH_TASK_NAME}\`, the self-bootstrapping \`${SYNC_TASK_NAME}\` task with its periodic`,
-  `   profile, and the \`${CONFIG_TASK_NAME}\` secrets prompter. Enable the \`${SYNC_PROFILE_NAME}\``,
+  `   profile, the \`${CONFIG_TASK_NAME}\` secrets prompter and the generic \`${SHOW_SCENE_TASK_NAME}\``,
+  "   task used by `Action.showScene`. Enable the `" + SYNC_PROFILE_NAME + "`",
   "   profile (or run the task once) and it downloads everything else by",
   "   itself — no files need to be copied manually.",
   "2. For each profile below, configure its trigger(s) in the Tasker UI and",

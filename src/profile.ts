@@ -435,6 +435,34 @@ export class PerformTaskerTask extends Schema.TaggedClass<PerformTaskerTask>()(
   }
 ) {}
 
+/**
+ * Show a Scenes v2 layout whose JSON ships as a synced release asset (e.g. a
+ * `.scene.json` next to the compiled JS). The compiled JS reads the file from
+ * the device JS directory, replaces {@link SCENE_JS_DIR_PLACEHOLDER} with that
+ * directory (so a layout can point a WebView at a synced `.html` file without
+ * hard-coding the path) and hands the JSON to the generic `TE Show Scene` task
+ * from the imported scaffolding — Tasker JavaScript cannot show a scene by
+ * itself, and the scaffolding XML must never contain feature-specific scenes.
+ *
+ * The runtime screen ID is the layout's `name`, so showing the same layout
+ * again updates it in place instead of stacking a second copy.
+ */
+export class ShowScene extends Schema.TaggedClass<ShowScene>()("ShowScene", {
+  /** File name of the layout JSON inside the device JS directory */
+  file: Schema.NonEmptyString.pipe(
+    Schema.filter((file) => !file.includes("/"), {
+      message: () => "scene file must be a bare file name inside the JS directory",
+    })
+  ),
+  priority: Schema.optionalWith(
+    Schema.Number.pipe(Schema.int(), Schema.between(1, 50)),
+    { default: () => 10 }
+  ),
+}) {}
+
+/** Placeholder replaced by the device JS directory inside scene JSON files */
+export const SCENE_JS_DIR_PLACEHOLDER = "{{TE_JS_DIR}}";
+
 /** Enable or disable a Tasker profile */
 export class EnableProfile extends Schema.TaggedClass<EnableProfile>()(
   "EnableProfile",
@@ -776,6 +804,7 @@ const flatActionMembers = [
   SetLocal,
   PerformTask,
   PerformTaskerTask,
+  ShowScene,
   EnableProfile,
   Wait,
   Shell,
@@ -1138,6 +1167,12 @@ export const Action = {
       parameterOne: options?.parameterOne,
       parameterTwo: options?.parameterTwo,
     }),
+  /**
+   * Show a Scenes v2 layout from a synced JSON file in the device JS
+   * directory (see {@link ShowScene})
+   */
+  showScene: (file: string, options?: { readonly priority?: number }) =>
+    new ShowScene({ file, priority: options?.priority }),
   /** Enable/disable a DSL profile by reference */
   enableProfile: (profile: Profile, enable = true) =>
     new EnableProfile({ profileName: profile.name, enable }),

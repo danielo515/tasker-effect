@@ -1,0 +1,20 @@
+{
+  "name": "Clipboard History",
+  "description": "Clipboard history viewer (tasker-effect). The WebView path is filled in by the ShowScene action.",
+  "defaultDisplayMode": "Dialog",
+  "root": {
+    "type": "Column",
+    "id": "root",
+    "modifiers": [{ "type": "FillWidth" }],
+    "children": [
+      {
+        "type": "WebView",
+        "id": "history",
+        "content": "{{TE_JS_DIR}}clipboard-history.html",
+        "jsBridgeEnabled": true,
+        "backgroundColor": "#1C1B1F",
+        "modifiers": [{ "type": "FillWidth" }, { "type": "Size", "height": "460" }]
+      }
+    ]
+  }
+}

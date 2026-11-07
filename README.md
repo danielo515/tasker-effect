@@ -116,6 +116,25 @@ Action.enableTaskerProfile("Hand Made Profile", false);
 
 These are not validated — the compiler cannot see what exists on-device.
 
+**Scenes v2 / WebView UIs:** Tasker JavaScript cannot show a scene, so
+`Action.showScene` reads a [Scenes v2](https://tasker.joaoapps.com/userguide/en/scenes_v2.html)
+layout JSON synced next to the compiled JS and hands it to the generic
+`TE Show Scene` task from the imported scaffolding:
+
+```typescript
+Action.showScene("clipboard-history.scene.json");
+```
+
+Put layouts and the pages they load in `tasks/web/` — `bun run compile`
+copies them to `dist-tasker/` and they sync like the JS (`.json`/`.html`).
+Inside a layout, `{{TE_JS_DIR}}` is replaced with the device JS directory,
+so a WebView can load a synced page with
+`"content": "{{TE_JS_DIR}}page.html"`. With `"jsBridgeEnabled": true` the
+page talks to Tasker through the `Tasker` bridge object
+(`Tasker.getVariable("MY_GLOBAL")`, `Tasker.setClipboard({ text })`,
+`Tasker.dismissLayout(Tasker.getCurrentScreenId())`, …).
+`tasks/clipboard-history.ts` is a complete example.
+
 **Linker check:** compiling a `Project` fails with a `CompileError` if any
 DSL `performTask` references a task that is not in `project.tasks`, naming
 the offending profile/task and listing the valid targets. Standalone

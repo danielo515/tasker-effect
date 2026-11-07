@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clipboard History</title>
+<style>
+  :root {
+    --bg: #1c1b1f; --card: #2b2930; --text: #e6e1e5; --muted: #a8a2ad;
+    --accent: #d0bcff; --accent-text: #381e72;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fffbfe; --card: #f3edf7; --text: #1c1b1f; --muted: #625b71;
+      --accent: #6750a4; --accent-text: #ffffff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, Roboto, sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 16px 8px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .clear { background: none; border: 0; color: var(--muted); font: inherit;
+    font-size: 14px; padding: 8px; }
+  ul { list-style: none; margin: 0; padding: 0 12px 12px; }
+  li { background: var(--card); border-radius: 16px; margin-bottom: 8px;
+    padding: 12px 14px; cursor: pointer; transition: transform .08s; }
+  li:active { transform: scale(.98); }
+  .text { white-space: pre-wrap; word-break: break-word; display: -webkit-box;
+    -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  li.copied { background: var(--accent); color: var(--accent-text); }
+  li.copied .meta { color: inherit; }
+  .empty { color: var(--muted); text-align: center; padding: 32px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Clipboard</h1>
+  <button class="clear" id="clear" type="button">Clear</button>
+</header>
+<ul id="list"></ul>
+<p class="empty" id="empty" hidden>Nothing copied yet.</p>
+<script>
+  // Runs inside a Tasker Scenes v2 WebView with the JS bridge enabled.
+  // Outside Tasker (e.g. a desktop browser) it falls back to sample data.
+  var HISTORY_VAR = "CLIPBOARD_HISTORY";
+  var bridge = window.Tasker;
+
+  function readHistory() {
+    if (!bridge) {
+      return [
+        { text: "Sample entry, open this inside Tasker", at: Date.now() - 60000 },
+        { text: "https://example.com", at: Date.now() - 3600000 }
+      ];
+    }
+    try {
+      var parsed = JSON.parse(bridge.getVariable(HISTORY_VAR) || "[]");
+      return parsed instanceof Array ? parsed : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function ago(at) {
+    var seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+    if (seconds < 60) return "just now";
+    var minutes = Math.round(seconds / 60);
+    if (minutes < 60) return minutes + " min ago";
+    var hours = Math.round(minutes / 60);
+    if (hours < 24) return hours + " h ago";
+    return Math.round(hours / 24) + " d ago";
+  }
+
+  function close() {
+    if (bridge) bridge.dismissLayout(bridge.getCurrentScreenId());
+  }
+
+  function copy(entry, item) {
+    item.classList.add("copied");
+    item.querySelector(".meta").textContent = "Copied";
+    if (!bridge) return;
+    bridge.setClipboard({ text: entry.text }).then(
+      function () { setTimeout(close, 250); },
+      function (err) { item.querySelector(".meta").textContent = "Copy failed: " + err.message; }
+    );
+  }
+
+  function render() {
+    var history = readHistory();
+    var list = document.getElementById("list");
+    list.textContent = "";
+    document.getElementById("empty").hidden = history.length > 0;
+    history.forEach(function (entry) {
+      var item = document.createElement("li");
+      var text = document.createElement("div");
+      text.className = "text";
+      text.textContent = entry.text;
+      var meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = entry.at ? ago(entry.at) : "";
+      item.appendChild(text);
+      item.appendChild(meta);
+      item.addEventListener("click", function () { copy(entry, item); });
+      list.appendChild(item);
+    });
+  }
+
+  document.getElementById("clear").addEventListener("click", function () {
+    if (bridge) bridge.setVariable(HISTORY_VAR, "[]");
+    render();
+  });
+
+  if (bridge && bridge.onVariableChanged) {
+    bridge.onVariableChanged(HISTORY_VAR, render);
+  }
+  render();
+</script>
+</body>
+</html>

@@ -6,6 +6,8 @@
  *   the tasker-effect compiler, plus a setup README.
  * - tasks/scripts/*.ts (Effect-based scripts) → single-file bundles via
  *   Bun.build, ready to run in Tasker with Auto Exit disabled.
+ * - tasks/web/* (static assets: Scenes v2 layout JSON, WebView HTML) →
+ *   copied verbatim, so they sync to the device next to the JS.
  *
  * Output lands in dist-tasker/, which CI uploads as the `tasker-js`
  * artifact and attaches to releases.
@@ -22,6 +24,7 @@ import { automations } from "../tasks/automations.js";
 
 const OUTPUT_DIR = "dist-tasker";
 const SCRIPTS_DIR = "tasks/scripts";
+const WEB_DIR = "tasks/web";
 
 class BundleError extends Schema.TaggedError<BundleError>()("BundleError", {
   message: Schema.String,
@@ -76,13 +79,29 @@ const bundleEffectScripts = Effect.gen(function* () {
   return entrypoints.length;
 });
 
+const copyWebAssets = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (!(yield* fs.exists(WEB_DIR))) return 0;
+
+  const names = yield* fs.readDirectory(WEB_DIR);
+  yield* fs.makeDirectory(OUTPUT_DIR, { recursive: true });
+  for (const name of names) {
+    yield* fs.copyFile(path.join(WEB_DIR, name), path.join(OUTPUT_DIR, name));
+    yield* Effect.log("Copied", { asset: name });
+  }
+  return names.length;
+});
+
 const main = Effect.gen(function* () {
   const dslCount = yield* compileDslProject;
   const bundleCount = yield* bundleEffectScripts;
+  const webCount = yield* copyWebAssets;
   yield* Effect.log("Compilation complete", {
     output: OUTPUT_DIR,
     dslFiles: dslCount,
     bundledScripts: bundleCount,
+    webAssets: webCount,
   });
 });
 
