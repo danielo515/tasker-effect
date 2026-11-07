@@ -13,6 +13,20 @@
     // DSL values are Schema.TaggedClass instances validated at construction;
     // `instanceof Task`/`Profile`/... in the compiler and CLI is the intended
     // nominal identity check, not a structural one.
-    "effecttsgo/instance-of-schema": "off"
-  }
+    "effecttsgo/instance-of-schema": "off",
+    // Fixed cyclomatic complexity ceiling: split a function into small named
+    // helpers rather than raising the limit.
+    "complexity": ["error", { "max": 5 }]
+  },
+  "overrides": [
+    {
+      // Test bodies are flat sequences of assertions; every `?.` on a
+      // looked-up fixture counts as a branch, which says nothing about the
+      // complexity of the code under test.
+      "files": ["test/**"],
+      "rules": {
+        "complexity": "off"
+      }
+    }
+  ]
 }

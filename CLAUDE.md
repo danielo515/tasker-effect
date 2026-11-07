@@ -66,27 +66,26 @@ bin/tasker-effect.mjs     # CLI entry (npm bin)
 ```bash
 bun install          # Install deps (prepare patches tsc + oxlint via @effect/tsgo)
 bun run typecheck    # Type check (src/ only; emits Effect LSP diagnostics too)
-bun run lint         # oxlint incl. type-aware Effect LSP rules; warnings fail
+bun run lint         # oxlint incl. type-aware Effect LSP rules and `complexity` ≤ 5; warnings fail
 bun run test         # Run tests (vitest + @effect/vitest — NOT `bun test`)
-bun run test:coverage # Run tests with v8 coverage; enforces the 100% thresholds in vitest.config.ts
+bun run test:coverage # Run tests with v8 coverage; coverage floor 90/90/85/85 via vitest thresholds
 bun run build        # Compile library to dist/ (npm publish surface)
 bun run compile      # Compile tasks/ to dist-tasker/ (Tasker-ready JS)
 ```
 
 Linting runs on every PR (CI `verify` job) as ONE command: `bun run lint`.
+Besides the Effect rules, it enforces oxlint `complexity` ≤ 5 (cyclomatic
+complexity per function, configured in `.oxlintrc.json`; tests under `test/`
+are exempt because optional chaining in assertions inflates the count). When
+a function exceeds it, split it into small named helpers (or destructure
+optional options with defaults once, instead of repeating `options?.x ?? y`)
+rather than raising the limit.
 `bun run test:coverage` is what CI runs for the test step: `vitest.config.ts`
-sets `coverage.thresholds` to 100% for statements/branches/functions/lines
-over `src/**/*.ts` (v8 provider) — a PR that lowers coverage fails CI, not
-just the `bun run test` step used for quick local iteration. The same command
-also enforces a **CRAP score** gate via `@barney-media/crap-typescript-vitest`
-(`withCrapTypescriptVitest` wraps the vitest config): CRAP combines cyclomatic
-complexity with per-function coverage (`comp² × (1 - cov)³ + comp`), so at 100%
-coverage it reduces to cyclomatic complexity itself. Any function scoring above
-the `threshold: 8` in `vitest.config.ts` fails the run (exit code 2) — full
-coverage alone doesn't excuse a function from also being simple. Reduce a
-function's complexity (fewer branches — see the `optional()` helper in
-`src/profile.ts` for a pattern that replaces ternary-spread option handling)
-rather than raising the threshold.
+sets a coverage floor of 90/90/85/85 via vitest thresholds
+(lines/statements/functions/branches) over `src/**/*.ts` (v8 provider) — a
+PR that drops coverage below the floor fails CI, not just the `bun run test`
+step used for quick local iteration. The floor is not a target: do not add
+tests whose only purpose is to touch lines; test behaviour.
 The Effect language service is `@effect/tsgo` (TS 7 native build); the
 `prepare` script patches the local `typescript` install (so `tsc`/editors
 get Effect diagnostics) and the local `oxlint`/`oxlint-tsgolint` installs

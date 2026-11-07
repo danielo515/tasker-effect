@@ -18,7 +18,6 @@ import {
   parseGitHubRepo,
   RepoDetectionError,
   RepoRefFromString,
-  runCli,
   scanExports,
 } from "../src/cli.js";
 import * as fixture from "./fixtures/cli-entry.js";
@@ -37,7 +36,7 @@ const BROKEN_LINK_ENTRY = new URL(
   "./fixtures/cli-broken-link.ts",
   import.meta.url
 ).pathname;
-const DEFECT_ENTRY = new URL("./fixtures/cli-defect.ts", import.meta.url)
+const DEFECT_ENTRY = new URL("./fixtures/cli-defect.js", import.meta.url)
   .pathname;
 
 const CliTestLayer = Layer.mergeAll(
@@ -566,91 +565,6 @@ describe("compileEntry", () => {
   );
 });
 
-// These call `runCli` in-process (against source, not the built dist): they
-// exist for coverage of the Command wiring and `runCli`'s own error
-// reporting. The "spawned" suite below additionally proves the packaged bin
-// works end to end.
-describe("runCli (in-process)", () => {
-  it.effect("--help prints usage and exits 0", () =>
-    Effect.gen(function* () {
-      const exitCode = yield* Effect.promise(() => runCli(["--help"]));
-      expect(exitCode).toBe(0);
-    })
-  );
-
-  it.effect("rejects a malformed --repo with exit code 1", () =>
-    Effect.gen(function* () {
-      const exitCode = yield* Effect.promise(() =>
-        runCli(["compile", "--repo", "not-a-slug"])
-      );
-      expect(exitCode).toBe(1);
-    })
-  );
-
-  it.scoped("compiles a fixture entry to the requested output dir and exits 0", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const outDir = yield* fs.makeTempDirectoryScoped({
-        prefix: "tasker-effect-cli-",
-      });
-      const exitCode = yield* Effect.promise(() =>
-        runCli([
-          "compile",
-          FIXTURE_ENTRY,
-          "--out",
-          outDir,
-          "--repo",
-          "acme/automations",
-        ])
-      );
-      expect(exitCode).toBe(0);
-      expect(yield* fs.exists(`${outDir}/greet.js`)).toBe(true);
-    }).pipe(Effect.provide(NodeContext.layer))
-  );
-
-  it.effect("reports EntryNotFoundError with exit code 1", () =>
-    Effect.gen(function* () {
-      const exitCode = yield* Effect.promise(() =>
-        runCli(["compile", "no/such/entry.ts", "--repo", "acme/automations"])
-      );
-      expect(exitCode).toBe(1);
-    })
-  );
-
-  it.effect("reports NoCompilableExportsError with exit code 1", () =>
-    Effect.gen(function* () {
-      const exitCode = yield* Effect.promise(() =>
-        runCli(["compile", EMPTY_ENTRY, "--repo", "acme/automations"])
-      );
-      expect(exitCode).toBe(1);
-    })
-  );
-
-  it.effect("reports a linker CompileError with exit code 1", () =>
-    Effect.gen(function* () {
-      // The fixture's Project references a task not listed in `tasks:`,
-      // which fails the dispatcher's static link check.
-      const exitCode = yield* Effect.promise(() =>
-        runCli(["compile", BROKEN_LINK_ENTRY, "--repo", "acme/automations"])
-      );
-      expect(exitCode).toBe(1);
-    })
-  );
-
-  it.effect("reports exit code 1 for a defect without laundering it into a CompileError", () =>
-    Effect.gen(function* () {
-      // The fixture bypasses schema validation to simulate a Match.exhaustive
-      // bug; runCli's Effect.catchAllDefect must still print it (with its
-      // real Cause/stack) and exit 1, rather than crashing the process or
-      // being caught by the CompileError handler.
-      const exitCode = yield* Effect.promise(() =>
-        runCli(["compile", DEFECT_ENTRY, "--repo", "acme/automations"])
-      );
-      expect(exitCode).toBe(1);
-    })
-  );
-});
-
 describe("CLI end-to-end (spawned)", () => {
   // The bin shim requires the built dist (no source fallback): build first,
   // then run it under plain Node — exactly what a consumer install does.
@@ -801,6 +715,46 @@ describe("CLI end-to-end (spawned)", () => {
         const { stderr, exitCode } = yield* runCliProcess(["compile", EMPTY_ENTRY]);
         expect(exitCode).toBe(1);
         expect(stderr).toContain("no compilable exports");
+      }),
+    30_000
+  );
+
+  it.effect(
+    "reports a broken task link as a CompileError with exit code 1",
+    () =>
+      Effect.gen(function* () {
+        // The fixture's Project references a task not listed in `tasks:`,
+        // which fails the dispatcher's static link check.
+        const { stderr, exitCode } = yield* runCliProcess([
+          "compile",
+          BROKEN_LINK_ENTRY,
+          "--repo",
+          "acme/automations",
+        ]);
+        expect(exitCode).toBe(1);
+        expect(stderr).toContain("Compilation failed:");
+        expect(stderr).toContain('references unknown task "Weather Check"');
+      }),
+    30_000
+  );
+
+  it.effect(
+    "reports a defect with exit code 1 without laundering it into a CompileError",
+    () =>
+      Effect.gen(function* () {
+        // The fixture bypasses schema validation to simulate a
+        // Match.exhaustive bug; runCli's Effect.catchAllDefect must still
+        // print it (with its real Cause/stack) and exit 1, rather than
+        // crashing the process or being caught by the CompileError handler.
+        const { stderr, exitCode } = yield* runCliProcess([
+          "compile",
+          DEFECT_ENTRY,
+          "--repo",
+          "acme/automations",
+        ]);
+        expect(exitCode).toBe(1);
+        expect(stderr).not.toContain("Compilation failed");
+        expect(stderr).toContain("effect/Match/exhaustive");
       }),
     30_000
   );

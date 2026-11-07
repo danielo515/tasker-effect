@@ -213,23 +213,26 @@ export interface ScannedExports {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
+const isCompilableInstance = (value: unknown): value is Project | Profile | Task =>
+  value instanceof Project || value instanceof Profile || value instanceof Task;
+
+const isNamedRecord = (value: unknown): value is Record<string, unknown> =>
+  isRecord(value) && typeof value.name === "string";
+
 /**
- * Shape-based recognition rules for {@link asCompilableEither}: the first
- * rule whose `matches` predicate accepts the record's shape decodes it.
+ * Decode a plain record as a Profile, Task or Project based on which array
+ * field it carries. `undefined` when it has none of them.
  */
-const compilableMatchers: ReadonlyArray<{
-  readonly matches: (value: Record<string, unknown>) => boolean;
-  readonly decode: (
-    value: unknown
-  ) => Either.Either<Project | Profile | Task, ParseResult.ParseError>;
-}> = [
-  { matches: (v) => Array.isArray(v.triggers), decode: Schema.decodeUnknownEither(Profile) },
-  { matches: (v) => Array.isArray(v.actions), decode: Schema.decodeUnknownEither(Task) },
-  {
-    matches: (v) => Array.isArray(v.profiles) || Array.isArray(v.tasks),
-    decode: Schema.decodeUnknownEither(Project),
-  },
-];
+const decodeByShape = (
+  value: Record<string, unknown>
+): Either.Either<Project | Profile | Task, ParseResult.ParseError> | undefined => {
+  if (Array.isArray(value.triggers)) return Schema.decodeUnknownEither(Profile)(value);
+  if (Array.isArray(value.actions)) return Schema.decodeUnknownEither(Task)(value);
+  if (Array.isArray(value.profiles) || Array.isArray(value.tasks)) {
+    return Schema.decodeUnknownEither(Project)(value);
+  }
+  return undefined;
+};
 
 /**
  * Recognize a value as a Project, Profile or Task, keeping the `ParseError`
@@ -242,15 +245,8 @@ const compilableMatchers: ReadonlyArray<{
 export const asCompilableEither = (
   value: unknown
 ): Either.Either<Project | Profile | Task, ParseResult.ParseError> | undefined => {
-  if (
-    value instanceof Project ||
-    value instanceof Profile ||
-    value instanceof Task
-  ) {
-    return Either.right(value);
-  }
-  if (!isRecord(value) || typeof value.name !== "string") return undefined;
-  return compilableMatchers.find((rule) => rule.matches(value))?.decode(value);
+  if (isCompilableInstance(value)) return Either.right(value);
+  return isNamedRecord(value) ? decodeByShape(value) : undefined;
 };
 
 /**
@@ -344,6 +340,70 @@ export interface CompileRunResult {
   readonly files: ReadonlyArray<WrittenFile>;
 }
 
+const warnRejected = (rejected: ReadonlyArray<RejectedExport>) =>
+  Effect.forEach(
+    rejected,
+    ({ exportName, error }) =>
+      Console.warn(
+        `warning: export "${exportName}" looks like a DSL definition but failed to decode: ` +
+          ParseResult.TreeFormatter.formatErrorSync(error)
+      ),
+    { discard: true }
+  );
+
+const requireCompilables = (
+  entryPath: string,
+  compilables: Array<CompilableExport>
+): Effect.Effect<Array<CompilableExport>, NoCompilableExportsError> =>
+  compilables.length === 0
+    ? Effect.fail(
+        new NoCompilableExportsError({
+          message:
+            `${entryPath} has no compilable exports. ` +
+            "Export (default or named) Project, Profile or Task instances from tasker-effect.",
+          entry: entryPath,
+        })
+      )
+    : Effect.succeed(compilables);
+
+/**
+ * Compile one DSL value. The repo is only resolved for Projects (it feeds
+ * the sync bootstrap in the project XML).
+ */
+const compileValue = <E, R>(
+  compiler: TaskerCompiler,
+  value: Project | Profile | Task,
+  resolveRepo: Effect.Effect<RepoRef, E, R>
+): Effect.Effect<Array<CompiledFile>, E | CompileError, R> => {
+  if (value instanceof Project) {
+    return Effect.flatMap(resolveRepo, (repo) => compiler.compileProject(value, { repo }));
+  }
+  if (value instanceof Profile) return compiler.compileProfile(value);
+  return Effect.map(compiler.compileTask(value), (file) => [file]);
+};
+
+/**
+ * Write one compiled file, warning when an earlier export already produced
+ * the same filename (the latter wins). `seen` maps filename → export name.
+ */
+const writeCompiledFile = Effect.fn("cli.writeCompiledFile")(function* (
+  outDir: string,
+  seen: Map<string, string>,
+  exportName: string,
+  file: CompiledFile
+) {
+  const store = yield* FileStore;
+  const previous = seen.get(file.filename);
+  if (previous !== undefined) {
+    yield* Console.warn(
+      `warning: ${file.filename} is produced by both "${previous}" and "${exportName}"; the latter wins`
+    );
+  }
+  seen.set(file.filename, exportName);
+  yield* store.writeText(`${outDir}/${file.filename}`, file.content);
+  return { filename: file.filename, exportName, kind: file.kind } satisfies WrittenFile;
+});
+
 /**
  * Compile every Project/Profile/Task export of the entry module and write
  * the resulting JavaScript files (plus setup READMEs for projects) to
@@ -355,25 +415,12 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
   readonly repo?: RepoRef | undefined;
 }) {
   const compiler = yield* TaskerCompiler;
-  const store = yield* FileStore;
 
   const entryPath = yield* resolveEntry(options.entry);
   const module = yield* importEntry(entryPath);
-  const { compilables, rejected } = scanExports(module);
-  for (const { exportName, error } of rejected) {
-    yield* Console.warn(
-      `warning: export "${exportName}" looks like a DSL definition but failed to decode: ` +
-        ParseResult.TreeFormatter.formatErrorSync(error)
-    );
-  }
-  if (compilables.length === 0) {
-    return yield* new NoCompilableExportsError({
-      message:
-        `${entryPath} has no compilable exports. ` +
-        "Export (default or named) Project, Profile or Task instances from tasker-effect.",
-      entry: entryPath,
-    });
-  }
+  const { compilables: scanned, rejected } = scanExports(module);
+  yield* warnRejected(rejected);
+  const compilables = yield* requireCompilables(entryPath, scanned);
 
   // Only Project compiles need the repo (for the sync bootstrap in the
   // project XML); detect it lazily so Profile/Task-only entries never
@@ -386,23 +433,9 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
   const written: Array<WrittenFile> = [];
   const seen = new Map<string, string>();
   for (const { exportName, value } of compilables) {
-    const files =
-      value instanceof Project
-        ? yield* compiler.compileProject(value, { repo: yield* resolveRepo })
-        : value instanceof Profile
-          ? yield* compiler.compileProfile(value)
-          : [yield* compiler.compileTask(value)];
-
+    const files = yield* compileValue(compiler, value, resolveRepo);
     for (const file of files) {
-      const previous = seen.get(file.filename);
-      if (previous !== undefined) {
-        yield* Console.warn(
-          `warning: ${file.filename} is produced by both "${previous}" and "${exportName}"; the latter wins`
-        );
-      }
-      seen.set(file.filename, exportName);
-      yield* store.writeText(`${options.outDir}/${file.filename}`, file.content);
-      written.push({ filename: file.filename, exportName, kind: file.kind });
+      written.push(yield* writeCompiledFile(options.outDir, seen, exportName, file));
     }
   }
 
