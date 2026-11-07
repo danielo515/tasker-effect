@@ -17,6 +17,7 @@ import {
   FileSystem,
   Path,
 } from "@effect/platform";
+import type { PlatformError } from "@effect/platform/Error";
 import { NodeContext } from "@effect/platform-node";
 import { Effect, Layer } from "effect";
 import {
@@ -41,23 +42,19 @@ export const FileStoreLive: Layer.Layer<
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
 
-    const storageErrors = (target: string) => ({
-      SystemError: (error: { readonly message: string }) =>
-        Effect.fail(new StorageWriteError({ message: error.message, path: target })),
-      BadArgument: (error: { readonly message: string }) =>
-        Effect.fail(new StorageWriteError({ message: error.message, path: target })),
-    });
+    const toStorageError = (target: string) => (error: PlatformError) =>
+      new StorageWriteError({ message: error.message, path: target });
 
     return {
       writeText: (target, content) =>
         fs.makeDirectory(path.dirname(target), { recursive: true }).pipe(
           Effect.andThen(fs.writeFileString(target, content)),
-          Effect.catchTags(storageErrors(target))
+          Effect.mapError(toStorageError(target))
         ),
       writeBytes: (target, content) =>
         fs.makeDirectory(path.dirname(target), { recursive: true }).pipe(
           Effect.andThen(fs.writeFile(target, content)),
-          Effect.catchTags(storageErrors(target))
+          Effect.mapError(toStorageError(target))
         ),
     } satisfies FileStoreShape;
   })
@@ -94,16 +91,13 @@ export const ZipExtractorLive: Layer.Layer<
           }
           return (yield* fs.readDirectory(targetDir)) as ReadonlyArray<string>;
         }).pipe(
-          Effect.catchTags({
-            SystemError: (error) =>
-              Effect.fail(
-                new ZipExtractError({ message: error.message, path: zipPath })
-              ),
-            BadArgument: (error) =>
-              Effect.fail(
-                new ZipExtractError({ message: error.message, path: zipPath })
-              ),
-          })
+          // Platform failures (SystemError/BadArgument) become ZipExtractError;
+          // the non-zero exit ZipExtractError above passes through unchanged.
+          Effect.mapError((error) =>
+            error._tag === "ZipExtractError"
+              ? error
+              : new ZipExtractError({ message: error.message, path: zipPath })
+          )
         ),
     } satisfies ZipExtractorShape;
   })

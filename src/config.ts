@@ -109,13 +109,16 @@ const sourceUnavailable = (
 export const makeTaskerConfigProvider = (
   tasker: TaskerConfigApi,
   options?: TaskerConfigOptions
-): Effect.Effect<ConfigProvider.ConfigProvider> =>
-  Effect.gen(function* () {
-    const labels = new Map(
-      (options?.secrets ?? []).map((secret) => [secret.name, secret.description])
-    );
-    const pollInterval = Duration.decode(options?.pollInterval ?? Duration.seconds(1));
-    const timeout = Duration.decode(options?.promptTimeout ?? Duration.seconds(120));
+): Effect.Effect<ConfigProvider.ConfigProvider> => {
+  const {
+    secrets = [],
+    pollInterval: pollIntervalInput = Duration.seconds(1),
+    promptTimeout = Duration.seconds(120),
+  } = options ?? {};
+  return Effect.gen(function* () {
+    const labels = new Map(secrets.map((secret) => [secret.name, secret.description]));
+    const pollInterval = Duration.decode(pollIntervalInput);
+    const timeout = Duration.decode(promptTimeout);
     const inFlight = yield* Ref.make(
       new Map<string, Deferred.Deferred<string, ConfigError.ConfigError>>()
     );
@@ -289,6 +292,7 @@ export const makeTaskerConfigProvider = (
       })
     );
   });
+};
 
 /**
  * Layer installing the Tasker config provider for a program:

@@ -1159,14 +1159,19 @@ const walkSecrets = (
     visit(node);
     return;
   }
-  if (typeof node !== "object" || node === null) return;
-  if (seen.has(node)) return;
+  if (!markUnseenObject(node, seen)) return;
+  const children: ReadonlyArray<unknown> = Array.isArray(node) ? node : Object.values(node);
+  for (const child of children) walkSecrets(child, visit, seen);
+};
+
+/**
+ * `true` (and marks it as seen) when `node` is an object not visited yet;
+ * `false` for primitives, `null` and already-visited objects.
+ */
+const markUnseenObject = (node: unknown, seen: Set<object>): node is object => {
+  if (typeof node !== "object" || node === null || seen.has(node)) return false;
   seen.add(node);
-  if (Array.isArray(node)) {
-    for (const item of node) walkSecrets(item, visit, seen);
-    return;
-  }
-  for (const value of Object.values(node)) walkSecrets(value, visit, seen);
+  return true;
 };
 
 /**
@@ -1273,56 +1278,72 @@ const collectTaskRefs = (actions: ReadonlyArray<Action>): Array<string> => {
  */
 const checkTaskReferences = (project: Project): void => {
   const targets = project.tasks.map((task) => task.name);
-  const targetList =
-    targets.length > 0 ? targets.map((name) => `"${name}"`).join(", ") : "(none)";
-  const problems: Array<string> = [];
-
-  const findDuplicates = (label: string, names: ReadonlyArray<string>): void => {
-    const seen = new Set<string>();
-    for (const name of names) {
-      if (seen.has(name)) problems.push(`Duplicate ${label} name "${name}"`);
-      seen.add(name);
-    }
-  };
-  findDuplicates("task", targets);
-  findDuplicates("profile", project.profiles.map((profile) => profile.name));
-
-  // The dispatcher resolves PROFILES before TASKS (compileDispatcherJs), so
-  // a name shared between both is ambiguous: performTask(name) would
-  // silently run the profile's enter file instead of the standalone task.
-  const profileNames = new Set(project.profiles.map((profile) => profile.name));
-  for (const task of project.tasks) {
-    if (profileNames.has(task.name)) {
-      problems.push(
-        `"${task.name}" is both a profile and a task; the dispatcher resolves %par1 against profiles first`
-      );
-    }
-  }
-
-  const check = (owner: string, task: Task): void => {
-    for (const ref of collectTaskRefs(task.actions)) {
-      if (!targets.includes(ref)) {
-        problems.push(`${owner} references unknown task "${ref}"`);
-      }
-    }
-  };
-  for (const profile of project.profiles) {
-    check(`Profile "${profile.name}" enter task "${profile.enter.name}"`, profile.enter);
-    if (profile.exit !== undefined) {
-      check(`Profile "${profile.name}" exit task "${profile.exit.name}"`, profile.exit);
-    }
-  }
-  for (const task of project.tasks) {
-    check(`Task "${task.name}"`, task);
-  }
-
+  const problems = [
+    ...duplicateNames("task", targets),
+    ...duplicateNames(
+      "profile",
+      project.profiles.map((profile) => profile.name)
+    ),
+    ...ambiguousNames(project),
+    ...unknownTaskRefs(project, targets),
+  ];
   if (problems.length > 0) {
     throw new CompileError({
-      message: `${problems.join("; ")}. Valid targets: ${targetList}`,
+      message: `${problems.join("; ")}. Valid targets: ${formatTargets(targets)}`,
       source: project.name,
     });
   }
 };
+
+const formatTargets = (targets: ReadonlyArray<string>): string =>
+  targets.length > 0 ? targets.map((name) => `"${name}"`).join(", ") : "(none)";
+
+/** One problem per repeated occurrence of a name in `names` */
+const duplicateNames = (label: string, names: ReadonlyArray<string>): Array<string> => {
+  const seen = new Set<string>();
+  const problems: Array<string> = [];
+  for (const name of names) {
+    if (seen.has(name)) problems.push(`Duplicate ${label} name "${name}"`);
+    seen.add(name);
+  }
+  return problems;
+};
+
+/**
+ * The dispatcher resolves PROFILES before TASKS (compileDispatcherJs), so a
+ * name shared between both is ambiguous: performTask(name) would silently
+ * run the profile's enter file instead of the standalone task.
+ */
+const ambiguousNames = (project: Project): Array<string> => {
+  const profileNames = new Set(project.profiles.map((profile) => profile.name));
+  return project.tasks
+    .filter((task) => profileNames.has(task.name))
+    .map(
+      (task) =>
+        `"${task.name}" is both a profile and a task; the dispatcher resolves %par1 against profiles first`
+    );
+};
+
+/** Every task of the project (profile enter/exit tasks, then standalone ones) with an owner label */
+const ownedTasks = (project: Project): Array<readonly [string, Task]> => {
+  const owned: Array<readonly [string, Task]> = [];
+  for (const profile of project.profiles) {
+    owned.push([`Profile "${profile.name}" enter task "${profile.enter.name}"`, profile.enter]);
+    if (profile.exit !== undefined) {
+      owned.push([`Profile "${profile.name}" exit task "${profile.exit.name}"`, profile.exit]);
+    }
+  }
+  for (const task of project.tasks) owned.push([`Task "${task.name}"`, task]);
+  return owned;
+};
+
+/** One problem per `PerformTask` reference to a name not in `targets` */
+const unknownTaskRefs = (project: Project, targets: ReadonlyArray<string>): Array<string> =>
+  ownedTasks(project).flatMap(([owner, task]) =>
+    collectTaskRefs(task.actions)
+      .filter((ref) => !targets.includes(ref))
+      .map((ref) => `${owner} references unknown task "${ref}"`)
+  );
 
 /** Reserved scaffold filenames a task/profile's slugified name must not collide with */
 const RESERVED_FILENAMES: ReadonlySet<string> = new Set([
@@ -1372,6 +1393,36 @@ const checkFilenames = (project: Project): void => {
   }
 };
 
+/** The setup README of a compiled project, listing `files` */
+const projectReadme = (project: Project, files: ReadonlyArray<CompiledFile>): string =>
+  [
+    `# ${project.name}`,
+    "",
+    ...(project.description !== undefined ? [project.description, ""] : []),
+    "Compiled with tasker-effect. Copy the `.js` files to your device (e.g.",
+    "`/sdcard/Tasker/js/`) and point Tasker JavaScript actions at them —",
+    "or import the dispatcher task once and skip per-task actions entirely:",
+    "",
+    "## Files",
+    "",
+    ...files.map((file) => `- \`${file.filename}\``),
+    "",
+    ...dispatcherReadmeSection(project),
+    ...(project.profiles.length > 0 ? ["## Profiles", ""] : []),
+    ...project.profiles.map(profileReadmeSection),
+    ...(project.tasks.length > 0
+      ? [
+          "## Standalone tasks",
+          "",
+          ...project.tasks.map(
+            (task) =>
+              `- ${task.name}: \`${slugify(task.name)}.js\`${task.description !== undefined ? ` — ${task.description}` : ""}`
+          ),
+          "",
+        ]
+      : []),
+  ].join("\n");
+
 /** Compile a whole project to JS files plus a setup README */
 export const compileProjectFiles = (
   project: Project,
@@ -1416,33 +1467,7 @@ export const compileProjectFiles = (
     kind: "tasker-xml",
   });
 
-  const readme = [
-    `# ${project.name}`,
-    "",
-    ...(project.description !== undefined ? [project.description, ""] : []),
-    "Compiled with tasker-effect. Copy the `.js` files to your device (e.g.",
-    "`/sdcard/Tasker/js/`) and point Tasker JavaScript actions at them —",
-    "or import the dispatcher task once and skip per-task actions entirely:",
-    "",
-    "## Files",
-    "",
-    ...files.map((file) => `- \`${file.filename}\``),
-    "",
-    ...dispatcherReadmeSection(project),
-    ...(project.profiles.length > 0 ? ["## Profiles", ""] : []),
-    ...project.profiles.map(profileReadmeSection),
-    ...(project.tasks.length > 0
-      ? [
-          "## Standalone tasks",
-          "",
-          ...project.tasks.map(
-            (task) =>
-              `- ${task.name}: \`${slugify(task.name)}.js\`${task.description !== undefined ? ` — ${task.description}` : ""}`
-          ),
-          "",
-        ]
-      : []),
-  ].join("\n");
+  const readme = projectReadme(project, files);
 
   files.push({ filename: "README.md", content: readme, kind: "doc" });
   return files;

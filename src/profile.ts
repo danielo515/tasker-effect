@@ -1127,15 +1127,10 @@ export const Action = {
       readonly pitch?: number;
       readonly speed?: number;
     }
-  ) =>
-    new Say({
-      text,
-      stream: options?.stream,
-      pitch: options?.pitch,
-      speed: options?.speed,
-      engine: options?.engine,
-      voice: options?.voice,
-    }),
+  ) => {
+    const { stream, pitch, speed, engine, voice } = options ?? {};
+    return new Say({ text, stream, pitch, speed, engine, voice });
+  },
   vibrate: (milliseconds: number) => new Vibrate({ milliseconds }),
   vibratePattern: (pattern: string) => new VibratePattern({ pattern }),
   setGlobal: (name: VarName, value: Text) =>
@@ -1282,17 +1277,10 @@ export const Action = {
       readonly mimeType?: string;
       readonly extras?: ReadonlyArray<Text>;
     }
-  ) =>
-    new SendIntent({
-      action,
-      targetComp,
-      extras: options?.extras,
-      pkg: options?.pkg,
-      cls: options?.cls,
-      category: options?.category,
-      data: options?.data,
-      mimeType: options?.mimeType,
-    }),
+  ) => {
+    const { extras, pkg, cls, category, data, mimeType } = options ?? {};
+    return new SendIntent({ action, targetComp, extras, pkg, cls, category, data, mimeType });
+  },
   silentMode: (mode: SetSilentMode["mode"]) => new SetSilentMode({ mode }),
   goHome: (screen?: number) => new GoHome({ screen }),
   getLocation: (

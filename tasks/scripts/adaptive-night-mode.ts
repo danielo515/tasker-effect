@@ -92,9 +92,10 @@ const program = Effect.gen(function* () {
         const previous = yield* tasker
           .global("NIGHT_WINDOW")
           .pipe(Effect.orElseSucceed(() => undefined));
-        yield* tasker.setGlobal("NIGHT_WINDOW", isNight ? "1" : "0");
+        const windowFlag = isNight ? "1" : "0";
+        yield* tasker.setGlobal("NIGHT_WINDOW", windowFlag);
 
-        if (previous !== (isNight ? "1" : "0")) {
+        if (previous !== windowFlag) {
           yield* tasker.flash(
             `Night Mode ${isNight ? "enabled" : "disabled"} (night ${nightStart}–${nightEnd})`
           );

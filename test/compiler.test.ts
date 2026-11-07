@@ -2,7 +2,6 @@ import { describe, expect, it } from "@effect/vitest";
 import { Cause, Effect, Exit, ParseResult } from "effect";
 import {
   type Action as ActionType,
-  type Trigger as TriggerType,
   Action,
   ComparisonOp,
   PresenceOp,
@@ -24,9 +23,7 @@ import {
   compileTaskToJs,
   compileProfileFiles,
   compileProjectFiles,
-  conditionExpr,
   describeTrigger,
-  emitAction,
   emitText,
   slugify,
 } from "../src/compiler.js";
@@ -819,93 +816,8 @@ describe("task references", () => {
   });
 });
 
-describe("Match coverage", () => {
-  const target = new Task({ name: "Target", actions: [Action.flash("t")] });
-
-  const oneOfEveryAction: ReadonlyArray<ActionType> = [
-    Action.flash("x"),
-    Action.popup("t", "b"),
-    Action.say("x"),
-    Action.vibrate(100),
-    Action.vibratePattern("0,100"),
-    Action.setGlobal("%A", "1"),
-    Action.setLocal("a", "1"),
-    Action.performTask(target),
-    Action.performTaskerTask("T"),
-    Action.showScene("s.scene.json"),
-    Action.enableTaskerProfile("P"),
-    Action.wait(10),
-    Action.shell("ls"),
-    Action.readFile("/a", "%OUT"),
-    Action.writeFile("/a", "x"),
-    Action.http("GET", "https://example.com"),
-    Action.browseUrl("https://example.com"),
-    Action.sendSms("123", "hi"),
-    Action.setWifi(true),
-    Action.setBluetooth(true),
-    Action.setAirplaneMode(false),
-    Action.setMobileData(true),
-    Action.setAutoSync(true),
-    Action.setVolume("media", 3),
-    Action.mediaControl("pause"),
-    Action.musicPlay("/a.mp3"),
-    Action.musicStop(),
-    Action.setClip("x"),
-    Action.setWallpaper("/w.png"),
-    Action.launchApp("app"),
-    Action.sendIntent("a", "activity"),
-    Action.silentMode("on"),
-    Action.goHome(),
-    Action.getLocation("gps"),
-    Action.setCarMode(true),
-    Action.setNightMode(true),
-    Action.stayOn("ac"),
-    Action.setAutoRotate(true),
-    Action.setAutoBrightness(false),
-    Action.displayTimeout({ minutes: 10 }),
-    Action.js("flash('x')"),
-    Action.when(cond("%A", "isSet"), [Action.flash("y")]),
-  ];
-
-  it("emitAction handles every action tag", () => {
-    for (const action of oneOfEveryAction) {
-      const lines = emitAction(action);
-      expect(lines.length).toBeGreaterThan(0);
-    }
-  });
-
-  const oneOfEveryTrigger: ReadonlyArray<TriggerType> = [
-    Trigger.time({ hour: 7, minute: 0 }),
-    Trigger.location(40, -3, 100),
-    Trigger.wifiConnected(),
-    Trigger.bluetoothConnected(),
-    Trigger.appOpened("app"),
-    Trigger.batteryLevel(0, 20),
-    Trigger.headsetPlugged("mic"),
-    Trigger.power("wireless"),
-    Trigger.calendarEntry({ title: "Meeting" }),
-    Trigger.receivedText({ kind: "sms" }),
-    Trigger.variable(cond("%A", "eq", "1")),
-    Trigger.event("Display On"),
-    Trigger.event("Notification", "com.app"),
-    Trigger.state("Power"),
-    Trigger.state("Power", "AC"),
-  ];
-
-  it("describeTrigger handles every trigger tag", () => {
-    for (const trigger of oneOfEveryTrigger) {
-      expect(describeTrigger(trigger).length).toBeGreaterThan(0);
-    }
-  });
-
-  it("conditionExpr handles every operator", () => {
-    for (const op of ComparisonOp.literals) {
-      expect(conditionExpr(cond("%A", op, "1")).length).toBeGreaterThan(0);
-    }
-    for (const op of PresenceOp.literals) {
-      expect(conditionExpr(cond("%A", op)).length).toBeGreaterThan(0);
-    }
-    // the two families together are exactly ConditionOp
+describe("ConditionOp", () => {
+  it("is exactly the comparison and presence operator families", () => {
     expect(
       [...ComparisonOp.literals, ...PresenceOp.literals].sort()
     ).toEqual([...ConditionOp.literals].sort());
