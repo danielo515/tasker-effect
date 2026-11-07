@@ -17,6 +17,7 @@ import {
   ROLLING_RELEASE_TAG,
   SCAFFOLD_VERSION,
   SECRETS_FILENAME,
+  SHOW_SCENE_TASK_NAME,
   SYNC_PROFILE_NAME,
   SYNC_SCRIPT_FILENAME,
   SYNC_TASK_NAME,
@@ -127,14 +128,19 @@ describe("taskerProjectXml", () => {
     expect(() => new Function(code)).not.toThrow();
   };
 
-  it("is a project export: Project element listing the profile and the three tasks", () => {
+  it("is a project export: Project element listing the profile and the four tasks", () => {
     expect(xml).toContain('<TaskerData sr="" dvi="1"');
     expect(xml).toContain('<Project sr="proj0" ve="2">');
     expect(xml).toContain("<pids>4</pids>");
-    expect(xml).toContain("<tids>1,2,3</tids>");
-    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(3);
+    expect(xml).toContain("<tids>1,2,3,5</tids>");
+    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(4);
     expect(xml.match(/<Profile sr="prof\d+" ve="2">/g)).toHaveLength(1);
-    for (const name of [DISPATCH_TASK_NAME, SYNC_TASK_NAME, CONFIG_TASK_NAME]) {
+    for (const name of [
+      DISPATCH_TASK_NAME,
+      SYNC_TASK_NAME,
+      CONFIG_TASK_NAME,
+      SHOW_SCENE_TASK_NAME,
+    ]) {
       expect(xml).toContain(`<nme>${name}</nme>`);
     }
   });
@@ -160,6 +166,18 @@ describe("taskerProjectXml", () => {
     expect(actionContaining("dispatcher.js")).toContain(
       '<Int sr="arg3" val="600"/>'
     );
+  });
+
+  it("TE Show Scene shows the Scenes v2 layout JSON passed in %par1 (code 479)", () => {
+    const start = xml.indexOf(`<nme>${SHOW_SCENE_TASK_NAME}</nme>`);
+    expect(start).toBeGreaterThan(-1);
+    const task = xml.slice(start, xml.indexOf("</Task>", start));
+    expect(task).toContain("<code>479</code>");
+    expect(task).toContain('<Str sr="arg1" ve="3">%par1</Str>');
+    // Every other argument keeps Tasker's default, so the layout's own
+    // defaultDisplayMode decides how it is shown.
+    expect(task).toContain('<Str sr="arg3" ve="3"/>');
+    expect(task.match(/<Action sr="act\d+" ve="7">/g)).toHaveLength(1);
   });
 
   it("the TE Sync and TE Config scan scriptlets get generous 600s timeouts", () => {
@@ -214,8 +232,8 @@ describe("taskerProjectXml", () => {
     expect(configLabelFileJs).toContain('var label = local("te_label");');
     expect(configLabelFileJs).toContain(SECRETS_FILENAME);
     expect(configLabelFileJs).toContain('setLocal("te_prompt", label);');
-    // Still exactly the three sanctioned tasks.
-    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(3);
+    // Still exactly the four sanctioned tasks.
+    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(4);
   });
 
   it("TE Config's synced scan file waits for secrets.json and collects unset secrets", () => {
@@ -316,7 +334,13 @@ describe("taskerProjectXml", () => {
       (match) => match[1]
     );
     expect(taskNames.sort()).toEqual(
-      [DISPATCH_TASK_NAME, SYNC_TASK_NAME, CONFIG_TASK_NAME, SYNC_PROFILE_NAME].sort()
+      [
+        DISPATCH_TASK_NAME,
+        SYNC_TASK_NAME,
+        CONFIG_TASK_NAME,
+        SHOW_SCENE_TASK_NAME,
+        SYNC_PROFILE_NAME,
+      ].sort()
     );
   });
 });

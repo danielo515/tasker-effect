@@ -19,6 +19,7 @@ import { quietProfiles } from "./popular/quiet.js";
 import { drivingProfiles } from "./popular/driving.js";
 import { mediaProfiles } from "./popular/media.js";
 import { powerProfiles } from "./popular/power.js";
+import { clipboardHistory, showClipboardHistory } from "./clipboard-history.js";
 
 /** Standalone task: fetch weather and warn conditionally */
 const weatherCheck = new Task({
@@ -137,6 +138,7 @@ export const automations = new Project({
     ...drivingProfiles,
     ...mediaProfiles,
     ...powerProfiles,
+    clipboardHistory,
   ],
-  tasks: [weatherCheck],
+  tasks: [weatherCheck, showClipboardHistory],
 });

@@ -549,6 +549,43 @@ describe("task references", () => {
     expectValidJs(jsSource);
   });
 
+  it("showScene reads the synced layout JSON and hands it to TE Show Scene", () => {
+    const task = new Task({
+      name: "Viewer",
+      actions: [Action.showScene("viewer.scene.json")],
+    });
+    const jsSource = compileTaskToJs(task);
+    expect(jsSource).toContain('__out = global("TE_JS_DIR");');
+    expect(jsSource).toContain(
+      'var __scene = readFile(__out + "viewer.scene.json");'
+    );
+    expect(jsSource).toContain(
+      'flash("tasker-effect: could not read scene viewer.scene.json");'
+    );
+    // The {{TE_JS_DIR}} placeholder lets a layout point a WebView at a synced
+    // .html file without hard-coding the device directory.
+    expect(jsSource).toContain(
+      'performTask("TE Show Scene", 10, __scene.split("{{TE_JS_DIR}}").join(__out));'
+    );
+    expectValidJs(jsSource);
+  });
+
+  it("showScene honours a custom priority", () => {
+    const jsSource = compileTaskToJs(
+      new Task({
+        name: "Viewer",
+        actions: [Action.showScene("viewer.scene.json", { priority: 3 })],
+      })
+    );
+    expect(jsSource).toContain('performTask("TE Show Scene", 3, ');
+  });
+
+  it("showScene rejects paths: the layout must live in the JS directory", () => {
+    expect(() => Action.showScene("web/viewer.scene.json")).toThrow(
+      "scene file must be a bare file name inside the JS directory"
+    );
+  });
+
   it("project compilation fails on dangling DSL task references", () => {
     const project = new Project({
       name: "Broken",
@@ -795,6 +832,7 @@ describe("Match coverage", () => {
     Action.setLocal("a", "1"),
     Action.performTask(target),
     Action.performTaskerTask("T"),
+    Action.showScene("s.scene.json"),
     Action.enableTaskerProfile("P"),
     Action.wait(10),
     Action.shell("ls"),
