@@ -163,6 +163,11 @@ jobs:
           name: tasker-js
           path: dist-tasker/
 
+      # Bundle every compiled file into tasker-js.zip: the imported TE Sync
+      # task downloads it with HTTP Request and extracts it with UnZip.
+      - name: Build release zip
+        run: ./scripts/add-release-zip.sh dist-tasker
+
       # Immutable per-push snapshot, so a bad build can be undone via the
       # Rollback workflow. --latest=false keeps /releases/latest — the
       # endpoint devices sync from — pointing at the rolling release.

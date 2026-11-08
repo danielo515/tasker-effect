@@ -6,10 +6,9 @@
 # so no %variable expansion can touch them. The per-file assets stay
 # alongside the zip (the Node-side sync downloads those).
 #
-# Run by `bun run compile` (so dist-tasker/, the CI artifact and both the
-# snapshot and the rolling release carry the zip) and again by
-# update-rolling-release.sh (so a rollback to an older snapshot without a zip
-# still gets one).
+# Run by the CI release job before publishing (so both the snapshot and the
+# rolling release carry the zip) and again by update-rolling-release.sh (so a
+# rollback to an older snapshot without a zip still gets one).
 set -euo pipefail
 
 DIR=${1:?usage: add-release-zip.sh <assets-dir>}
