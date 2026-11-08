@@ -1101,8 +1101,8 @@ export class Task extends Schema.Class<Task>("Task")({
 
 /**
  * A profile pairs trigger metadata with an enter (and optional exit) task.
- * When every trigger has a known Tasker XML form the compiler emits an
- * importable `<slug>.prf.xml`; otherwise it emits setup instructions for
+ * When every trigger has a known Tasker XML form the compiler wires the
+ * profile into the project XML; otherwise it emits setup instructions for
  * configuring the triggers once in the Tasker UI.
  */
 export class Profile extends Schema.Class<Profile>("Profile")({

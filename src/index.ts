@@ -179,10 +179,8 @@ export {
   collectProjectSecrets,
   compileSecretsJson,
   taskerProjectXml,
-  compileProfileXml,
-  compileTaskXml,
+  profileWiringHash,
   CLIPBOARD_CHANGED_EVENT_CODE,
-  type ImportableXmlOptions,
   DEFAULT_DEVICE_JS_DIR,
   DISPATCHER_FILENAME,
   SECRETS_FILENAME,
@@ -197,6 +195,13 @@ export {
   SYNC_PROFILE_NAME,
   TaskerCompiler,
 } from "./compiler.js";
+
+export {
+  MENU_TASK_NAME,
+  MENU_SCRIPT_FILENAME,
+  MENU_SCENE_FILENAME,
+  MENU_HTML_FILENAME,
+} from "./menu.js";
 
 // =============================================================================
 // Runtime helpers (for Effect-based scripts bundled for Tasker)
