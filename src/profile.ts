@@ -912,12 +912,45 @@ export class BluetoothConnectedTrigger extends Schema.TaggedClass<BluetoothConne
   }
 ) {}
 
-/** Active while an app is in the foreground */
+/**
+ * Active while an app is in the foreground (or, with `invert`, while it is
+ * not). With `packageName` set the profile can be generated as importable
+ * XML; without it the trigger is only described for manual setup.
+ */
 export class AppOpenedTrigger extends Schema.TaggedClass<AppOpenedTrigger>()(
   "AppOpenedTrigger",
   {
     app: Schema.NonEmptyString,
-  }
+    packageName: Schema.optional(Schema.NonEmptyString),
+    invert: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  },
+  docs({
+    description:
+      "Application — active while the app is in the foreground; `invert` makes it active while the app is NOT in the foreground",
+    examples: [
+      {
+        _tag: "AppOpenedTrigger",
+        app: "Bitwarden",
+        packageName: "com.x8bit.bitwarden",
+        invert: true,
+      },
+    ],
+  })
+) {}
+
+/** Fires when the clipboard content changes */
+export class ClipboardChangedTrigger extends Schema.TaggedClass<ClipboardChangedTrigger>()(
+  "ClipboardChangedTrigger",
+  {
+    ignoreSetByTasker: Schema.optionalWith(Schema.Boolean, {
+      default: () => true,
+    }),
+  },
+  docs({
+    description:
+      "Event > System > Clipboard Changed — fires on every clipboard change; the new text is in %cl_text",
+    examples: [{ _tag: "ClipboardChangedTrigger", ignoreSetByTasker: true }],
+  })
 ) {}
 
 /** Active while the battery level is inside a range */
@@ -1027,6 +1060,7 @@ export type Trigger =
   | WifiConnectedTrigger
   | BluetoothConnectedTrigger
   | AppOpenedTrigger
+  | ClipboardChangedTrigger
   | BatteryLevelTrigger
   | HeadsetPluggedTrigger
   | PowerTrigger
@@ -1043,6 +1077,7 @@ export const TriggerSchema = Schema.Union(
   WifiConnectedTrigger,
   BluetoothConnectedTrigger,
   AppOpenedTrigger,
+  ClipboardChangedTrigger,
   BatteryLevelTrigger,
   HeadsetPluggedTrigger,
   PowerTrigger,
@@ -1066,8 +1101,9 @@ export class Task extends Schema.Class<Task>("Task")({
 
 /**
  * A profile pairs trigger metadata with an enter (and optional exit) task.
- * Triggers are configured once in the Tasker UI; the compiler emits setup
- * instructions for them alongside the JavaScript files.
+ * When every trigger has a known Tasker XML form the compiler emits an
+ * importable `<slug>.prf.xml`; otherwise it emits setup instructions for
+ * configuring the triggers once in the Tasker UI.
  */
 export class Profile extends Schema.Class<Profile>("Profile")({
   name: Schema.NonEmptyString,
@@ -1379,7 +1415,19 @@ export const Trigger = {
     new LocationTrigger({ latitude, longitude, radiusMeters }),
   wifiConnected: (ssid?: string) => new WifiConnectedTrigger({ ssid }),
   bluetoothConnected: (name?: string) => new BluetoothConnectedTrigger({ name }),
-  appOpened: (app: string) => new AppOpenedTrigger({ app }),
+  appOpened: (
+    app: string,
+    options?: { readonly packageName?: string; readonly invert?: boolean }
+  ) =>
+    new AppOpenedTrigger({
+      app,
+      packageName: options?.packageName,
+      invert: options?.invert,
+    }),
+  clipboardChanged: (options?: { readonly ignoreSetByTasker?: boolean }) =>
+    new ClipboardChangedTrigger({
+      ignoreSetByTasker: options?.ignoreSetByTasker,
+    }),
   batteryLevel: (from: number, to: number) => new BatteryLevelTrigger({ from, to }),
   headsetPlugged: (kind?: HeadsetPluggedTrigger["kind"]) =>
     new HeadsetPluggedTrigger({ kind }),

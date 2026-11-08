@@ -11,6 +11,8 @@
 import { Array as Arr, Effect, Match, Order, Schema } from "effect";
 import {
   type Action,
+  type AppOpenedTrigger,
+  type ClipboardChangedTrigger,
   type JsCode,
   type ShowScene,
   type Text,
@@ -421,7 +423,15 @@ export const describeTrigger = (trigger: Trigger): string =>
       "BluetoothConnectedTrigger",
       (t) => `State > Net > BT Connected (Name: ${t.name})`
     ),
-    Match.tag("AppOpenedTrigger", (t) => `Application: ${t.app}`),
+    Match.tag(
+      "AppOpenedTrigger",
+      (t) => `Application: ${t.invert ? "NOT " : ""}${t.app}`
+    ),
+    Match.tag(
+      "ClipboardChangedTrigger",
+      (t) =>
+        `Event > System > Clipboard Changed (Ignore Set By Tasker: ${t.ignoreSetByTasker ? "on" : "off"})`
+    ),
     Match.tag(
       "BatteryLevelTrigger",
       (t) => `State > Power > Battery Level from ${t.from}% to ${t.to}%`
@@ -495,7 +505,9 @@ const profileReadmeSection = (profile: Profile): string => {
     `### Profile: ${profile.name}`,
     "",
     ...(profile.description !== undefined ? [profile.description, ""] : []),
-    "Triggers to configure in the Tasker UI:",
+    ...(compileProfileXml(profile) !== undefined
+      ? [`Import \`${slug}.prf.xml\` (Profiles tab → long-press → Import Profile). Triggers:`]
+      : ["Triggers to configure in the Tasker UI:"]),
     "",
     ...profile.triggers.map((trigger) => `- ${describeTrigger(trigger)}`),
     "",
@@ -1107,6 +1119,172 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
   ].join("\n");
 };
 
+// =============================================================================
+// Importable per-profile / per-task XML
+// =============================================================================
+
+// Layouts copied from real Tasker 6.7.8 exports (see
+// test/fixtures/tasker-exports/): Clipboard Changed is event code 2097 with
+// "Ignore Set By Tasker" in Int arg1; an App context is inverted by
+// <flags>2</flags>; Perform Task is action code 130.
+
+/** Event code of Event > System > Clipboard Changed */
+export const CLIPBOARD_CHANGED_EVENT_CODE = 2097;
+
+/** Perform Task action code */
+const PERFORM_TASK_CODE = 130;
+
+/** Bundle with an empty RELEVANT_VARIABLES list (event/action arg0) */
+const emptyRelevantVariables = (indent: string): Array<string> => [
+  `${indent}<Bundle sr="arg0">`,
+  `${indent}\t<Vals sr="val">`,
+  `${indent}\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES>&lt;StringArray sr=""/&gt;</net.dinglisch.android.tasker.RELEVANT_VARIABLES>`,
+  `${indent}\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>[Ljava.lang.String;</net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>`,
+  `${indent}\t</Vals>`,
+  `${indent}</Bundle>`,
+];
+
+/** A trigger's XML context, or undefined when it has no known XML form */
+interface XmlContext {
+  readonly isEvent: boolean;
+  readonly lines: (sr: string) => Array<string>;
+}
+
+const clipboardChangedContext = (t: ClipboardChangedTrigger): XmlContext => ({
+  isEvent: true,
+  lines: (sr) => [
+    `\t\t<Event sr="${sr}" ve="2">`,
+    `\t\t\t<code>${CLIPBOARD_CHANGED_EVENT_CODE}</code>`,
+    "\t\t\t<pri>0</pri>",
+    ...emptyRelevantVariables("\t\t\t"),
+    `\t\t\t<Int sr="arg1" val="${t.ignoreSetByTasker ? 1 : 0}"/>`,
+    "\t\t</Event>",
+  ],
+});
+
+const appContext = (
+  t: AppOpenedTrigger,
+  packageName: string
+): XmlContext => ({
+  isEvent: false,
+  lines: (sr) => [
+    `\t\t<App sr="${sr}" ve="2">`,
+    ...(t.invert ? ["\t\t\t<flags>2</flags>"] : []),
+    `\t\t\t<label0>${escapeXml(t.app)}</label0>`,
+    `\t\t\t<pkg0>${escapeXml(packageName)}</pkg0>`,
+    "\t\t</App>",
+  ],
+});
+
+const xmlContextOf = (trigger: Trigger): XmlContext | undefined =>
+  Match.value(trigger).pipe(
+    Match.tag("ClipboardChangedTrigger", clipboardChangedContext),
+    Match.tag("AppOpenedTrigger", (t) =>
+      t.packageName === undefined ? undefined : appContext(t, t.packageName)
+    ),
+    Match.orElse(() => undefined)
+  );
+
+/**
+ * Every trigger's XML context (event first, as Tasker expects), or undefined
+ * when any trigger lacks a known XML form or there is more than one event.
+ */
+const xmlContextsOf = (
+  profile: Profile
+): ReadonlyArray<XmlContext> | undefined => {
+  const contexts = profile.triggers.map(xmlContextOf);
+  if (contexts.some((context) => context === undefined)) return undefined;
+  const known = contexts as ReadonlyArray<XmlContext>;
+  const events = known.filter((context) => context.isEvent);
+  if (events.length > 1) return undefined;
+  return [...events, ...known.filter((context) => !context.isEvent)];
+};
+
+/** Anonymous profile task running the dispatcher file (action 131) */
+const anonymousDispatchTask = (id: number, dispatcherPath: string): Array<string> => [
+  `\t<Task sr="task${id}">`,
+  "\t\t<cdate>1</cdate>",
+  `\t\t<id>${id}</id>`,
+  ...xmlAction(0, 131, [
+    strArg(0, dispatcherPath),
+    strArg(1, ""),
+    intArg(2, 1),
+    intArg(3, 600),
+  ]),
+  "\t</Task>",
+];
+
+const PROFILE_XML_ID = 100;
+const PROFILE_ENTER_TASK_ID = 101;
+const PROFILE_EXIT_TASK_ID = 102;
+
+/** Options for the generated per-profile / per-task XML */
+export interface ImportableXmlOptions {
+  /** Device directory holding the synced JS files */
+  readonly jsDir?: string;
+}
+
+/**
+ * Importable Tasker **profile** XML (`.prf.xml`) for a profile whose
+ * triggers all have a known XML form, or undefined otherwise.
+ *
+ * The enter/exit tasks are anonymous (no name, so importing never clashes
+ * with existing tasks) and run the dispatcher file directly; it resolves the
+ * profile from %caller1. The event's own variables (e.g. %cl_text) are
+ * therefore locals of the dispatcher's script.
+ */
+export const compileProfileXml = (
+  profile: Profile,
+  options: ImportableXmlOptions = {}
+): string | undefined => {
+  const contexts = xmlContextsOf(profile);
+  if (contexts === undefined) return undefined;
+  const dispatcherPath = `${options.jsDir ?? DEFAULT_DEVICE_JS_DIR}${DISPATCHER_FILENAME}`;
+  const hasExit = profile.exit !== undefined;
+  return [
+    '<TaskerData sr="" dvi="1" tv="6.7.8">',
+    `\t<Profile sr="prof${PROFILE_XML_ID}" ve="2">`,
+    "\t\t<cdate>1</cdate>",
+    `\t\t<id>${PROFILE_XML_ID}</id>`,
+    `\t\t<mid0>${PROFILE_ENTER_TASK_ID}</mid0>`,
+    ...(hasExit ? [`\t\t<mid1>${PROFILE_EXIT_TASK_ID}</mid1>`] : []),
+    `\t\t<nme>${escapeXml(profile.name)}</nme>`,
+    ...contexts.flatMap((context, index) => context.lines(`con${index}`)),
+    "\t</Profile>",
+    ...anonymousDispatchTask(PROFILE_ENTER_TASK_ID, dispatcherPath),
+    ...(hasExit ? anonymousDispatchTask(PROFILE_EXIT_TASK_ID, dispatcherPath) : []),
+    "</TaskerData>",
+    "",
+  ].join("\n");
+};
+
+/**
+ * Importable Tasker **task** XML (`.tsk.xml`) for a standalone task: a named
+ * task running `TE Dispatch` with %par1 = the task name, ready to bind to a
+ * shortcut, widget or gesture.
+ */
+export const compileTaskXml = (task: Task): string =>
+  [
+    '<TaskerData sr="" dvi="1" tv="6.7.8">',
+    ...xmlTask(PROFILE_XML_ID, task.name, [
+      ...xmlAction(0, PERFORM_TASK_CODE, [
+        strArg(0, DISPATCH_TASK_NAME),
+        intArg(1, 10),
+        intArg(10, 0),
+        strArg(2, task.name),
+        strArg(3, ""),
+        strArg(4, ""),
+        intArg(5, 0),
+        intArg(6, 0),
+        strArg(7, ""),
+        intArg(8, 0),
+        intArg(9, 0),
+      ]),
+    ]),
+    "</TaskerData>",
+    "",
+  ].join("\n");
+
 const dispatcherReadmeSection = (project: Project): Array<string> => [
   "## One-time setup",
   "",
@@ -1363,9 +1541,11 @@ const checkFilenames = (project: Project): void => {
     if (profile.exit !== undefined) {
       claim(`${slug}.exit.js`, `Profile "${profile.name}" (exit)`);
     }
+    claim(`${slug}.prf.xml`, `Profile "${profile.name}" (XML)`);
   }
   for (const task of project.tasks) {
     claim(`${slugify(task.name)}.js`, `Task "${task.name}"`);
+    claim(`${slugify(task.name)}.tsk.xml`, `Task "${task.name}" (XML)`);
   }
   if (problems.length > 0) {
     throw new CompileError({ message: problems.join("; "), source: project.name });
@@ -1382,13 +1562,28 @@ export const compileProjectFiles = (
   const files: Array<CompiledFile> = [];
   for (const profile of project.profiles) {
     files.push(...compileProfileFiles(profile));
+    const xml = compileProfileXml(profile);
+    if (xml !== undefined) {
+      files.push({
+        filename: `${slugify(profile.name)}.prf.xml`,
+        content: xml,
+        kind: "tasker-xml",
+      });
+    }
   }
   for (const task of project.tasks) {
-    files.push({
-      filename: `${slugify(task.name)}.js`,
-      content: compileTaskToJs(task),
-      kind: "task-js",
-    });
+    files.push(
+      {
+        filename: `${slugify(task.name)}.js`,
+        content: compileTaskToJs(task),
+        kind: "task-js",
+      },
+      {
+        filename: `${slugify(task.name)}.tsk.xml`,
+        content: compileTaskXml(task),
+        kind: "tasker-xml",
+      }
+    );
   }
   files.push({
     filename: DISPATCHER_FILENAME,
@@ -1437,7 +1632,7 @@ export const compileProjectFiles = (
           "",
           ...project.tasks.map(
             (task) =>
-              `- ${task.name}: \`${slugify(task.name)}.js\`${task.description !== undefined ? ` — ${task.description}` : ""}`
+              `- ${task.name}: \`${slugify(task.name)}.js\` (import \`${slugify(task.name)}.tsk.xml\` to run it from a shortcut)${task.description !== undefined ? ` — ${task.description}` : ""}`
           ),
           "",
         ]

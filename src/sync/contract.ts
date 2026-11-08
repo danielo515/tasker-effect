@@ -142,6 +142,8 @@ export const DEFAULT_ASSET_SUFFIXES: ReadonlyArray<string> = [
   ".json",
   ".html",
   ".prj.xml",
+  ".prf.xml",
+  ".tsk.xml",
 ];
 
 // =============================================================================

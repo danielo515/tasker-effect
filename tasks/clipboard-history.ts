@@ -54,10 +54,13 @@ export const clipboardHistory = new Profile({
   name: "Clipboard History",
   description:
     `Keeps the last ${MAX_ENTRIES} clipboard entries in %${HISTORY_GLOBAL} with no expiry. ` +
-    "Add an App context for Bitwarden with Invert ticked so passwords are never stored.",
+    "Copies made while Bitwarden is in the foreground are never stored.",
   triggers: [
-    Trigger.event("Clipboard Changed"),
-    Trigger.state("App", "Bitwarden — tick Invert"),
+    Trigger.clipboardChanged(),
+    Trigger.appOpened("Bitwarden", {
+      packageName: "com.x8bit.bitwarden",
+      invert: true,
+    }),
   ],
   enter: new Task({
     name: "Record Clipboard",
