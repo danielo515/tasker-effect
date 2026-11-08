@@ -4,7 +4,7 @@
 
 TypeScript library for writing Tasker (Android automation app) tasks in TypeScript, compiled to JavaScript that Tasker executes directly.
 
-**Key insight:** Tasker runs JavaScript natively (JavaScript/JavaScriptlet actions). We never generate XML. TypeScript → JS → the device pulls the latest build and runs it.
+**Key insight:** Tasker runs JavaScript natively (JavaScript/JavaScriptlet actions). Logic is never compiled to XML: TypeScript → JS → the device pulls the latest build and runs it. The only XML is the import-once `tasker-effect.prj.xml` (scaffolding plus thin profile wiring).
 
 ## Tech Stack
 
