@@ -327,7 +327,7 @@ artifact and publishes two kinds of GitHub release: a rolling one
 stale assets are pruned, so it contains exactly what the build produces —
 and an immutable per-push snapshot (`tasker-js-vN`, marked "not latest" so
 devices ignore it). Besides one asset per compiled file, both carry
-`tasker-js.zip` (all of them, flat at the zip root; `bun run compile`
+`tasker-js.zip` (all of them, flat at the zip root; the CI release job
 builds it), which is what devices download.
 
 **One-time device setup:**
