@@ -11,8 +11,8 @@
  *   (tasks/web/clipboard-history.html) lists the entries; tapping one copies
  *   it back to the clipboard.
  *
- * Password managers: add an inverted App context for Bitwarden to the
- * profile so copies made from it are never stored.
+ * Password managers: the profile has an inverted App context for Bitwarden
+ * so copies made from it are never stored.
  */
 
 import { Action, Trigger, Task, Profile } from "../src/index.js";
@@ -29,7 +29,9 @@ export const HISTORY_SCENE_FILE = "clipboard-history.scene.json";
 // Plain ES5: this runs inside Tasker's JavaScript engine.
 const recordClipJs = [
   `var MAX = ${MAX_ENTRIES};`,
-  'var clip = global("CLIP");',
+  "// %cl_text is the Clipboard Changed event's own output; %CLIP is a fallback.",
+  'var clip = local("cl_text");',
+  'if (clip === undefined || clip === null || clip === "") clip = global("CLIP");',
   'if (clip !== undefined && clip !== null && String(clip).replace(/\\s/g, "") !== "") {',
   "  clip = String(clip);",
   "  var history = [];",
@@ -52,10 +54,13 @@ export const clipboardHistory = new Profile({
   name: "Clipboard History",
   description:
     `Keeps the last ${MAX_ENTRIES} clipboard entries in %${HISTORY_GLOBAL} with no expiry. ` +
-    "Add an App context for Bitwarden with Invert ticked so passwords are never stored.",
+    "Copies made while Bitwarden is in the foreground are never stored.",
   triggers: [
-    Trigger.event("Clipboard Changed"),
-    Trigger.state("App", "Bitwarden — tick Invert"),
+    Trigger.clipboardChanged(),
+    Trigger.appOpened("Bitwarden", {
+      packageName: "com.x8bit.bitwarden",
+      invert: true,
+    }),
   ],
   enter: new Task({
     name: "Record Clipboard",

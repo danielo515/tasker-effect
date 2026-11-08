@@ -5,6 +5,7 @@ import {
   Task,
   Profile,
   Project,
+  SCENE_JS_DIR_PLACEHOLDER,
   fmt,
   secret,
 } from "../src/profile.js";
@@ -29,6 +30,14 @@ import {
   syncBootstrapJs,
   taskerProjectXml,
 } from "../src/compiler.js";
+import {
+  MENU_HTML_FILENAME,
+  MENU_SCENE_FILENAME,
+  MENU_SCRIPT_FILENAME,
+  MENU_TASK_NAME,
+  MENU_TIMEOUT_MS,
+  menuSceneJson,
+} from "../src/menu.js";
 
 const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
@@ -114,7 +123,7 @@ describe("compileDispatcherJs", () => {
     expect(source).toContain('parseInt(global("TE_SCAFFOLD_VERSION"), 10)');
     expect(source).toContain(`if (installed < ${SCAFFOLD_VERSION}) {`);
     expect(source).toContain(
-      `tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir`
+      `tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - delete the Tasker Effect project (Delete Contents) and re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir`
     );
     // Warn-only: the check flashes but never returns/exits before dispatch.
     expectValidJs(source);
@@ -128,18 +137,19 @@ describe("taskerProjectXml", () => {
     expect(() => new Function(code)).not.toThrow();
   };
 
-  it("is a project export: Project element listing the profile and the four tasks", () => {
+  it("is a project export: Project element listing the profile and the five tasks", () => {
     expect(xml).toContain('<TaskerData sr="" dvi="1"');
     expect(xml).toContain('<Project sr="proj0" ve="2">');
     expect(xml).toContain("<pids>4</pids>");
-    expect(xml).toContain("<tids>1,2,3,5</tids>");
-    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(4);
+    expect(xml).toContain("<tids>1,2,3,5,6</tids>");
+    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(5);
     expect(xml.match(/<Profile sr="prof\d+" ve="2">/g)).toHaveLength(1);
     for (const name of [
       DISPATCH_TASK_NAME,
       SYNC_TASK_NAME,
       CONFIG_TASK_NAME,
       SHOW_SCENE_TASK_NAME,
+      MENU_TASK_NAME,
     ]) {
       expect(xml).toContain(`<nme>${name}</nme>`);
     }
@@ -232,8 +242,8 @@ describe("taskerProjectXml", () => {
     expect(configLabelFileJs).toContain('var label = local("te_label");');
     expect(configLabelFileJs).toContain(SECRETS_FILENAME);
     expect(configLabelFileJs).toContain('setLocal("te_prompt", label);');
-    // Still exactly the four sanctioned tasks.
-    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(4);
+    // Still exactly the five sanctioned tasks.
+    expect(xml.match(/<Task sr="task\d+">/g)).toHaveLength(5);
   });
 
   it("TE Config's synced scan file waits for secrets.json and collects unset secrets", () => {
@@ -291,7 +301,7 @@ describe("taskerProjectXml", () => {
     );
   });
 
-  it("is static scaffolding: identical across projects and free of user content", () => {
+  it("is static scaffolding plus profile wiring, free of task content", () => {
     const projectA = makeProject();
     const projectB = new Project({
       name: "Totally Different",
@@ -313,11 +323,13 @@ describe("taskerProjectXml", () => {
     );
 
     expect(xmlA).toBeDefined();
+    // Neither project has a profile with XML-able triggers, so both get the
+    // same static scaffolding.
     expect(xmlA!.content).toBe(xmlB!.content);
     expect(xmlA!.kind).toBe("tasker-xml");
-    // No per-task content: user task/profile names, compiled JS and secret
-    // names must never leak into the XML — only the static scaffolding plus
-    // the dispatcher pointer and repo slug.
+    // No per-task content: standalone task names, compiled JS and secret
+    // names must never leak into the XML — only the static scaffolding, the
+    // dispatcher pointer, the repo slug and wired profiles' names/triggers.
     for (const marker of [
       "Morning Routine",
       "Weather Check",
@@ -329,19 +341,54 @@ describe("taskerProjectXml", () => {
     ]) {
       expect(xmlA!.content).not.toContain(marker);
     }
-    // Exactly the sanctioned scaffolding names appear as tasks.
-    const taskNames = [...xmlA!.content.matchAll(/<nme>([^<]*)<\/nme>/g)].map(
-      (match) => match[1]
+    // Exactly the sanctioned scaffolding names appear.
+    const scaffoldNames = [
+      DISPATCH_TASK_NAME,
+      SYNC_TASK_NAME,
+      CONFIG_TASK_NAME,
+      SHOW_SCENE_TASK_NAME,
+      MENU_TASK_NAME,
+      SYNC_PROFILE_NAME,
+    ];
+    const namesIn = (xml: string) =>
+      [...xml.matchAll(/<nme>([^<]*)<\/nme>/g)].map((match) => match[1]).sort();
+    expect(namesIn(xmlA!.content)).toEqual([...scaffoldNames].sort());
+
+    // A wired profile adds only its own name and its generated stub task
+    // name; its enter task's name, standalone tasks, compiled JS and
+    // secrets stay out.
+    const wired = new Project({
+      name: "Wired",
+      profiles: [
+        new Profile({
+          name: "Clip Watch",
+          triggers: [Trigger.clipboardChanged()],
+          enter: new Task({
+            name: "Clip Enter Task",
+            actions: [
+              Action.flash(fmt`c ${secret("WIRED_SECRET_KEY", "wired secret")}`),
+            ],
+          }),
+        }),
+      ],
+      tasks: [new Task({ name: "Wired Standalone", actions: [Action.flash("w")] })],
+    });
+    const xmlW = compileProjectFiles(wired, { repo: TEST_REPO }).find(
+      (file) => file.filename === TASKER_PROJECT_XML_FILENAME
+    )!.content;
+    expect(namesIn(xmlW)).toEqual(
+      [...scaffoldNames, "Clip Watch", "TE Clip Watch (enter)"].sort()
     );
-    expect(taskNames.sort()).toEqual(
-      [
-        DISPATCH_TASK_NAME,
-        SYNC_TASK_NAME,
-        CONFIG_TASK_NAME,
-        SHOW_SCENE_TASK_NAME,
-        SYNC_PROFILE_NAME,
-      ].sort()
-    );
+    for (const marker of [
+      "Clip Enter Task",
+      "Wired Standalone",
+      "WIRED_SECRET_KEY",
+      "clip-watch.enter.js",
+      "wired-standalone.js",
+      'flash("w")',
+    ]) {
+      expect(xmlW).not.toContain(marker);
+    }
   });
 });
 
@@ -370,5 +417,58 @@ describe("compileProjectFiles with dispatcher", () => {
     expect(readme?.content).toContain(TASKER_PROJECT_XML_FILENAME);
     expect(readme?.content).toContain("Import Project");
     expect(readme?.content).toContain("%caller1");
+  });
+});
+
+describe("TE Menu files", () => {
+  const files = compileProjectFiles(makeProject(), { repo: TEST_REPO });
+  const file = (name: string) => files.find((f) => f.filename === name)!;
+
+  it("ships the menu script, scene and page as synced assets", () => {
+    expect(file(MENU_SCRIPT_FILENAME).kind).toBe("scaffold-js");
+    expect(file(MENU_SCENE_FILENAME).kind).toBe("web-asset");
+    expect(file(MENU_HTML_FILENAME).kind).toBe("web-asset");
+    expect(file(MENU_HTML_FILENAME).content).toContain("TE_MENU_PICK");
+  });
+
+  it("the menu script parses and runs the pick in the dispatcher scope", () => {
+    const script = file(MENU_SCRIPT_FILENAME).content;
+    expectValidJs(script);
+    expect(script).toContain(`performTask("${SHOW_SCENE_TASK_NAME}", 10,`);
+    expect(script).toContain(JSON.stringify(SCENE_JS_DIR_PLACEHOLDER));
+    expect(script).toContain(`__waited < ${MENU_TIMEOUT_MS}`);
+    expect(script).toContain("eval(__source);");
+    // Re-performing TE Dispatch from inside it would be dropped.
+    expect(script).not.toContain(`performTask("${DISPATCH_TASK_NAME}"`);
+  });
+
+  it("the scene JSON parses and loads te-menu.html via the placeholder", () => {
+    const scene = JSON.parse(file(MENU_SCENE_FILENAME).content);
+    expect(scene.name).toBe(MENU_TASK_NAME);
+    expect(scene.root.children[0].content).toBe(
+      `${SCENE_JS_DIR_PLACEHOLDER}${MENU_HTML_FILENAME}`
+    );
+    expect(scene.root.children[0].jsBridgeEnabled).toBe(true);
+    expect(file(MENU_SCENE_FILENAME).content).toBe(
+      menuSceneJson(SCENE_JS_DIR_PLACEHOLDER)
+    );
+  });
+
+  it("the dispatcher maps TE Menu to the menu script", () => {
+    expect(compileDispatcherJs(makeProject())).toContain(
+      `"${MENU_TASK_NAME}": "${MENU_SCRIPT_FILENAME}",`
+    );
+  });
+
+  it("rejects a user task named TE Menu", () => {
+    expect(() =>
+      compileProjectFiles(
+        new Project({
+          name: "P",
+          tasks: [new Task({ name: MENU_TASK_NAME, actions: [Action.flash("x")] })],
+        }),
+        { repo: TEST_REPO }
+      )
+    ).toThrow(/te-menu\.js/);
   });
 });

@@ -11,6 +11,8 @@
 import { Array as Arr, Effect, Match, Order, Schema } from "effect";
 import {
   type Action,
+  type AppOpenedTrigger,
+  type ClipboardChangedTrigger,
   type JsCode,
   type ShowScene,
   type Text,
@@ -27,6 +29,15 @@ import {
   variableName,
   varNameOf,
 } from "./profile.js";
+import {
+  MENU_HTML_FILENAME,
+  MENU_SCENE_FILENAME,
+  MENU_SCRIPT_FILENAME,
+  MENU_TASK_NAME,
+  menuHtml,
+  menuSceneJson,
+  menuScriptJs,
+} from "./menu.js";
 
 // =============================================================================
 // Errors & output types
@@ -51,6 +62,7 @@ export interface CompiledFile {
     | "scaffold-js"
     | "tasker-xml"
     | "secrets-json"
+    | "web-asset"
     | "doc";
 }
 
@@ -421,7 +433,15 @@ export const describeTrigger = (trigger: Trigger): string =>
       "BluetoothConnectedTrigger",
       (t) => `State > Net > BT Connected (Name: ${t.name})`
     ),
-    Match.tag("AppOpenedTrigger", (t) => `Application: ${t.app}`),
+    Match.tag(
+      "AppOpenedTrigger",
+      (t) => `Application: ${t.invert ? "NOT " : ""}${t.app}`
+    ),
+    Match.tag(
+      "ClipboardChangedTrigger",
+      (t) =>
+        `Event > System > Clipboard Changed (Ignore Set By Tasker: ${t.ignoreSetByTasker ? "on" : "off"})`
+    ),
     Match.tag(
       "BatteryLevelTrigger",
       (t) => `State > Power > Battery Level from ${t.from}% to ${t.to}%`
@@ -495,7 +515,9 @@ const profileReadmeSection = (profile: Profile): string => {
     `### Profile: ${profile.name}`,
     "",
     ...(profile.description !== undefined ? [profile.description, ""] : []),
-    "Triggers to configure in the Tasker UI:",
+    ...(hasXmlWiring(profile)
+      ? [`Wired in \`${TASKER_PROJECT_XML_FILENAME}\` (nothing to set up). Triggers:`]
+      : ["Triggers to configure in the Tasker UI:"]),
     "",
     ...profile.triggers.map((trigger) => `- ${describeTrigger(trigger)}`),
     "",
@@ -554,7 +576,14 @@ export const CONFIG_LABEL_FILENAME = "te-config-label.js";
  * stamp against its own baked-in version and flashes a re-import warning
  * (without blocking dispatch) when the imported XML is older.
  */
-export const SCAFFOLD_VERSION = 3;
+export const SCAFFOLD_VERSION = 4;
+
+/**
+ * How to update the imported XML: Tasker refuses to import a project whose
+ * name already exists, so the old one must be deleted first (globals, and
+ * with them the secrets, survive the deletion).
+ */
+const REIMPORT_HINT = `delete the Tasker Effect project (Delete Contents) and re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir`;
 
 /**
  * Compile the dispatcher: a single JS file that resolves which compiled file
@@ -578,9 +607,13 @@ export const compileDispatcherJs = (project: Project): string => {
       profile.exit !== undefined ? `, exit: ${js(`${slug}.exit.js`)}` : "";
     return `    ${js(profile.name)}: { enter: ${js(`${slug}.enter.js`)}${exitPart} },`;
   });
-  const taskEntries = project.tasks.map(
-    (task) => `    ${js(task.name)}: ${js(`${slugify(task.name)}.js`)},`
-  );
+  const taskEntries = [
+    ...project.tasks.map(
+      (task) => `    ${js(task.name)}: ${js(`${slugify(task.name)}.js`)},`
+    ),
+    `    ${js(MENU_TASK_NAME)}: ${js(MENU_SCRIPT_FILENAME)},`,
+  ];
+  const wiring = profileWiringHash(project.profiles);
 
   return [
     ...header(
@@ -605,7 +638,12 @@ export const compileDispatcherJs = (project: Project): string => {
     '    var installed = parseInt(global("TE_SCAFFOLD_VERSION"), 10);',
     "    if (!(installed > 0)) installed = 0;",
     `    if (installed < ${SCAFFOLD_VERSION}) {`,
-    `      flash("tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir");`,
+    `      flash("tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - ${REIMPORT_HINT}");`,
+    "    }",
+    "    // Same for the profile wiring: the imported XML stamps its hash into",
+    "    // %TE_WIRING; a mismatch means profile triggers changed since import.",
+    `    if (global("TE_WIRING") !== ${js(wiring)}) {`,
+    `      flash("tasker-effect: profile triggers changed - ${REIMPORT_HINT}");`,
     "    }",
     "",
     '    var par1 = local("par1");',
@@ -705,7 +743,8 @@ const jsDirPreamble = (jsDir: string): Array<string> => [
  * Bootstrap snippet inside the `TE Sync` task: run the synced
  * sync-profiles.js if present, otherwise self-install it from the rolling
  * GitHub release with a synchronous XHR first. Stamps the imported XML's
- * {@link SCAFFOLD_VERSION} into %TE_SCAFFOLD_VERSION and always queues
+ * {@link SCAFFOLD_VERSION} into %TE_SCAFFOLD_VERSION (and, when given, the
+ * profile wiring hash into %TE_WIRING) and always queues
  * `TE Config` so newly declared secrets get prompted for after every sync.
  *
  * A GitHub token in the Tasker global %TE_GH_TOKEN is sent as an
@@ -713,7 +752,8 @@ const jsDirPreamble = (jsDir: string): Array<string> => [
  */
 export const syncBootstrapJs = (
   repo: RepoRef,
-  jsDir: string = DEFAULT_DEVICE_JS_DIR
+  jsDir: string = DEFAULT_DEVICE_JS_DIR,
+  wiringHash?: string
 ): string => {
   const url = `https://github.com/${repo.owner}/${repo.repo}/releases/download/${ROLLING_RELEASE_TAG}/${SYNC_SCRIPT_FILENAME}`;
   return [
@@ -736,6 +776,8 @@ export const syncBootstrapJs = (
     // Stamp the *imported* XML's scaffolding version, refreshed on every
     // sync, so the synced dispatcher can detect an outdated import.
     `setGlobal("TE_SCAFFOLD_VERSION", ${js(String(SCAFFOLD_VERSION))});`,
+    // Same for the imported profile wiring (see profileWiringHash).
+    ...(wiringHash === undefined ? [] : [`setGlobal("TE_WIRING", ${js(wiringHash)});`]),
     // Queued before the eval: the sync script completes asynchronously (and
     // calls exit() itself), so there is no "after sync" statement to hook.
     // TE Config tolerates the race by waiting for secrets.json on first run.
@@ -924,15 +966,23 @@ const scriptletAction = (
     intArg(3, options.timeoutSecs),
   ]);
 
+/**
+ * Tasker collision handling (`<rty>`): absent/0 = Abort New Task,
+ * 1 = Abort Existing Task, 2 = Run Both Together.
+ */
+const RUN_BOTH_TOGETHER = 2;
+
 const xmlTask = (
   id: number,
   name: string,
-  actions: ReadonlyArray<string>
+  actions: ReadonlyArray<string>,
+  options: { readonly collision?: number } = {}
 ): Array<string> => [
   `\t<Task sr="task${id}">`,
   "\t\t<cdate>1</cdate>",
   `\t\t<id>${id}</id>`,
   `\t\t<nme>${escapeXml(name)}</nme>`,
+  ...(options.collision === undefined ? [] : [`\t\t<rty>${options.collision}</rty>`]),
   ...actions,
   "\t</Task>",
 ];
@@ -942,6 +992,62 @@ const SYNC_TASK_ID = 2;
 const CONFIG_TASK_ID = 3;
 const SYNC_PROFILE_ID = 4;
 const SHOW_SCENE_TASK_ID = 5;
+const MENU_TASK_ID = 6;
+
+/** Perform Task action code */
+const PERFORM_TASK_CODE = 130;
+
+/**
+ * Perform Task (130) running `TE Dispatch` with %par1 = `par1`. Argument
+ * layout copied from test/fixtures/tasker-exports/show-clipboard-history.tsk.xml,
+ * which imported fine on a device.
+ */
+const performDispatchAction = (index: number, par1: string): Array<string> =>
+  xmlAction(index, PERFORM_TASK_CODE, [
+    strArg(0, DISPATCH_TASK_NAME),
+    intArg(1, 10),
+    intArg(10, 0),
+    strArg(2, par1),
+    strArg(3, ""),
+    strArg(4, ""),
+    intArg(5, 0),
+    intArg(6, 0),
+    strArg(7, ""),
+    intArg(8, 0),
+    intArg(9, 0),
+  ]);
+
+/** Names of the scaffold tasks in the project XML */
+const SCAFFOLD_TASK_NAMES: ReadonlyArray<string> = [
+  DISPATCH_TASK_NAME,
+  SYNC_TASK_NAME,
+  CONFIG_TASK_NAME,
+  SHOW_SCENE_TASK_NAME,
+  MENU_TASK_NAME,
+];
+
+/** Names that occur more than once */
+const duplicatesOf = (names: ReadonlyArray<string>): Array<string> =>
+  names.filter((name, index) => names.indexOf(name) !== index);
+
+/**
+ * Fail when two tasks or two profiles in the project XML share a name:
+ * Tasker links profiles to tasks by name on import.
+ */
+const checkXmlNames = (
+  taskNames: ReadonlyArray<string>,
+  profileNames: ReadonlyArray<string>
+): void => {
+  const problems = [
+    ...duplicatesOf(taskNames).map((name) => `task name "${name}" is used twice`),
+    ...duplicatesOf(profileNames).map((name) => `profile name "${name}" is used twice`),
+  ];
+  if (problems.length > 0) {
+    throw new CompileError({
+      message: `${TASKER_PROJECT_XML_FILENAME}: ${problems.join("; ")}`,
+    });
+  }
+};
 
 /** Options for the generated project XML */
 export interface TaskerProjectXmlOptions {
@@ -951,6 +1057,11 @@ export interface TaskerProjectXmlOptions {
   readonly dispatcherPath?: string;
   /** Device directory holding the synced JS files */
   readonly jsDir?: string;
+  /**
+   * The project's profiles. Those whose triggers all have a known XML form
+   * are wired in the XML; the others are left out (set up manually).
+   */
+  readonly profiles?: ReadonlyArray<Profile>;
 }
 
 /**
@@ -970,17 +1081,31 @@ export interface TaskerProjectXmlOptions {
  * - Task `TE Show Scene`: Show Scene v2 (479) with the layout JSON from
  *   `%par1`, used by the compiled `ShowScene` action — scenes themselves
  *   ship as synced JSON files, never in the XML.
+ * - Task `TE Menu`: Perform Task → `TE Dispatch` with %par1 = "TE Menu",
+ *   which lists the standalone tasks in a scene (bind it to a gesture or
+ *   shortcut once).
  * - Profile `TE Sync`: Time context repeating every 6 hours, enter task
  *   `TE Sync`.
+ * - Thin wiring for user profiles whose triggers have a known XML form:
+ *   the triggers plus named enter/exit tasks (`TE <profile> (enter|exit)`)
+ *   whose JavaScriptlet stamps the wiring hash into %TE_WIRING and
+ *   evaluates the dispatcher.
  *
- * The XML is static scaffolding for a one-time import: it never embeds
- * compiled logic, task names or secret names from the user's project — only
- * the pointer to the dispatcher and the embedded repository slug.
+ * Besides that wiring, the XML is static scaffolding for a one-time import:
+ * it never embeds compiled logic, standalone task names or secret names from
+ * the user's project — only the pointer to the dispatcher and the embedded
+ * repository slug.
  */
 export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
   const jsDir = options.jsDir ?? DEFAULT_DEVICE_JS_DIR;
   const dispatcherPath =
     options.dispatcherPath ?? `${jsDir}${DISPATCHER_FILENAME}`;
+  const profiles = options.profiles ?? [];
+  const user = userProfilesXml(profiles, jsDir);
+  checkXmlNames(
+    [...SCAFFOLD_TASK_NAMES, ...user.stubTasks.map((task) => task.name)],
+    [SYNC_PROFILE_NAME, ...user.profileNames]
+  );
 
   const isSetCondition = (variable: string): Array<string> => [
     '\t\t\t<ConditionList sr="if">',
@@ -1009,12 +1134,13 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
     "\t\t\t<tm>-1</tm>",
     "\t\t</Time>",
     "\t</Profile>",
+    ...user.profiles,
     // Project element tying the pieces together.
     '\t<Project sr="proj0" ve="2">',
     "\t\t<cdate>1</cdate>",
     "\t\t<name>Tasker Effect</name>",
-    `\t\t<pids>${SYNC_PROFILE_ID}</pids>`,
-    `\t\t<tids>${DISPATCH_TASK_ID},${SYNC_TASK_ID},${CONFIG_TASK_ID},${SHOW_SCENE_TASK_ID}</tids>`,
+    `\t\t<pids>${[SYNC_PROFILE_ID, ...user.ids].join(",")}</pids>`,
+    `\t\t<tids>${[DISPATCH_TASK_ID, SYNC_TASK_ID, CONFIG_TASK_ID, SHOW_SCENE_TASK_ID, MENU_TASK_ID, ...user.stubTasks.map((task) => task.id)].join(",")}</tids>`,
     "\t</Project>",
     // TE Dispatch: run the dispatcher file (Auto Exit on). The 600s action
     // timeout must exceed the config provider's default promptTimeoutMillis
@@ -1034,7 +1160,7 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
     // TE Sync: self-bootstrapping sync (Auto Exit off — the evaluated sync
     // script finishes asynchronously and calls exit() itself).
     ...xmlTask(SYNC_TASK_ID, SYNC_TASK_NAME, [
-      ...scriptletAction(0, syncBootstrapJs(options.repo, jsDir), {
+      ...scriptletAction(0, syncBootstrapJs(options.repo, jsDir, profileWiringHash(profiles)), {
         autoExit: false,
         timeoutSecs: 600,
       }),
@@ -1102,9 +1228,228 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
         strArg(9, ""),
       ]),
     ]),
+    // TE Menu: run the dispatcher with %par1 = "TE Menu"; the synced
+    // te-menu.js lists the standalone tasks and runs the tapped one.
+    ...xmlTask(MENU_TASK_ID, MENU_TASK_NAME, [
+      ...performDispatchAction(0, MENU_TASK_NAME),
+    ]),
+    ...user.tasks,
     "</TaskerData>",
     "",
   ].join("\n");
+};
+
+// =============================================================================
+// User profile wiring inside the project XML
+// =============================================================================
+
+// Layouts copied from real Tasker 6.7.8 exports (see
+// test/fixtures/tasker-exports/): Clipboard Changed is event code 2097 with
+// "Ignore Set By Tasker" in Int arg1; an App context is inverted by
+// <flags>2</flags>; Perform Task is action code 130.
+
+/** Event code of Event > System > Clipboard Changed */
+export const CLIPBOARD_CHANGED_EVENT_CODE = 2097;
+
+/** Bundle with an empty RELEVANT_VARIABLES list (event/action arg0) */
+const emptyRelevantVariables = (indent: string): Array<string> => [
+  `${indent}<Bundle sr="arg0">`,
+  `${indent}\t<Vals sr="val">`,
+  `${indent}\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES>&lt;StringArray sr=""/&gt;</net.dinglisch.android.tasker.RELEVANT_VARIABLES>`,
+  `${indent}\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>[Ljava.lang.String;</net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>`,
+  `${indent}\t</Vals>`,
+  `${indent}</Bundle>`,
+];
+
+/** A trigger's XML context, or undefined when it has no known XML form */
+interface XmlContext {
+  readonly isEvent: boolean;
+  readonly lines: (sr: string) => Array<string>;
+}
+
+const clipboardChangedContext = (t: ClipboardChangedTrigger): XmlContext => ({
+  isEvent: true,
+  lines: (sr) => [
+    `\t\t<Event sr="${sr}" ve="2">`,
+    `\t\t\t<code>${CLIPBOARD_CHANGED_EVENT_CODE}</code>`,
+    "\t\t\t<pri>0</pri>",
+    ...emptyRelevantVariables("\t\t\t"),
+    `\t\t\t<Int sr="arg1" val="${t.ignoreSetByTasker ? 1 : 0}"/>`,
+    "\t\t</Event>",
+  ],
+});
+
+const appContext = (
+  t: AppOpenedTrigger,
+  packageName: string
+): XmlContext => ({
+  isEvent: false,
+  lines: (sr) => [
+    `\t\t<App sr="${sr}" ve="2">`,
+    ...(t.invert ? ["\t\t\t<flags>2</flags>"] : []),
+    `\t\t\t<label0>${escapeXml(t.app)}</label0>`,
+    `\t\t\t<pkg0>${escapeXml(packageName)}</pkg0>`,
+    "\t\t</App>",
+  ],
+});
+
+const xmlContextOf = (trigger: Trigger): XmlContext | undefined =>
+  Match.value(trigger).pipe(
+    Match.tag("ClipboardChangedTrigger", clipboardChangedContext),
+    Match.tag("AppOpenedTrigger", (t) =>
+      t.packageName === undefined ? undefined : appContext(t, t.packageName)
+    ),
+    Match.orElse(() => undefined)
+  );
+
+/**
+ * Every trigger's XML context (event first, as Tasker expects), or undefined
+ * when any trigger lacks a known XML form or there is more than one event.
+ */
+const xmlContextsOf = (
+  profile: Profile
+): ReadonlyArray<XmlContext> | undefined => {
+  const contexts = profile.triggers.map(xmlContextOf);
+  if (contexts.some((context) => context === undefined)) return undefined;
+  const known = contexts as ReadonlyArray<XmlContext>;
+  const events = known.filter((context) => context.isEvent);
+  if (events.length > 1) return undefined;
+  return [...events, ...known.filter((context) => !context.isEvent)];
+};
+
+/** A profile that can be wired in the project XML, with its contexts */
+interface XmlProfile {
+  readonly profile: Profile;
+  readonly contexts: ReadonlyArray<XmlContext>;
+}
+
+/** The profiles whose triggers all have a known XML form, in order */
+const xmlProfilesOf = (profiles: ReadonlyArray<Profile>): Array<XmlProfile> =>
+  profiles.flatMap((profile) => {
+    const contexts = xmlContextsOf(profile);
+    return contexts === undefined ? [] : [{ profile, contexts }];
+  });
+
+/** Whether a profile is wired in the project XML (no manual trigger setup) */
+const hasXmlWiring = (profile: Profile): boolean =>
+  xmlContextsOf(profile) !== undefined;
+
+/** 32-bit FNV-1a hash as 8 hex digits */
+const fnv1a = (text: string): string => {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+
+/**
+ * Short deterministic hash of the profile wiring in the project XML (names,
+ * contexts, enter/exit presence). The imported XML stamps it into
+ * %TE_WIRING and the synced dispatcher warns when it differs, i.e. when the
+ * profile triggers changed and the XML must be re-imported.
+ */
+export const profileWiringHash = (profiles: ReadonlyArray<Profile>): string =>
+  fnv1a(
+    xmlProfilesOf(profiles)
+      .map(({ profile, contexts }) =>
+        [
+          profile.name,
+          profile.exit === undefined ? "enter" : "enter+exit",
+          ...contexts.flatMap((context) => context.lines("con")),
+        ].join("\n")
+      )
+      .join("\n\n")
+  );
+
+/** First id used for user profiles (scaffold ids stay below it) */
+const USER_PROFILE_BASE_ID = 10;
+
+/** Profile id, then enter/exit task ids, for the n-th XML profile */
+const userProfileIds = (index: number) => {
+  const id = USER_PROFILE_BASE_ID + index * 3;
+  return { id, enter: id + 1, exit: id + 2 };
+};
+
+/**
+ * Name of the generated task a wired profile runs on enter/exit. These must
+ * be *named* tasks: Tasker drops anonymous tasks on project import (and the
+ * profile could then link to an unrelated task with the same id), while
+ * named tasks are remapped correctly even when their XML ids collide.
+ */
+export const profileTaskName = (profile: Profile, phase: "enter" | "exit"): string =>
+  `TE ${profile.name} (${phase})`;
+
+/** JavaScriptlet of the profile tasks */
+const profileStubJs = (jsDir: string, wiringHash: string): string =>
+  [
+    ...jsDirPreamble(jsDir),
+    `setGlobal("TE_WIRING", ${js(wiringHash)});`,
+    `eval(readFile(dir + ${js(DISPATCHER_FILENAME)}));`,
+  ].join("\n");
+
+/** A generated profile task: id and name */
+interface StubTask {
+  readonly id: number;
+  readonly name: string;
+}
+
+/** The user profiles' XML: <Profile> elements and their named stub tasks */
+const userProfilesXml = (
+  profiles: ReadonlyArray<Profile>,
+  jsDir: string
+): {
+  readonly ids: Array<number>;
+  readonly profileNames: Array<string>;
+  readonly stubTasks: Array<StubTask>;
+  readonly profiles: Array<string>;
+  readonly tasks: Array<string>;
+} => {
+  // The JavaScriptlet stamps the wiring hash and evaluates the dispatcher in
+  // the profile's own task, so the event's locals (e.g. %cl_text) and
+  // %caller1 stay visible to the compiled code.
+  const stub = profileStubJs(jsDir, profileWiringHash(profiles));
+  const wired = xmlProfilesOf(profiles).map(({ profile, contexts }, index) => {
+    const ids = userProfileIds(index);
+    const hasExit = profile.exit !== undefined;
+    const stubTasks: Array<StubTask> = [
+      { id: ids.enter, name: profileTaskName(profile, "enter") },
+      ...(hasExit ? [{ id: ids.exit, name: profileTaskName(profile, "exit") }] : []),
+    ];
+    return {
+      id: ids.id,
+      name: profile.name,
+      stubTasks,
+      profile: [
+        `\t<Profile sr="prof${ids.id}" ve="2">`,
+        "\t\t<cdate>1</cdate>",
+        `\t\t<id>${ids.id}</id>`,
+        `\t\t<mid0>${ids.enter}</mid0>`,
+        ...(hasExit ? [`\t\t<mid1>${ids.exit}</mid1>`] : []),
+        `\t\t<nme>${escapeXml(profile.name)}</nme>`,
+        ...contexts.flatMap((context, i) => context.lines(`con${i}`)),
+        "\t</Profile>",
+      ],
+      tasks: stubTasks.flatMap((task) =>
+        // Run Both Together: with the default (Abort New) a second trigger
+        // while the task still runs is dropped, e.g. two quick copies.
+        xmlTask(
+          task.id,
+          task.name,
+          [...scriptletAction(0, stub, { autoExit: true, timeoutSecs: 600 })],
+          { collision: RUN_BOTH_TOGETHER }
+        )
+      ),
+    };
+  });
+  return {
+    ids: wired.map((entry) => entry.id),
+    profileNames: wired.map((entry) => entry.name),
+    stubTasks: wired.flatMap((entry) => entry.stubTasks),
+    profiles: wired.flatMap((entry) => entry.profile),
+    tasks: wired.flatMap((entry) => entry.tasks),
+  };
 };
 
 const dispatcherReadmeSection = (project: Project): Array<string> => [
@@ -1113,19 +1458,20 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
   `1. Import \`${TASKER_PROJECT_XML_FILENAME}\` once in Tasker (long-press the home`,
   "   icon at the bottom left → Import Project). This creates the shared task",
   `   \`${DISPATCH_TASK_NAME}\`, the self-bootstrapping \`${SYNC_TASK_NAME}\` task with its periodic`,
-  `   profile, the \`${CONFIG_TASK_NAME}\` secrets prompter and the generic \`${SHOW_SCENE_TASK_NAME}\``,
-  "   task used by `Action.showScene`. Enable the `" + SYNC_PROFILE_NAME + "`",
+  `   profile, the \`${CONFIG_TASK_NAME}\` secrets prompter, the generic \`${SHOW_SCENE_TASK_NAME}\``,
+  `   task used by \`Action.showScene\`, the \`${MENU_TASK_NAME}\` task and every profile`,
+  "   below whose triggers have a known XML form. Enable the `" + SYNC_PROFILE_NAME + "`",
   "   profile (or run the task once) and it downloads everything else by",
   "   itself — no files need to be copied manually.",
-  "2. For each profile below, configure its trigger(s) in the Tasker UI and",
-  `   set both the enter and the exit task to \`${DISPATCH_TASK_NAME}\`. The dispatcher`,
-  "   detects the calling profile from `%caller1` (`profile=enter:<name>` /",
-  "   `profile=exit:<name>`) and runs the matching file.",
+  "2. For each profile below marked \"Triggers to configure\", set up its",
+  `   trigger(s) in the Tasker UI with \`${DISPATCH_TASK_NAME}\` as enter and exit task. The`,
+  "   dispatcher detects the calling profile from `%caller1`",
+  "   (`profile=enter:<name>` / `profile=exit:<name>`) and runs the matching file.",
   ...(project.tasks.length > 0
     ? [
-        `3. Run standalone tasks with Perform Task → \`${DISPATCH_TASK_NAME}\`, passing the`,
-        "   task name as `%par1` (use `%par2` = `exit` to force a profile's exit",
-        "   file when calling explicitly).",
+        `3. Bind \`${MENU_TASK_NAME}\` to a gesture or shortcut: it lists the standalone`,
+        `   tasks and runs the one you tap. Or Perform Task → \`${DISPATCH_TASK_NAME}\` with`,
+        "   the task name as `%par1` (`%par2` = `exit` forces a profile's exit file).",
       ]
     : []),
   "",
@@ -1133,10 +1479,11 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
   "the Tasker global `%TE_JS_DIR` (then also edit the path in the imported",
   "task).",
   "",
-  `Sync also keeps the current \`${TASKER_PROJECT_XML_FILENAME}\` in that directory, so`,
-  "when a release changes the scaffolding, re-import it from there (delete",
-  "the old Tasker Effect project first — Tasker duplicates on import — and",
-  `re-attach \`${DISPATCH_TASK_NAME}\` on your profiles afterwards).`,
+  `Sync also keeps the current \`${TASKER_PROJECT_XML_FILENAME}\` in that directory.`,
+  "Re-import it from there when the dispatcher flashes a warning (scaffolding",
+  "outdated or profile triggers changed). Tasker refuses to import a project",
+  "whose name exists, so first delete the Tasker Effect project (choose",
+  "Delete Contents); global variables, including secrets, survive.",
   "",
 ];
 
@@ -1332,6 +1679,9 @@ const RESERVED_FILENAMES: ReadonlySet<string> = new Set([
   SECRETS_FILENAME,
   TASKER_PROJECT_XML_FILENAME,
   SYNC_SCRIPT_FILENAME,
+  MENU_SCRIPT_FILENAME,
+  MENU_SCENE_FILENAME,
+  MENU_HTML_FILENAME,
   "README.md",
 ]);
 
@@ -1405,6 +1755,19 @@ export const compileProjectFiles = (
     content: configLabelFileJs,
     kind: "scaffold-js",
   });
+  files.push(
+    {
+      filename: MENU_SCRIPT_FILENAME,
+      content: menuScriptJs(SHOW_SCENE_TASK_NAME, SCENE_JS_DIR_PLACEHOLDER),
+      kind: "scaffold-js",
+    },
+    {
+      filename: MENU_SCENE_FILENAME,
+      content: menuSceneJson(SCENE_JS_DIR_PLACEHOLDER),
+      kind: "web-asset",
+    },
+    { filename: MENU_HTML_FILENAME, content: menuHtml, kind: "web-asset" }
+  );
   files.push({
     filename: SECRETS_FILENAME,
     content: compileSecretsJson(project),
@@ -1412,7 +1775,7 @@ export const compileProjectFiles = (
   });
   files.push({
     filename: TASKER_PROJECT_XML_FILENAME,
-    content: taskerProjectXml({ repo: options.repo }),
+    content: taskerProjectXml({ repo: options.repo, profiles: project.profiles }),
     kind: "tasker-xml",
   });
 

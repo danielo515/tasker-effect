@@ -167,13 +167,18 @@ esbuild script.ts --bundle --minify --format=iife --platform=browser --outfile=d
 
 Compiling a `Project` also emits extra files:
 
-- **`tasker-effect.prj.xml`** — static scaffolding as an importable Tasker
-  *project*: the shared **TE Dispatch** task (a file-based *JavaScript*
-  action, Auto Exit on, pointing at `/sdcard/Tasker/js/dispatcher.js`), the
-  self-bootstrapping **TE Sync** task with a periodic **TE Sync** profile
-  (every 6 hours), and the **TE Config** secrets prompter. It never embeds
-  compiled logic, so you import it exactly once: Tasker → long-press the
-  home icon (bottom left) → *Import Project*.
+- **`tasker-effect.prj.xml`** — the only file you import: Tasker →
+  long-press the home icon (bottom left) → *Import Project*. It holds the
+  shared **TE Dispatch** task (a file-based *JavaScript* action, Auto Exit
+  on, pointing at `/sdcard/Tasker/js/dispatcher.js`), the self-bootstrapping
+  **TE Sync** task with a periodic **TE Sync** profile (every 6 hours), the
+  **TE Config** secrets prompter, **TE Show Scene**, and **TE Menu** (bind
+  it to a gesture or shortcut: it lists your standalone tasks and runs the
+  one you tap). Profiles whose triggers have a known XML form (e.g.
+  `Trigger.clipboardChanged()`, `Trigger.appOpened(app, { packageName })`)
+  are wired in too: their triggers plus named tasks
+  (`TE <profile> (enter)` / `(exit)`) that run the dispatcher. It never embeds compiled logic, so you only re-import it when
+  profile triggers change.
 - **`dispatcher.js`** — generated from your project: it embeds a map of
   profile/task names to compiled files and runs the right one with
   `eval(readFile(...))`.
@@ -186,9 +191,9 @@ How the dispatcher picks the file:
 1. **Explicit `%par1`** (a profile or task name) wins; `%par2` = `exit`
    selects a profile's exit file. Use this from Perform Task, widgets, etc.
 2. Otherwise it reads Tasker's **`%caller1`**, which for profile-launched
-   tasks is `profile=enter:<name>` or `profile=exit:<name>` — so a new
-   profile only needs its trigger plus `TE Dispatch` as both its enter and
-   its exit task. No per-task file paths, no per-task UI work.
+   tasks is `profile=enter:<name>` or `profile=exit:<name>` — so a profile
+   the XML cannot wire only needs its trigger plus `TE Dispatch` as both its
+   enter and its exit task. No per-task file paths, no per-task UI work.
 
 ```mermaid
 flowchart TD
@@ -208,11 +213,15 @@ defaults to `/sdcard/Tasker/js/` and can be overridden with the Tasker
 global `%TE_JS_DIR` (also edit the path inside the imported task if you do).
 
 Because `dispatcher.js` is a regular `.js` release asset it updates through
-the normal sync, keeping the name→file map current. The `.prj.xml` is *not*
-synced (sync pulls only `.js` and `.json` on purpose): download it manually
-once from the latest release — it only ever contains static scaffolding
-(the dispatcher pointer and your repo's slug for the sync bootstrap), so it
-never goes stale.
+the normal sync, keeping the name→file map current. Download the `.prj.xml`
+manually once from the latest release; after that, sync keeps the current
+copy next to the JS. The dispatcher flashes a warning (never blocking
+dispatch) when that copy must be re-imported: the scaffolding version
+changed, or the profile triggers changed (the imported XML stamps a wiring
+hash into `%TE_WIRING`). Tasker refuses to import a project whose name
+already exists, so first delete the *Tasker Effect* project (choose
+*Delete Contents*), then import again. Global variables, including your
+secrets, survive the deletion.
 
 The repo embedded in the XML's sync bootstrap is detected from
 `git remote get-url origin`; override it with
