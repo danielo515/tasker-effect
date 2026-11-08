@@ -1785,36 +1785,6 @@ const checkFilenames = (project: Project): void => {
   }
 };
 
-/**
- * Tasker global variable references (`%` + a name of 3+ characters with an
- * uppercase letter) in synced files. TE Sync writes files with Tasker's
- * `writeFile`, which expands set variables in the text, so `%CLIP` in a
- * comment becomes the clipboard contents and can break the script.
- */
-const TASKER_GLOBAL_REFERENCE = /%([A-Za-z][A-Za-z0-9_]{2,})/g;
-
-/** Locals Tasker sets in every task, so they expand inside TE Sync too */
-const ALWAYS_SET_LOCAL = /^(caller\d*|priority|qtime)$/;
-
-const checkNoGlobalReferences = (files: ReadonlyArray<CompiledFile>): void => {
-  const problems = files
-    .filter((file) => file.kind !== "doc")
-    .flatMap((file) =>
-      [...file.content.matchAll(TASKER_GLOBAL_REFERENCE)]
-        .map((match) => match[1]!)
-        .filter(
-          (name) => name !== name.toLowerCase() || ALWAYS_SET_LOCAL.test(name),
-        )
-        .map((name) => `${file.filename} contains "%${name}"`),
-    );
-  if (problems.length > 0) {
-    throw new CompileError({
-      message: `${[...new Set(problems)].join("; ")} (TE Sync's writeFile expands Tasker globals; use global("NAME") instead)`,
-      source: "compileProjectFiles",
-    });
-  }
-};
-
 /** Compile a whole project to JS files plus a setup README */
 export const compileProjectFiles = (
   project: Project,
@@ -1866,7 +1836,6 @@ export const compileProjectFiles = (
     content: compileSecretsJson(project),
     kind: "secrets-json",
   });
-  checkNoGlobalReferences(files);
   files.push({
     filename: TASKER_PROJECT_XML_FILENAME,
     content: taskerProjectXml({

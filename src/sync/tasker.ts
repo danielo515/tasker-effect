@@ -23,6 +23,19 @@ import {
 import { ProfileSync } from "./core.js";
 
 /**
+ * Split `content` right after every `%`, so no piece holds a whole `%name`.
+ * Tasker's writeFile() expands set variables in its text argument (e.g.
+ * `%CLIP` becomes the clipboard); written piece by piece in append mode the
+ * file ends up byte-for-byte identical to `content`.
+ */
+export const percentSafeChunks = (content: string): Array<string> =>
+  // No lookbehind regex: Tasker's JS engine may predate it.
+  content
+    .split("%")
+    .map((piece, index, pieces) => (index < pieces.length - 1 ? `${piece}%` : piece))
+    .filter((piece, index) => piece !== "" || index === 0);
+
+/**
  * FileStore backed by Tasker's writeFile builtin, for running the sync from
  * inside Tasker itself. Binary writes are not supported there.
  */
@@ -32,33 +45,43 @@ export const TaskerFileStore: Layer.Layer<FileStore> = Layer.effect(
     const tasker = yield* Tasker;
     const store: FileStoreShape = {
       writeText: (path, content) =>
-        tasker.writeFile(path, content, false).pipe(
-          Effect.filterOrFail(
-            (written) => written !== false,
-            () =>
-              new StorageWriteError({
-                message: "Tasker writeFile() returned false",
-                path,
-              })
-          ),
-          Effect.asVoid,
+        Effect.forEach(
+          percentSafeChunks(content),
+          (chunk, index) =>
+            tasker.writeFile(path, chunk, index > 0).pipe(
+              Effect.filterOrFail(
+                (written) => written !== false,
+                () =>
+                  new StorageWriteError({
+                    message: "Tasker writeFile() returned false",
+                    path,
+                  }),
+              ),
+            ),
+          { discard: true },
+        ).pipe(
           Effect.catchTags({
             TaskerCallError: (error) =>
-              Effect.fail(new StorageWriteError({ message: error.message, path })),
+              Effect.fail(
+                new StorageWriteError({ message: error.message, path }),
+              ),
             TaskerNotAvailableError: (error) =>
-              Effect.fail(new StorageWriteError({ message: error.message, path })),
-          })
+              Effect.fail(
+                new StorageWriteError({ message: error.message, path }),
+              ),
+          }),
         ),
       writeBytes: (path) =>
         Effect.fail(
           new StorageWriteError({
-            message: "Binary writes are not supported in the Tasker environment",
+            message:
+              "Binary writes are not supported in the Tasker environment",
             path,
-          })
+          }),
         ),
     };
     return store;
-  })
+  }),
 ).pipe(Layer.provide(Tasker.Default));
 
 /** ZipExtractor backed by Tasker's unzip builtin (extracts in place) */
@@ -83,30 +106,36 @@ export const TaskerZipExtractor: Layer.Layer<ZipExtractor> = Layer.effect(
                     path: zipPath,
                   })
                 : new ZipExtractError({
-                    message: "extracted file list is not observable from Tasker",
+                    message:
+                      "extracted file list is not observable from Tasker",
                     path: zipPath,
-                  })
-            )
+                  }),
+            ),
           ),
           Effect.catchTags({
             TaskerCallError: (error) =>
-              Effect.fail(new ZipExtractError({ message: error.message, path: zipPath })),
+              Effect.fail(
+                new ZipExtractError({ message: error.message, path: zipPath }),
+              ),
             TaskerNotAvailableError: (error) =>
-              Effect.fail(new ZipExtractError({ message: error.message, path: zipPath })),
-          })
+              Effect.fail(
+                new ZipExtractError({ message: error.message, path: zipPath }),
+              ),
+          }),
         ),
     };
     return extractor;
-  })
+  }),
 ).pipe(Layer.provide(Tasker.Default));
 
 /**
  * Everything ProfileSync needs for running inside Tasker: fetch-based HTTP
  * plus Tasker-backed file writes and zip extraction.
  */
-export const SyncTaskerLive: Layer.Layer<ProfileSync> = ProfileSync.Default.pipe(
-  Layer.provide(Layer.mergeAll(TaskerFileStore, TaskerZipExtractor))
-);
+export const SyncTaskerLive: Layer.Layer<ProfileSync> =
+  ProfileSync.Default.pipe(
+    Layer.provide(Layer.mergeAll(TaskerFileStore, TaskerZipExtractor)),
+  );
 
 /**
  * One-shot convenience: pull the latest release assets using the on-device
@@ -114,7 +143,7 @@ export const SyncTaskerLive: Layer.Layer<ProfileSync> = ProfileSync.Default.pipe
  */
 export const pullLatestProfiles = (options: SyncOptions) =>
   ProfileSync.use((sync) => sync.pullLatestProfiles(options)).pipe(
-    Effect.provide(SyncTaskerLive)
+    Effect.provide(SyncTaskerLive),
   );
 
 export { ProfileSync } from "./core.js";
