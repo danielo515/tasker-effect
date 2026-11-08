@@ -9,6 +9,11 @@ set -euo pipefail
 TAG=tasker-js-latest
 DIR=${1:?usage: update-rolling-release.sh <assets-dir>}
 
+# Devices download tasker-js.zip (TE Sync); rebuild it from the per-file
+# assets so it always matches them, even for a snapshot published before
+# the zip existed.
+"$(dirname "$0")/add-release-zip.sh" "$DIR"
+
 if ! gh release view "$TAG" > /dev/null 2>&1; then
   gh release create "$TAG" \
     --latest \

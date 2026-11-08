@@ -15,19 +15,21 @@ import {
   CONFIG_TASK_NAME,
   DISPATCHER_FILENAME,
   DISPATCH_TASK_NAME,
+  RELEASE_ZIP_FILENAME,
   ROLLING_RELEASE_TAG,
   SCAFFOLD_VERSION,
   SECRETS_FILENAME,
   SHOW_SCENE_TASK_NAME,
   SYNC_PROFILE_NAME,
-  SYNC_SCRIPT_FILENAME,
   SYNC_TASK_NAME,
   TASKER_PROJECT_XML_FILENAME,
   compileDispatcherJs,
   compileProjectFiles,
   configLabelFileJs,
   configScanFileJs,
-  syncBootstrapJs,
+  releaseZipUrl,
+  syncFinishJs,
+  syncPrepareJs,
   taskerProjectXml,
 } from "../src/compiler.js";
 import {
@@ -190,10 +192,7 @@ describe("taskerProjectXml", () => {
     expect(task.match(/<Action sr="act\d+" ve="7">/g)).toHaveLength(1);
   });
 
-  it("the TE Sync and TE Config scan scriptlets get generous 600s timeouts", () => {
-    expect(actionContaining("releases/download")).toContain(
-      '<Int sr="arg3" val="600"/>'
-    );
+  it("the TE Config scan scriptlet gets a generous 600s timeout", () => {
     expect(actionContaining(CONFIG_SCAN_FILENAME)).toContain(
       '<Int sr="arg3" val="600"/>'
     );
@@ -206,26 +205,34 @@ describe("taskerProjectXml", () => {
     expect(xml).toContain("<repval>6</repval>");
   });
 
-  it("the TE Sync bootstrap self-installs sync-profiles.js from the rolling release", () => {
-    const bootstrap = syncBootstrapJs(TEST_REPO);
-    expect(bootstrap).toContain(
-      `https://github.com/acme/automations/releases/download/${ROLLING_RELEASE_TAG}/${SYNC_SCRIPT_FILENAME}`
-    );
-    expect(bootstrap).toContain("readFile(path)");
-    expect(bootstrap).toContain("writeFile(path, source, false);");
-    expect(bootstrap).toContain("eval(source);");
-    expect(bootstrap).toContain(`performTask("${CONFIG_TASK_NAME}", 5);`);
-    // Token support: Authorization header from the %TE_GH_TOKEN global.
-    expect(bootstrap).toContain('global("TE_GH_TOKEN")');
-    expect(bootstrap).toContain('"Bearer " + token');
-    expectValidSnippetJs(bootstrap);
-    // And the snippet is embedded (XML-escaped) in the project XML.
-    expect(xml).toContain("releases/download/tasker-js-latest/sync-profiles.js");
+  it("TE Sync downloads the release zip natively and unzips it on HTTP 200", () => {
+    const start = xml.indexOf('<Task sr="task2">');
+    const task = xml.slice(start, xml.indexOf("</Task>", start));
+    expect(task).toContain(`<nme>${SYNC_TASK_NAME}</nme>`);
+    expect(
+      [...task.matchAll(/<code>(\d+)<\/code>/g)].map((match) => match[1])
+    ).toEqual(["129", "339", "422", "129"]);
+    const url = `https://github.com/acme/automations/releases/download/${ROLLING_RELEASE_TAG}/${RELEASE_ZIP_FILENAME}`;
+    expect(releaseZipUrl(TEST_REPO)).toBe(url);
+    expect(task).toContain(`<Str sr="arg2" ve="3">${url}</Str>`);
+    expect(task).toContain('<Str sr="arg7" ve="3">%te_zip</Str>');
+    expect(task).toContain('<Str sr="arg0" ve="3">%te_zip</Str>');
+    expect(task).toContain("<lhs>%http_response_code</lhs>");
+    // No sync script download/eval: files never pass through a JS string.
+    expect(task).not.toContain("eval(");
+    expect(task).not.toContain("writeFile");
+    const prepare = syncPrepareJs();
+    expect(prepare).toContain('setLocal("te_zip", dir + "tasker-js.zip");');
+    expect(prepare).toContain('"/sdcard/Tasker/js/"');
+    expectValidSnippetJs(prepare);
+    expect(syncFinishJs).toContain('local("http_response_code")');
+    expect(syncFinishJs).toContain(`performTask("${CONFIG_TASK_NAME}", 5);`);
+    expectValidSnippetJs(syncFinishJs);
   });
 
-  it("the TE Sync bootstrap stamps the scaffolding version on every run", () => {
+  it("TE Sync stamps the scaffolding version on every run", () => {
     const stamp = `setGlobal("TE_SCAFFOLD_VERSION", "${SCAFFOLD_VERSION}");`;
-    expect(syncBootstrapJs(TEST_REPO)).toContain(stamp);
+    expect(syncPrepareJs()).toContain(stamp);
     expect(xml).toContain(
       `setGlobal(&quot;TE_SCAFFOLD_VERSION&quot;, &quot;${SCAFFOLD_VERSION}&quot;);`
     );

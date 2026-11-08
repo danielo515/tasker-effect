@@ -15,17 +15,17 @@ flowchart LR
     end
     subgraph ci ["GitHub CI"]
         JS["dist-tasker/*.js"]
-        REL["rolling release<br/>tasker-js-latest"]
+        REL["rolling release<br/>tasker-js-latest<br/>(files + tasker-js.zip)"]
     end
     subgraph device ["Android device"]
-        SYNC["sync-profiles.js<br/>(runs inside Tasker)"]
+        SYNC["TE Sync task<br/>(HTTP Request + UnZip)"]
         DISK["/sdcard/Tasker/js/*.js"]
         ACT["Tasker JavaScript actions"]
     end
     TS -- "bun run compile" --> JS
     JS -- "upload assets" --> REL
-    REL -- "download newest" --> SYNC
-    SYNC -- "writeFile" --> DISK
+    REL -- "download tasker-js.zip" --> SYNC
+    SYNC -- "unzip" --> DISK
     DISK -- "read on every trigger" --> ACT
 ```
 
@@ -170,8 +170,8 @@ Compiling a `Project` also emits extra files:
 - **`tasker-effect.prj.xml`** — the only file you import: Tasker →
   long-press the home icon (bottom left) → *Import Project*. It holds the
   shared **TE Dispatch** task (a file-based *JavaScript* action, Auto Exit
-  on, pointing at `/sdcard/Tasker/js/dispatcher.js`), the self-bootstrapping
-  **TE Sync** task with a periodic **TE Sync** profile (every 6 hours), the
+  on, pointing at `/sdcard/Tasker/js/dispatcher.js`), the **TE Sync** task
+  (downloads and unzips the rolling release's `tasker-js.zip`) with a periodic **TE Sync** profile (every 6 hours), the
   **TE Config** secrets prompter, **TE Show Scene**, and **TE Menu** (bind
   it to a gesture or shortcut: it lists your standalone tasks and runs the
   one you tap). Profiles whose triggers have a known XML form (e.g.
@@ -223,7 +223,7 @@ already exists, so first delete the *Tasker Effect* project (choose
 *Delete Contents*), then import again. Global variables, including your
 secrets, survive the deletion.
 
-The repo embedded in the XML's sync bootstrap is detected from
+The repo embedded in the XML's TE Sync download URL is detected from
 `git remote get-url origin`; override it with
 `bunx tasker-effect compile --repo owner/name`.
 
@@ -326,7 +326,9 @@ artifact and publishes two kinds of GitHub release: a rolling one
 (`tasker-js-latest`) whose assets always mirror the newest green commit —
 stale assets are pruned, so it contains exactly what the build produces —
 and an immutable per-push snapshot (`tasker-js-vN`, marked "not latest" so
-devices ignore it).
+devices ignore it). Besides one asset per compiled file, both carry
+`tasker-js.zip` (all of them, flat at the zip root; the CI release job
+builds it), which is what devices download.
 
 **One-time device setup:**
 
@@ -334,10 +336,10 @@ devices ignore it).
    (Tasker → long-press the home icon at the bottom left → *Import
    Project*).
 2. Enable the imported **TE Sync** profile (or run the **TE Sync** task once
-   to sync immediately). Its first run self-installs: it downloads
-   `sync-profiles.js` from the rolling release with a synchronous XHR,
-   writes it to `/sdcard/Tasker/js/`, and runs it — which then pulls every
-   other compiled file. No files need to be copied to the device by hand.
+   to sync immediately). It downloads `tasker-js.zip` from the rolling
+   release with Tasker's native *HTTP Request* action into
+   `/sdcard/Tasker/js/` and extracts it in place with *UnZip* (deleting the
+   zip). No files need to be copied to the device by hand.
    After each sync, **TE Config** prompts for any secrets your tasks use
    that are still unset.
 3. For each of your profiles, configure its trigger in the Tasker UI (the
@@ -347,10 +349,12 @@ devices ignore it).
 
 **How updates propagate:** Tasker reads the `.js` file from disk every time
 an action runs — nothing is cached. Each **TE Sync** run overwrites
-`/sdcard/Tasker/js/` with the newest release assets (via Tasker's own
-`writeFile`), so the next time any profile fires it executes the new code.
-This applies to DSL-generated files, Effect bundles, `secrets.json`, and
-`sync-profiles.js` itself, which updates its own file too.
+`/sdcard/Tasker/js/` with the newest release files, so the next time any
+profile fires it executes the new code. This applies to DSL-generated
+files, Effect bundles, `secrets.json` and the device copy of
+`tasker-effect.prj.xml`. The files go straight from the zip to disk and
+never pass through a Tasker string, so `%NAME` text inside them is never
+expanded by Tasker (its JS `writeFile()` would replace set `%variables`).
 
 **Rolling back a bad build:** every master push also publishes an immutable
 snapshot release (`tasker-js-vN`). If a build misbehaves on-device, run the
@@ -366,9 +370,14 @@ configured once in the UI (step 3) — but thanks to the dispatcher that is
 all: the task slots always point at `TE Dispatch`, and the dispatcher's
 name→file map updates itself on every sync. After that, every change to
 its code ships automatically.
-Point the sync at your own fork with the Tasker globals `%SYNC_OWNER` /
-`%SYNC_REPO` (the bootstrap inside the XML already carries your repo, and
-sends `%TE_GH_TOKEN` as an Authorization header when set).
+The **TE Sync** task downloads from the repo embedded in the XML
+(`--repo owner/name` at compile time). It sends no credentials, so the
+repo's releases must be public. For a private repo, either publish the
+release assets somewhere public, or edit the imported task's HTTP Request
+action: point it at the GitHub API asset URL with the headers
+`Authorization: Bearer <token>` and `Accept: application/octet-stream`.
+`%TE_GH_TOKEN` (and `%SYNC_OWNER` / `%SYNC_REPO`) are only read by the
+bundled `sync-profiles.js` script, which the imported task no longer runs.
 
 From Node/CI you can do the same programmatically. The platform layers
 live behind dedicated entry points — `tasker-effect/sync/node` for desktop,
