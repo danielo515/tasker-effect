@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
+import { FileSystem, Path } from "@effect/platform";
+import { NodeContext } from "@effect/platform-node";
 import { describe, expect, it } from "@effect/vitest";
+import { Effect } from "effect";
 import { Action, Profile, Project, Task, Trigger } from "../src/profile.js";
 import {
   CLIPBOARD_CHANGED_EVENT_CODE,
@@ -17,13 +18,20 @@ import { MENU_TASK_NAME } from "../src/menu.js";
 
 const TEST_REPO = { owner: "acme", repo: "automations" } as const;
 
-const fixture = (name: string): string =>
-  readFileSync(path.join(__dirname, "fixtures", "tasker-exports", name), "utf8");
+const fixture = (name: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    return yield* fs.readFileString(
+      path.join(__dirname, "fixtures", "tasker-exports", name),
+    );
+  });
 
 const flashTask = (name: string) =>
   new Task({ name, actions: [Action.flash("hi")] });
 
-const clipboardProfile = new Profile({
+// Plain fields, so tests can derive variants without spreading the class.
+const clipboardFields = {
   name: "Clipboard History",
   triggers: [
     Trigger.clipboardChanged(),
@@ -33,7 +41,9 @@ const clipboardProfile = new Profile({
     }),
   ],
   enter: flashTask("Record"),
-});
+} as const;
+
+const clipboardProfile = new Profile(clipboardFields);
 
 const manualProfile = new Profile({
   name: "Manual",
@@ -44,7 +54,7 @@ const manualProfile = new Profile({
 /** The elements of `tag` (with content) in an XML string */
 const elements = (xml: string, tag: string): Array<string> =>
   [...xml.matchAll(new RegExp(`<${tag}[ >][\\s\\S]*?</${tag}>`, "g"))].map(
-    (match) => match[0]
+    (match) => match[0],
   );
 
 /** Text of every `<child>` inside an element, as a sorted "child=value" list */
@@ -58,24 +68,31 @@ const byId = (xml: string, tag: string, id: number): string =>
   elements(xml, tag).find((element) => element.includes(`<id>${id}</id>`))!;
 
 describe("profile wiring in the project XML", () => {
-  it("matches the real Tasker export for the clipboard profile's contexts", () => {
-    const xml = taskerProjectXml({ repo: TEST_REPO, profiles: [clipboardProfile] });
-    const real = fixture("clipboard-history.prf.xml");
-    const profile = byId(xml, "Profile", 10);
-    expect(profile).toContain("<nme>Clipboard History</nme>");
-    const event = elements(profile, "Event")[0]!;
-    const realEvent = elements(real, "Event")[0]!;
-    expect(leaves(event)).toEqual(leaves(realEvent));
-    expect(event).toContain(`<code>${CLIPBOARD_CHANGED_EVENT_CODE}</code>`);
-    expect(event).toContain('<Int sr="arg1" val="1"/>');
-    expect(realEvent).toContain('<Int sr="arg1" val="1"/>');
-    // The real export also carries the activity class (cls0); the package
-    // alone identifies the app.
-    expect(leaves(elements(profile, "App")[0]!)).toEqual(
-      leaves(elements(real, "App")[0]!)
-    );
-    expect(xml).toContain("<pids>4,10</pids>");
-  });
+  it.effect(
+    "matches the real Tasker export for the clipboard profile's contexts",
+    () =>
+      Effect.gen(function* () {
+        const xml = taskerProjectXml({
+          repo: TEST_REPO,
+          profiles: [clipboardProfile],
+        });
+        const real = yield* fixture("clipboard-history.prf.xml");
+        const profile = byId(xml, "Profile", 10);
+        expect(profile).toContain("<nme>Clipboard History</nme>");
+        const event = elements(profile, "Event")[0]!;
+        const realEvent = elements(real, "Event")[0]!;
+        expect(leaves(event)).toEqual(leaves(realEvent));
+        expect(event).toContain(`<code>${CLIPBOARD_CHANGED_EVENT_CODE}</code>`);
+        expect(event).toContain('<Int sr="arg1" val="1"/>');
+        expect(realEvent).toContain('<Int sr="arg1" val="1"/>');
+        // The real export also carries the activity class (cls0); the package
+        // alone identifies the app.
+        expect(leaves(elements(profile, "App")[0]!)).toEqual(
+          leaves(elements(real, "App")[0]!),
+        );
+        expect(xml).toContain("<pids>4,10</pids>");
+      }).pipe(Effect.provide(NodeContext.layer)),
+  );
 
   it("puts the event first and wires named dispatcher stub tasks", () => {
     const profile = new Profile({
@@ -119,10 +136,10 @@ describe("profile wiring in the project XML", () => {
       expect(task).toContain("<code>129</code>");
       expect(task).toContain("/x/");
       expect(task).toContain(
-        `setGlobal(&quot;TE_WIRING&quot;, &quot;${hash}&quot;);`
+        `setGlobal(&quot;TE_WIRING&quot;, &quot;${hash}&quot;);`,
       );
       expect(task).toContain(
-        "eval(readFile(dir + &quot;dispatcher.js&quot;));"
+        "eval(readFile(dir + &quot;dispatcher.js&quot;));",
       );
       expect(task).toContain('<Int sr="arg2" val="1"/>');
       expect(task).toContain('<Int sr="arg3" val="600"/>');
@@ -136,15 +153,18 @@ describe("profile wiring in the project XML", () => {
 
   it("rejects duplicate task or profile names in the XML", () => {
     expect(() =>
-      taskerProjectXml({ repo: TEST_REPO, profiles: [clipboardProfile, clipboardProfile] })
+      taskerProjectXml({
+        repo: TEST_REPO,
+        profiles: [clipboardProfile, clipboardProfile],
+      }),
     ).toThrow(
-      'tasker-effect.prj.xml: task name "TE Clipboard History (enter)" is used twice; profile name "Clipboard History" is used twice'
+      'tasker-effect.prj.xml: task name "TE Clipboard History (enter)" is used twice; profile name "Clipboard History" is used twice',
     );
-    const syncClash = new Profile({ ...clipboardProfile, name: "TE Sync" });
+    const syncClash = new Profile({ ...clipboardFields, name: "TE Sync" });
     expect(() =>
       compileProjectFiles(new Project({ name: "P", profiles: [syncClash] }), {
         repo: TEST_REPO,
-      })
+      }),
     ).toThrow('profile name "TE Sync" is used twice');
   });
 
@@ -174,16 +194,16 @@ describe("profileWiringHash", () => {
     // profile added or removed.
     expect(
       profileWiringHash([
-        new Profile({ ...clipboardProfile, enter: flashTask("Other") }),
-      ])
+        new Profile({ ...clipboardFields, enter: flashTask("Other") }),
+      ]),
     ).toBe(hash);
     for (const changed of [
       new Profile({
-        ...clipboardProfile,
+        ...clipboardFields,
         triggers: [Trigger.clipboardChanged()],
       }),
-      new Profile({ ...clipboardProfile, name: "Renamed" }),
-      new Profile({ ...clipboardProfile, exit: flashTask("Out") }),
+      new Profile({ ...clipboardFields, name: "Renamed" }),
+      new Profile({ ...clipboardFields, exit: flashTask("Out") }),
     ]) {
       expect(profileWiringHash([changed])).not.toBe(hash);
     }
@@ -194,34 +214,43 @@ describe("profileWiringHash", () => {
     const project = new Project({ name: "P", profiles: [clipboardProfile] });
     const hash = profileWiringHash(project.profiles);
     expect(syncBootstrapJs(TEST_REPO, undefined, hash)).toContain(
-      `setGlobal("TE_WIRING", "${hash}");`
+      `setGlobal("TE_WIRING", "${hash}");`,
     );
     expect(syncBootstrapJs(TEST_REPO)).not.toContain("TE_WIRING");
-    const xml = taskerProjectXml({ repo: TEST_REPO, profiles: project.profiles });
+    const xml = taskerProjectXml({
+      repo: TEST_REPO,
+      profiles: project.profiles,
+    });
     expect(elements(xml, "Task")[1]).toContain(
-      `setGlobal(&quot;TE_WIRING&quot;, &quot;${hash}&quot;);`
+      `setGlobal(&quot;TE_WIRING&quot;, &quot;${hash}&quot;);`,
     );
     const dispatcher = compileDispatcherJs(project);
     expect(dispatcher).toContain(`if (global("TE_WIRING") !== "${hash}") {`);
     expect(dispatcher).toContain(
-      `profile triggers changed - delete the Tasker Effect project (Delete Contents) and re-import ${TASKER_PROJECT_XML_FILENAME}`
+      `profile triggers changed - delete the Tasker Effect project (Delete Contents) and re-import ${TASKER_PROJECT_XML_FILENAME}`,
     );
   });
 });
 
 describe("TE Menu task", () => {
-  it("matches the Perform Task layout that imported fine on a device", () => {
-    const xml = taskerProjectXml({ repo: TEST_REPO });
-    const task = byId(xml, "Task", 6);
-    expect(task).toContain(`<nme>${MENU_TASK_NAME}</nme>`);
-    const real = fixture("show-clipboard-history.tsk.xml").replaceAll(
-      "Show Clipboard History",
-      MENU_TASK_NAME
-    );
-    const strip = (s: string) => elements(s, "Action")[0]!.replace(/\s+/g, "");
-    expect(strip(task)).toBe(strip(real));
-    expect(task).toContain(`<Str sr="arg0" ve="3">${DISPATCH_TASK_NAME}</Str>`);
-  });
+  it.effect(
+    "matches the Perform Task layout that imported fine on a device",
+    () =>
+      Effect.gen(function* () {
+        const xml = taskerProjectXml({ repo: TEST_REPO });
+        const task = byId(xml, "Task", 6);
+        expect(task).toContain(`<nme>${MENU_TASK_NAME}</nme>`);
+        const real = (yield* fixture(
+          "show-clipboard-history.tsk.xml",
+        )).replaceAll("Show Clipboard History", MENU_TASK_NAME);
+        const strip = (s: string) =>
+          elements(s, "Action")[0]!.replace(/\s+/g, "");
+        expect(strip(task)).toBe(strip(real));
+        expect(task).toContain(
+          `<Str sr="arg0" ve="3">${DISPATCH_TASK_NAME}</Str>`,
+        );
+      }).pipe(Effect.provide(NodeContext.layer)),
+  );
 });
 
 describe("compileProjectFiles profile wiring", () => {
@@ -238,16 +267,18 @@ describe("compileProjectFiles profile wiring", () => {
       TASKER_PROJECT_XML_FILENAME,
     ]);
     const xml = files.find(
-      (file) => file.filename === TASKER_PROJECT_XML_FILENAME
+      (file) => file.filename === TASKER_PROJECT_XML_FILENAME,
     )!.content;
     expect(xml).toContain("<nme>Clipboard History</nme>");
     expect(xml).not.toContain("Manual");
     expect(xml).not.toContain("Show It");
     const readme = files.find((file) => file.filename === "README.md")!.content;
     expect(readme).toContain(
-      `Wired in \`${TASKER_PROJECT_XML_FILENAME}\` (nothing to set up). Triggers:`
+      `Wired in \`${TASKER_PROJECT_XML_FILENAME}\` (nothing to set up). Triggers:`,
     );
     expect(readme).toContain("Triggers to configure in the Tasker UI:");
-    expect(readme).toContain(`Bind \`${MENU_TASK_NAME}\` to a gesture or shortcut`);
+    expect(readme).toContain(
+      `Bind \`${MENU_TASK_NAME}\` to a gesture or shortcut`,
+    );
   });
 });
