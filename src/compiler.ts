@@ -1922,7 +1922,7 @@ export const compileProjectFiles = (
       content: menuSceneJson(SCENE_JS_DIR_PLACEHOLDER),
       kind: "web-asset",
     },
-    { filename: MENU_HTML_FILENAME, content: menuHtml, kind: "web-asset" },
+    { filename: MENU_HTML_FILENAME, content: menuHtml(DISPATCH_TASK_NAME), kind: "web-asset" },
   );
   files.push({
     filename: SECRETS_FILENAME,

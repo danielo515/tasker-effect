@@ -37,7 +37,6 @@ import {
   MENU_SCENE_FILENAME,
   MENU_SCRIPT_FILENAME,
   MENU_TASK_NAME,
-  MENU_TIMEOUT_MS,
   menuSceneJson,
 } from "../src/menu.js";
 
@@ -435,17 +434,23 @@ describe("TE Menu files", () => {
     expect(file(MENU_SCRIPT_FILENAME).kind).toBe("scaffold-js");
     expect(file(MENU_SCENE_FILENAME).kind).toBe("web-asset");
     expect(file(MENU_HTML_FILENAME).kind).toBe("web-asset");
-    expect(file(MENU_HTML_FILENAME).content).toContain("TE_MENU_PICK");
+    const html = file(MENU_HTML_FILENAME).content;
+    expect(html).not.toContain("TE_MENU_PICK");
+    // The tap runs the dispatcher through the bridge; %par1 travels as a
+    // task local in `variables` (a bare `par1` key is ignored by Tasker).
+    expect(html).toContain(`var DISPATCH_TASK = ${JSON.stringify(DISPATCH_TASK_NAME)};`);
+    expect(html).toContain("bridge.runTask({ name: DISPATCH_TASK, variables: { par1: name } })");
   });
 
-  it("the menu script parses and runs the pick in the dispatcher scope", () => {
+  it("the menu script parses, shows the scene and returns without waiting", () => {
     const script = file(MENU_SCRIPT_FILENAME).content;
     expectValidJs(script);
     expect(script).toContain(`performTask("${SHOW_SCENE_TASK_NAME}", 10,`);
     expect(script).toContain(JSON.stringify(SCENE_JS_DIR_PLACEHOLDER));
-    expect(script).toContain(`__waited < ${MENU_TIMEOUT_MS}`);
-    expect(script).toContain("eval(__source);");
-    // Re-performing TE Dispatch from inside it would be dropped.
+    // A JavaScriptlet still running (e.g. polling for the tap) keeps the
+    // Scenes v2 WebView from rendering, so the script must not wait.
+    expect(script).not.toMatch(/\bwait\(/);
+    expect(script).not.toContain("TE_MENU_PICK");
     expect(script).not.toContain(`performTask("${DISPATCH_TASK_NAME}"`);
   });
 
