@@ -1373,7 +1373,9 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
 // Layouts copied from real Tasker 6.7.8 exports (see
 // test/fixtures/tasker-exports/): Clipboard Changed is event code 2097 with
 // "Ignore Set By Tasker" in Int arg1; an App context is inverted by
-// <flags>2</flags>; Perform Task is action code 130.
+// <pin>true</pin> (Tasker writes <flags>2</flags> on every App context, so
+// flags alone does not invert: verified on a device); Perform Task is action
+// code 130.
 
 /** Event code of Event > System > Clipboard Changed */
 export const CLIPBOARD_CHANGED_EVENT_CODE = 2097;
@@ -1410,8 +1412,9 @@ const appContext = (t: AppOpenedTrigger, packageName: string): XmlContext => ({
   isEvent: false,
   lines: (sr) => [
     `\t\t<App sr="${sr}" ve="2">`,
-    ...(t.invert ? ["\t\t\t<flags>2</flags>"] : []),
+    "\t\t\t<flags>2</flags>",
     `\t\t\t<label0>${escapeXml(t.app)}</label0>`,
+    ...(t.invert ? ["\t\t\t<pin>true</pin>"] : []),
     `\t\t\t<pkg0>${escapeXml(packageName)}</pkg0>`,
     "\t\t</App>",
   ],

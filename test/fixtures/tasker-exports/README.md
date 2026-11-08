@@ -7,7 +7,9 @@ XML generated into `tasker-effect.prj.xml`.
   the user profile wiring inside the project XML.
   - Event **Clipboard Changed** is code `2097`; `arg1` (Int) is
     "Ignore Set By Tasker".
-  - An **App** context with `<flags>2</flags>` is inverted ("Not Bitwarden").
+  - An **App** context is inverted ("Not Bitwarden") by `<pin>true</pin>`.
+    Tasker writes `<flags>2</flags>` on every App context; flags alone does
+    not invert (an import with only flags 2 came out as plain "Bitwarden").
   - The exported `TE Dispatch` task has no `<rty>`, i.e. collision handling
     is "Abort New Task": a second trigger while it runs is dropped. The
     generated profile tasks therefore set `<rty>2</rty>` (Run Both Together).

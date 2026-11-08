@@ -59,7 +59,7 @@ const elements = (xml: string, tag: string): Array<string> =>
 
 /** Text of every `<child>` inside an element, as a sorted "child=value" list */
 const leaves = (element: string): Array<string> =>
-  [...element.matchAll(/<(code|flags|label0|pkg0|nme)>([^<]*)<\//g)]
+  [...element.matchAll(/<(code|flags|label0|pin|pkg0|nme)>([^<]*)<\//g)]
     .map((match) => `${match[1]}=${match[2]}`)
     .sort();
 
@@ -116,7 +116,7 @@ describe("profile wiring in the project XML", () => {
     expect(wired.indexOf('<Event sr="con0"')).toBeGreaterThan(0);
     expect(wired).toContain('<App sr="con1" ve="2">');
     expect(wired).toContain('<Int sr="arg1" val="0"/>');
-    expect(wired).not.toContain("<flags>2</flags>");
+    expect(wired).not.toContain("<pin>true</pin>");
     expect(wired).toContain("<mid0>14</mid0>");
     expect(wired).toContain("<mid1>15</mid1>");
     expect(byId(xml, "Profile", 10)).toContain("<mid0>11</mid0>");
