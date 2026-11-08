@@ -282,3 +282,36 @@ describe("compileProjectFiles profile wiring", () => {
     );
   });
 });
+
+describe("synced files and Tasker globals", () => {
+  it("rejects %GLOBAL references, which TE Sync's writeFile would expand", () => {
+    const leaky = new Task({
+      name: "Leaky",
+      actions: [Action.flash("Battery %BATT")],
+    });
+    expect(() =>
+      compileProjectFiles(new Project({ name: "P", tasks: [leaky] }), {
+        repo: TEST_REPO,
+      }),
+    ).toThrow('leaky.js contains "%BATT"');
+    const caller = new Task({
+      name: "Caller",
+      actions: [Action.flash("%caller1")],
+    });
+    expect(() =>
+      compileProjectFiles(new Project({ name: "P", tasks: [caller] }), {
+        repo: TEST_REPO,
+      }),
+    ).toThrow('caller.js contains "%caller1"');
+    // Locals (all lowercase) and short tokens such as URL escapes are fine.
+    const fine = new Task({
+      name: "Fine",
+      actions: [Action.flash("%par1 50% %2F")],
+    });
+    expect(() =>
+      compileProjectFiles(new Project({ name: "P", tasks: [fine] }), {
+        repo: TEST_REPO,
+      }),
+    ).not.toThrow();
+  });
+});
