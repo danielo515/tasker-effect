@@ -123,7 +123,7 @@ describe("compileDispatcherJs", () => {
     expect(source).toContain('parseInt(global("TE_SCAFFOLD_VERSION"), 10)');
     expect(source).toContain(`if (installed < ${SCAFFOLD_VERSION}) {`);
     expect(source).toContain(
-      `tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir`
+      `tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - delete the Tasker Effect project (Delete Contents) and re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir`
     );
     // Warn-only: the check flashes but never returns/exits before dispatch.
     expectValidJs(source);
@@ -354,8 +354,9 @@ describe("taskerProjectXml", () => {
       [...xml.matchAll(/<nme>([^<]*)<\/nme>/g)].map((match) => match[1]).sort();
     expect(namesIn(xmlA!.content)).toEqual([...scaffoldNames].sort());
 
-    // A wired profile adds only its own name; its enter task, standalone
-    // tasks, compiled JS and secrets stay out.
+    // A wired profile adds only its own name and its generated stub task
+    // name; its enter task's name, standalone tasks, compiled JS and
+    // secrets stay out.
     const wired = new Project({
       name: "Wired",
       profiles: [
@@ -375,7 +376,9 @@ describe("taskerProjectXml", () => {
     const xmlW = compileProjectFiles(wired, { repo: TEST_REPO }).find(
       (file) => file.filename === TASKER_PROJECT_XML_FILENAME
     )!.content;
-    expect(namesIn(xmlW)).toEqual([...scaffoldNames, "Clip Watch"].sort());
+    expect(namesIn(xmlW)).toEqual(
+      [...scaffoldNames, "Clip Watch", "TE Clip Watch (enter)"].sort()
+    );
     for (const marker of [
       "Clip Enter Task",
       "Wired Standalone",

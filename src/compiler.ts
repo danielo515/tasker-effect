@@ -579,6 +579,13 @@ export const CONFIG_LABEL_FILENAME = "te-config-label.js";
 export const SCAFFOLD_VERSION = 4;
 
 /**
+ * How to update the imported XML: Tasker refuses to import a project whose
+ * name already exists, so the old one must be deleted first (globals, and
+ * with them the secrets, survive the deletion).
+ */
+const REIMPORT_HINT = `delete the Tasker Effect project (Delete Contents) and re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir`;
+
+/**
  * Compile the dispatcher: a single JS file that resolves which compiled file
  * should run and `eval`s it. Resolution order:
  *
@@ -631,12 +638,12 @@ export const compileDispatcherJs = (project: Project): string => {
     '    var installed = parseInt(global("TE_SCAFFOLD_VERSION"), 10);',
     "    if (!(installed > 0)) installed = 0;",
     `    if (installed < ${SCAFFOLD_VERSION}) {`,
-    `      flash("tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir");`,
+    `      flash("tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - ${REIMPORT_HINT}");`,
     "    }",
     "    // Same for the profile wiring: the imported XML stamps its hash into",
     "    // %TE_WIRING; a mismatch means profile triggers changed since import.",
     `    if (global("TE_WIRING") !== ${js(wiring)}) {`,
-    `      flash("tasker-effect: profile triggers changed - re-import ${TASKER_PROJECT_XML_FILENAME} from the js dir");`,
+    `      flash("tasker-effect: profile triggers changed - ${REIMPORT_HINT}");`,
     "    }",
     "",
     '    var par1 = local("par1");',
@@ -1002,6 +1009,38 @@ const performDispatchAction = (index: number, par1: string): Array<string> =>
     intArg(9, 0),
   ]);
 
+/** Names of the scaffold tasks in the project XML */
+const SCAFFOLD_TASK_NAMES: ReadonlyArray<string> = [
+  DISPATCH_TASK_NAME,
+  SYNC_TASK_NAME,
+  CONFIG_TASK_NAME,
+  SHOW_SCENE_TASK_NAME,
+  MENU_TASK_NAME,
+];
+
+/** Names that occur more than once */
+const duplicatesOf = (names: ReadonlyArray<string>): Array<string> =>
+  names.filter((name, index) => names.indexOf(name) !== index);
+
+/**
+ * Fail when two tasks or two profiles in the project XML share a name:
+ * Tasker links profiles to tasks by name on import.
+ */
+const checkXmlNames = (
+  taskNames: ReadonlyArray<string>,
+  profileNames: ReadonlyArray<string>
+): void => {
+  const problems = [
+    ...duplicatesOf(taskNames).map((name) => `task name "${name}" is used twice`),
+    ...duplicatesOf(profileNames).map((name) => `profile name "${name}" is used twice`),
+  ];
+  if (problems.length > 0) {
+    throw new CompileError({
+      message: `${TASKER_PROJECT_XML_FILENAME}: ${problems.join("; ")}`,
+    });
+  }
+};
+
 /** Options for the generated project XML */
 export interface TaskerProjectXmlOptions {
   /** Repository whose rolling release the bootstrap downloads from */
@@ -1040,8 +1079,9 @@ export interface TaskerProjectXmlOptions {
  * - Profile `TE Sync`: Time context repeating every 6 hours, enter task
  *   `TE Sync`.
  * - Thin wiring for user profiles whose triggers have a known XML form:
- *   the triggers plus anonymous enter/exit JavaScriptlets that stamp the
- *   wiring hash into %TE_WIRING and evaluate the dispatcher.
+ *   the triggers plus named enter/exit tasks (`TE <profile> (enter|exit)`)
+ *   whose JavaScriptlet stamps the wiring hash into %TE_WIRING and
+ *   evaluates the dispatcher.
  *
  * Besides that wiring, the XML is static scaffolding for a one-time import:
  * it never embeds compiled logic, standalone task names or secret names from
@@ -1054,6 +1094,10 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
     options.dispatcherPath ?? `${jsDir}${DISPATCHER_FILENAME}`;
   const profiles = options.profiles ?? [];
   const user = userProfilesXml(profiles, jsDir);
+  checkXmlNames(
+    [...SCAFFOLD_TASK_NAMES, ...user.stubTasks.map((task) => task.name)],
+    [SYNC_PROFILE_NAME, ...user.profileNames]
+  );
 
   const isSetCondition = (variable: string): Array<string> => [
     '\t\t\t<ConditionList sr="if">',
@@ -1088,7 +1132,7 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
     "\t\t<cdate>1</cdate>",
     "\t\t<name>Tasker Effect</name>",
     `\t\t<pids>${[SYNC_PROFILE_ID, ...user.ids].join(",")}</pids>`,
-    `\t\t<tids>${DISPATCH_TASK_ID},${SYNC_TASK_ID},${CONFIG_TASK_ID},${SHOW_SCENE_TASK_ID},${MENU_TASK_ID}</tids>`,
+    `\t\t<tids>${[DISPATCH_TASK_ID, SYNC_TASK_ID, CONFIG_TASK_ID, SHOW_SCENE_TASK_ID, MENU_TASK_ID, ...user.stubTasks.map((task) => task.id)].join(",")}</tids>`,
     "\t</Project>",
     // TE Dispatch: run the dispatcher file (Auto Exit on). The 600s action
     // timeout must exceed the config provider's default promptTimeoutMillis
@@ -1321,19 +1365,15 @@ const userProfileIds = (index: number) => {
 };
 
 /**
- * Anonymous profile task (no name, not listed in <tids>): a JavaScriptlet
- * that stamps the wiring hash and evaluates the dispatcher in the profile's
- * own task, so the event's locals (e.g. %cl_text) and %caller1 stay visible.
+ * Name of the generated task a wired profile runs on enter/exit. These must
+ * be *named* tasks: Tasker drops anonymous tasks on project import (and the
+ * profile could then link to an unrelated task with the same id), while
+ * named tasks are remapped correctly even when their XML ids collide.
  */
-const profileStubTask = (id: number, code: string): Array<string> => [
-  `\t<Task sr="task${id}">`,
-  "\t\t<cdate>1</cdate>",
-  `\t\t<id>${id}</id>`,
-  ...scriptletAction(0, code, { autoExit: true, timeoutSecs: 600 }),
-  "\t</Task>",
-];
+export const profileTaskName = (profile: Profile, phase: "enter" | "exit"): string =>
+  `TE ${profile.name} (${phase})`;
 
-/** JavaScriptlet of the anonymous profile tasks */
+/** JavaScriptlet of the profile tasks */
 const profileStubJs = (jsDir: string, wiringHash: string): string =>
   [
     ...jsDirPreamble(jsDir),
@@ -1341,17 +1381,38 @@ const profileStubJs = (jsDir: string, wiringHash: string): string =>
     `eval(readFile(dir + ${js(DISPATCHER_FILENAME)}));`,
   ].join("\n");
 
-/** The user profiles' XML: <Profile> elements and their anonymous tasks */
+/** A generated profile task: id and name */
+interface StubTask {
+  readonly id: number;
+  readonly name: string;
+}
+
+/** The user profiles' XML: <Profile> elements and their named stub tasks */
 const userProfilesXml = (
   profiles: ReadonlyArray<Profile>,
   jsDir: string
-): { readonly ids: Array<number>; readonly profiles: Array<string>; readonly tasks: Array<string> } => {
+): {
+  readonly ids: Array<number>;
+  readonly profileNames: Array<string>;
+  readonly stubTasks: Array<StubTask>;
+  readonly profiles: Array<string>;
+  readonly tasks: Array<string>;
+} => {
+  // The JavaScriptlet stamps the wiring hash and evaluates the dispatcher in
+  // the profile's own task, so the event's locals (e.g. %cl_text) and
+  // %caller1 stay visible to the compiled code.
   const stub = profileStubJs(jsDir, profileWiringHash(profiles));
   const wired = xmlProfilesOf(profiles).map(({ profile, contexts }, index) => {
     const ids = userProfileIds(index);
     const hasExit = profile.exit !== undefined;
+    const stubTasks: Array<StubTask> = [
+      { id: ids.enter, name: profileTaskName(profile, "enter") },
+      ...(hasExit ? [{ id: ids.exit, name: profileTaskName(profile, "exit") }] : []),
+    ];
     return {
       id: ids.id,
+      name: profile.name,
+      stubTasks,
       profile: [
         `\t<Profile sr="prof${ids.id}" ve="2">`,
         "\t\t<cdate>1</cdate>",
@@ -1362,14 +1423,17 @@ const userProfilesXml = (
         ...contexts.flatMap((context, i) => context.lines(`con${i}`)),
         "\t</Profile>",
       ],
-      tasks: [
-        ...profileStubTask(ids.enter, stub),
-        ...(hasExit ? profileStubTask(ids.exit, stub) : []),
-      ],
+      tasks: stubTasks.flatMap((task) =>
+        xmlTask(task.id, task.name, [
+          ...scriptletAction(0, stub, { autoExit: true, timeoutSecs: 600 }),
+        ])
+      ),
     };
   });
   return {
     ids: wired.map((entry) => entry.id),
+    profileNames: wired.map((entry) => entry.name),
+    stubTasks: wired.flatMap((entry) => entry.stubTasks),
     profiles: wired.flatMap((entry) => entry.profile),
     tasks: wired.flatMap((entry) => entry.tasks),
   };
@@ -1404,8 +1468,9 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
   "",
   `Sync also keeps the current \`${TASKER_PROJECT_XML_FILENAME}\` in that directory.`,
   "Re-import it from there when the dispatcher flashes a warning (scaffolding",
-  "outdated or profile triggers changed): delete the old Tasker Effect project",
-  "first — Tasker duplicates on import.",
+  "outdated or profile triggers changed). Tasker refuses to import a project",
+  "whose name exists, so first delete the Tasker Effect project (choose",
+  "Delete Contents); global variables, including secrets, survive.",
   "",
 ];
 

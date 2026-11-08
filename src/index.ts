@@ -180,6 +180,7 @@ export {
   compileSecretsJson,
   taskerProjectXml,
   profileWiringHash,
+  profileTaskName,
   CLIPBOARD_CHANGED_EVENT_CODE,
   DEFAULT_DEVICE_JS_DIR,
   DISPATCHER_FILENAME,

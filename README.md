@@ -176,8 +176,8 @@ Compiling a `Project` also emits extra files:
   it to a gesture or shortcut: it lists your standalone tasks and runs the
   one you tap). Profiles whose triggers have a known XML form (e.g.
   `Trigger.clipboardChanged()`, `Trigger.appOpened(app, { packageName })`)
-  are wired in too: their triggers plus anonymous tasks that run the
-  dispatcher. It never embeds compiled logic, so you only re-import it when
+  are wired in too: their triggers plus named tasks
+  (`TE <profile> (enter)` / `(exit)`) that run the dispatcher. It never embeds compiled logic, so you only re-import it when
   profile triggers change.
 - **`dispatcher.js`** — generated from your project: it embeds a map of
   profile/task names to compiled files and runs the right one with
@@ -218,8 +218,10 @@ manually once from the latest release; after that, sync keeps the current
 copy next to the JS. The dispatcher flashes a warning (never blocking
 dispatch) when that copy must be re-imported: the scaffolding version
 changed, or the profile triggers changed (the imported XML stamps a wiring
-hash into `%TE_WIRING`). Delete the old project before re-importing —
-Tasker duplicates on import.
+hash into `%TE_WIRING`). Tasker refuses to import a project whose name
+already exists, so first delete the *Tasker Effect* project (choose
+*Delete Contents*), then import again. Global variables, including your
+secrets, survive the deletion.
 
 The repo embedded in the XML's sync bootstrap is detected from
 `git remote get-url origin`; override it with

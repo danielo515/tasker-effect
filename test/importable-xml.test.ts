@@ -8,6 +8,7 @@ import {
   TASKER_PROJECT_XML_FILENAME,
   compileDispatcherJs,
   compileProjectFiles,
+  profileTaskName,
   profileWiringHash,
   syncBootstrapJs,
   taskerProjectXml,
@@ -76,7 +77,7 @@ describe("profile wiring in the project XML", () => {
     expect(xml).toContain("<pids>4,10</pids>");
   });
 
-  it("puts the event first and wires anonymous dispatcher stubs", () => {
+  it("puts the event first and wires named dispatcher stub tasks", () => {
     const profile = new Profile({
       name: "P",
       triggers: [
@@ -104,12 +105,17 @@ describe("profile wiring in the project XML", () => {
     expect(byId(xml, "Profile", 10)).toContain("<mid0>11</mid0>");
     expect(byId(xml, "Profile", 10)).not.toContain("<mid1>");
 
-    // Stub tasks: anonymous, not project members, eval the dispatcher.
+    // Stub tasks: named (Tasker drops anonymous tasks on import), project
+    // members, eval the dispatcher.
     const hash = profileWiringHash([manualProfile, clipboardProfile, profile]);
-    expect(xml).toContain("<tids>1,2,3,5,6</tids>");
-    for (const id of [11, 14, 15]) {
+    expect(xml).toContain("<tids>1,2,3,5,6,11,14,15</tids>");
+    for (const [id, name] of [
+      [11, "TE Clipboard History (enter)"],
+      [14, "TE P (enter)"],
+      [15, "TE P (exit)"],
+    ] as const) {
       const task = byId(xml, "Task", id);
-      expect(task).not.toContain("<nme>");
+      expect(task).toContain(`<nme>${name}</nme>`);
       expect(task).toContain("<code>129</code>");
       expect(task).toContain("/x/");
       expect(task).toContain(
@@ -122,6 +128,21 @@ describe("profile wiring in the project XML", () => {
       expect(task).toContain('<Int sr="arg3" val="600"/>');
     }
     expect(byId(xml, "Task", 12)).toBeUndefined();
+    expect(profileTaskName(profile, "exit")).toBe("TE P (exit)");
+  });
+
+  it("rejects duplicate task or profile names in the XML", () => {
+    expect(() =>
+      taskerProjectXml({ repo: TEST_REPO, profiles: [clipboardProfile, clipboardProfile] })
+    ).toThrow(
+      'tasker-effect.prj.xml: task name "TE Clipboard History (enter)" is used twice; profile name "Clipboard History" is used twice'
+    );
+    const syncClash = new Profile({ ...clipboardProfile, name: "TE Sync" });
+    expect(() =>
+      compileProjectFiles(new Project({ name: "P", profiles: [syncClash] }), {
+        repo: TEST_REPO,
+      })
+    ).toThrow('profile name "TE Sync" is used twice');
   });
 
   it("leaves out profiles whose triggers have no known XML form", () => {
@@ -180,7 +201,7 @@ describe("profileWiringHash", () => {
     const dispatcher = compileDispatcherJs(project);
     expect(dispatcher).toContain(`if (global("TE_WIRING") !== "${hash}") {`);
     expect(dispatcher).toContain(
-      `profile triggers changed - re-import ${TASKER_PROJECT_XML_FILENAME}`
+      `profile triggers changed - delete the Tasker Effect project (Delete Contents) and re-import ${TASKER_PROJECT_XML_FILENAME}`
     );
   });
 });
