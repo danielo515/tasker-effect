@@ -49,7 +49,7 @@ export class CompileError extends Schema.TaggedError<CompileError>()(
   {
     message: Schema.String,
     source: Schema.optional(Schema.String),
-  }
+  },
 ) {}
 
 /** A single compiled output file */
@@ -106,7 +106,10 @@ export const slugify = (name: string): string =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "task";
 
-const indentLines = (lines: ReadonlyArray<string>, spaces: number): Array<string> => {
+const indentLines = (
+  lines: ReadonlyArray<string>,
+  spaces: number,
+): Array<string> => {
   const pad = " ".repeat(spaces);
   return lines.map((line) => (line === "" ? line : pad + line));
 };
@@ -139,7 +142,7 @@ export const emitText = (value: Text): string => {
         ? js(part)
         : part instanceof Secret
           ? `global(${js(part.name)})`
-          : readVarExpr(part.name, part.scope)
+          : readVarExpr(part.name, part.scope),
     )
     .join(" + ");
 };
@@ -158,7 +161,7 @@ const emitJsCode = (code: JsCode): Array<string> =>
             ? part
             : part instanceof Secret
               ? `global(${js(part.name)})`
-              : readVarExpr(part.name, part.scope)
+              : readVarExpr(part.name, part.scope),
         )
         .join("")
         .split("\n");
@@ -172,21 +175,33 @@ export const conditionExpr = (condition: Condition): string => {
   return Match.value(condition).pipe(
     Match.when({ op: "eq" }, (c) => `${v} === ${js(c.value)}`),
     Match.when({ op: "neq" }, (c) => `${v} !== ${js(c.value)}`),
-    Match.when({ op: "lt" }, (c) => `parseFloat(${v}) < parseFloat(${js(c.value)})`),
-    Match.when({ op: "gt" }, (c) => `parseFloat(${v}) > parseFloat(${js(c.value)})`),
-    Match.when({ op: "lte" }, (c) => `parseFloat(${v}) <= parseFloat(${js(c.value)})`),
-    Match.when({ op: "gte" }, (c) => `parseFloat(${v}) >= parseFloat(${js(c.value)})`),
+    Match.when(
+      { op: "lt" },
+      (c) => `parseFloat(${v}) < parseFloat(${js(c.value)})`,
+    ),
+    Match.when(
+      { op: "gt" },
+      (c) => `parseFloat(${v}) > parseFloat(${js(c.value)})`,
+    ),
+    Match.when(
+      { op: "lte" },
+      (c) => `parseFloat(${v}) <= parseFloat(${js(c.value)})`,
+    ),
+    Match.when(
+      { op: "gte" },
+      (c) => `parseFloat(${v}) >= parseFloat(${js(c.value)})`,
+    ),
     Match.when(
       { op: "contains" },
-      (c) => `String(${v}).indexOf(${js(c.value)}) !== -1`
+      (c) => `String(${v}).indexOf(${js(c.value)}) !== -1`,
     ),
     Match.when(
       { op: "matches" },
-      (c) => `new RegExp(${js(c.value)}).test(String(${v}))`
+      (c) => `new RegExp(${js(c.value)}).test(String(${v}))`,
     ),
     Match.when({ op: "isSet" }, () => `(${v} !== undefined && ${v} !== "")`),
     Match.when({ op: "notSet" }, () => `(${v} === undefined || ${v} === "")`),
-    Match.exhaustive
+    Match.exhaustive,
   );
 };
 
@@ -247,134 +262,139 @@ export const emitAction = (action: Action): Array<string> =>
   // this match has 42 tags + Match.exhaustive. Merging them makes inference
   // collapse to `never` (verified: tsc rejects the merged chain).
   // @effect-diagnostics-next-line unnecessaryPipeChain:off
-  Match.value(action).pipe(
-    Match.tag("Flash", (a) => [
-      `${a.long ? "flashLong" : "flash"}(${emitText(a.text)});`,
-    ]),
-    Match.tag("Popup", (a) => [
-      `popup(${emitText(a.title)}, ${emitText(a.text)}, ${a.showOverKeyguard}, "", "", ${a.timeoutSecs});`,
-    ]),
-    Match.tag("Say", (a) => [
-      `say(${emitText(a.text)}, ${opt(a.engine)}, ${opt(a.voice)}, ${js(a.stream)}, ${a.pitch}, ${a.speed});`,
-    ]),
-    Match.tag("Vibrate", (a) => [`vibrate(${a.milliseconds});`]),
-    Match.tag("VibratePattern", (a) => [`vibratePattern(${js(a.pattern)});`]),
-    Match.tag("SetGlobal", (a) => [
-      `setGlobal(${js(varNameOf(a.name))}, ${emitText(a.value)});`,
-    ]),
-    Match.tag("SetLocal", (a) => [
-      `setLocal(${js(a.name)}, ${emitText(a.value)});`,
-    ]),
-    // DSL task references route through the shared dispatcher: %par1 carries
-    // the target task name (%par2 stays free for its exit switch), so this
-    // variant cannot forward custom parameters.
-    Match.tag("PerformTask", (a) => [
-      `performTask(${trimTrailingUndefined([js(DISPATCH_TASK_NAME), String(a.priority), js(a.taskName), "undefined"]).join(", ")});`,
-    ]),
-    Match.tag("PerformTaskerTask", (a) => [
-      `performTask(${trimTrailingUndefined([js(a.taskName), String(a.priority), opt(a.parameterOne), opt(a.parameterTwo)]).join(", ")});`,
-    ]),
-    Match.tag("ShowScene", emitShowScene),
-    Match.tag("EnableProfile", (a) => [
-      `enableProfile(${js(a.profileName)}, ${a.enable});`,
-    ]),
-    Match.tag("Wait", (a) => [`wait(${a.milliseconds});`]),
-    Match.tag("Shell", (a) => {
-      const call = `shell(${emitText(a.command)}, ${a.asRoot}, ${a.timeoutSecs})`;
-      if (a.outputGlobal === undefined) {
-        return [`${call};`];
-      }
-      return [
-        `__out = ${call};`,
+  Match.value(action)
+    .pipe(
+      Match.tag("Flash", (a) => [
+        `${a.long ? "flashLong" : "flash"}(${emitText(a.text)});`,
+      ]),
+      Match.tag("Popup", (a) => [
+        `popup(${emitText(a.title)}, ${emitText(a.text)}, ${a.showOverKeyguard}, "", "", ${a.timeoutSecs});`,
+      ]),
+      Match.tag("Say", (a) => [
+        `say(${emitText(a.text)}, ${opt(a.engine)}, ${opt(a.voice)}, ${js(a.stream)}, ${a.pitch}, ${a.speed});`,
+      ]),
+      Match.tag("Vibrate", (a) => [`vibrate(${a.milliseconds});`]),
+      Match.tag("VibratePattern", (a) => [`vibratePattern(${js(a.pattern)});`]),
+      Match.tag("SetGlobal", (a) => [
+        `setGlobal(${js(varNameOf(a.name))}, ${emitText(a.value)});`,
+      ]),
+      Match.tag("SetLocal", (a) => [
+        `setLocal(${js(a.name)}, ${emitText(a.value)});`,
+      ]),
+      // DSL task references route through the shared dispatcher: %par1 carries
+      // the target task name (%par2 stays free for its exit switch), so this
+      // variant cannot forward custom parameters.
+      Match.tag("PerformTask", (a) => [
+        `performTask(${trimTrailingUndefined([js(DISPATCH_TASK_NAME), String(a.priority), js(a.taskName), "undefined"]).join(", ")});`,
+      ]),
+      Match.tag("PerformTaskerTask", (a) => [
+        `performTask(${trimTrailingUndefined([js(a.taskName), String(a.priority), opt(a.parameterOne), opt(a.parameterTwo)]).join(", ")});`,
+      ]),
+      Match.tag("ShowScene", emitShowScene),
+      Match.tag("EnableProfile", (a) => [
+        `enableProfile(${js(a.profileName)}, ${a.enable});`,
+      ]),
+      Match.tag("Wait", (a) => [`wait(${a.milliseconds});`]),
+      Match.tag("Shell", (a) => {
+        const call = `shell(${emitText(a.command)}, ${a.asRoot}, ${a.timeoutSecs})`;
+        if (a.outputGlobal === undefined) {
+          return [`${call};`];
+        }
+        return [
+          `__out = ${call};`,
+          `setGlobal(${js(varNameOf(a.outputGlobal))}, __out === undefined ? "" : String(__out));`,
+        ];
+      }),
+      Match.tag("ReadFile", (a) => [
+        `__out = readFile(${emitText(a.path)});`,
         `setGlobal(${js(varNameOf(a.outputGlobal))}, __out === undefined ? "" : String(__out));`,
-      ];
-    }),
-    Match.tag("ReadFile", (a) => [
-      `__out = readFile(${emitText(a.path)});`,
-      `setGlobal(${js(varNameOf(a.outputGlobal))}, __out === undefined ? "" : String(__out));`,
-    ]),
-    Match.tag("WriteFile", (a) => [
-      `writeFile(${emitText(a.path)}, ${emitText(a.text)}, ${a.append});`,
-    ]),
-    Match.tag("HttpRequest", (a) => {
-      const lines = [
-        "__out = (function () {",
-        "  var xhr = new XMLHttpRequest();",
-        `  xhr.open(${js(a.method)}, ${emitText(a.url)}, false);`,
-      ];
-      for (const [key, value] of Object.entries(a.headers)) {
-        lines.push(`  xhr.setRequestHeader(${js(key)}, ${emitText(value)});`);
-      }
-      lines.push(
-        `  xhr.send(${a.body === undefined ? "null" : emitText(a.body)});`,
-        "  return xhr.responseText;",
-        "})();"
-      );
-      if (a.outputGlobal !== undefined) {
-        lines.push(`setGlobal(${js(varNameOf(a.outputGlobal))}, __out);`);
-      }
-      return lines;
-    }),
-    Match.tag("BrowseUrl", (a) => [`browseURL(${emitText(a.url)});`]),
-    Match.tag("SendSms", (a) => [
-      `sendSMS(${emitText(a.number)}, ${emitText(a.text)}, ${a.storeInMessagingApp});`,
-    ]),
-    Match.tag("SetWifi", (a) => [`setWifi(${a.on});`])
-  ).pipe(
-    Match.tag("SetBluetooth", (a) => [`setBT(${a.on});`]),
-    Match.tag("SetAirplaneMode", (a) => [`setAirplaneMode(${a.on});`]),
-    Match.tag("SetMobileData", (a) => [`mobileData(${a.on});`]),
-    Match.tag("SetAutoSync", (a) => [`setAutoSync(${a.on});`]),
-    Match.tag("SetVolume", (a) => [
-      `${VOLUME_FN[a.stream]}(${typeof a.level === "number" ? a.level : emitText(a.level)}, ${a.display}, ${a.sound});`,
-    ]),
-    Match.tag("MediaControl", (a) => [`mediaControl(${js(a.action)});`]),
-    Match.tag("MusicPlay", (a) => [
-      `musicPlay(${emitText(a.path)}, ${a.offsetSecs}, ${a.loop}, ${js(a.stream)});`,
-    ]),
-    Match.tag("MusicStop", () => ["musicStop();"]),
-    Match.tag("SetClip", (a) => [`setClip(${emitText(a.text)}, ${a.append});`]),
-    Match.tag("SetWallpaper", (a) => [`setWallpaper(${emitText(a.path)});`]),
-    Match.tag("LaunchApp", (a) => [
-      `loadApp(${emitText(a.app)}, ${opt(a.data)}, ${a.excludeFromRecents});`,
-    ]),
-    Match.tag("SendIntent", (a) => {
-      const extras = `[${a.extras.map((extra) => emitText(extra)).join(", ")}]`;
-      return [
-        `sendIntent(${js(a.action)}, ${js(a.targetComp)}, ${opt(a.pkg)}, ${opt(a.cls)}, ${opt(a.category)}, ${opt(a.data)}, ${opt(a.mimeType)}, ${extras});`,
-      ];
-    }),
-    Match.tag("SetSilentMode", (a) => [`silentMode(${js(a.mode)});`]),
-    Match.tag("GoHome", (a) => [`goHome(${a.screen});`]),
-    Match.tag("GetLocation", (a) => [
-      `getLocation(${js(a.source)}, ${a.keepTracking}, ${a.timeoutSecs});`,
-    ])
-  ).pipe(
-    Match.tag("SetCarMode", (a) => [`carMode(${a.on});`]),
-    Match.tag("SetNightMode", (a) => [`nightMode(${a.on});`]),
-    Match.tag("SetStayOn", (a) => [`stayOn(${js(a.mode)});`]),
-    Match.tag("SetAutoRotate", (a) => [`displayAutoRotate(${a.on});`]),
-    Match.tag("SetAutoBrightness", (a) => [`displayAutoBright(${a.on});`]),
-    Match.tag("SetDisplayTimeout", (a) => [
-      `displayTimeout(${a.hours}, ${a.minutes}, ${a.seconds});`,
-    ]),
-    Match.tag("JavaScript", (a) => emitJsCode(a.code)),
-    Match.tag("If", (a) => {
-      const lines = [`if (${conditionExpr(a.condition)}) {`];
-      for (const inner of a.then) {
-        lines.push(...indentLines(emitAction(inner), 2));
-      }
-      if (a.orElse.length > 0) {
-        lines.push("} else {");
-        for (const inner of a.orElse) {
+      ]),
+      Match.tag("WriteFile", (a) => [
+        `writeFile(${emitText(a.path)}, ${emitText(a.text)}, ${a.append});`,
+      ]),
+      Match.tag("HttpRequest", (a) => {
+        const lines = [
+          "__out = (function () {",
+          "  var xhr = new XMLHttpRequest();",
+          `  xhr.open(${js(a.method)}, ${emitText(a.url)}, false);`,
+        ];
+        for (const [key, value] of Object.entries(a.headers)) {
+          lines.push(`  xhr.setRequestHeader(${js(key)}, ${emitText(value)});`);
+        }
+        lines.push(
+          `  xhr.send(${a.body === undefined ? "null" : emitText(a.body)});`,
+          "  return xhr.responseText;",
+          "})();",
+        );
+        if (a.outputGlobal !== undefined) {
+          lines.push(`setGlobal(${js(varNameOf(a.outputGlobal))}, __out);`);
+        }
+        return lines;
+      }),
+      Match.tag("BrowseUrl", (a) => [`browseURL(${emitText(a.url)});`]),
+      Match.tag("SendSms", (a) => [
+        `sendSMS(${emitText(a.number)}, ${emitText(a.text)}, ${a.storeInMessagingApp});`,
+      ]),
+      Match.tag("SetWifi", (a) => [`setWifi(${a.on});`]),
+    )
+    .pipe(
+      Match.tag("SetBluetooth", (a) => [`setBT(${a.on});`]),
+      Match.tag("SetAirplaneMode", (a) => [`setAirplaneMode(${a.on});`]),
+      Match.tag("SetMobileData", (a) => [`mobileData(${a.on});`]),
+      Match.tag("SetAutoSync", (a) => [`setAutoSync(${a.on});`]),
+      Match.tag("SetVolume", (a) => [
+        `${VOLUME_FN[a.stream]}(${typeof a.level === "number" ? a.level : emitText(a.level)}, ${a.display}, ${a.sound});`,
+      ]),
+      Match.tag("MediaControl", (a) => [`mediaControl(${js(a.action)});`]),
+      Match.tag("MusicPlay", (a) => [
+        `musicPlay(${emitText(a.path)}, ${a.offsetSecs}, ${a.loop}, ${js(a.stream)});`,
+      ]),
+      Match.tag("MusicStop", () => ["musicStop();"]),
+      Match.tag("SetClip", (a) => [
+        `setClip(${emitText(a.text)}, ${a.append});`,
+      ]),
+      Match.tag("SetWallpaper", (a) => [`setWallpaper(${emitText(a.path)});`]),
+      Match.tag("LaunchApp", (a) => [
+        `loadApp(${emitText(a.app)}, ${opt(a.data)}, ${a.excludeFromRecents});`,
+      ]),
+      Match.tag("SendIntent", (a) => {
+        const extras = `[${a.extras.map((extra) => emitText(extra)).join(", ")}]`;
+        return [
+          `sendIntent(${js(a.action)}, ${js(a.targetComp)}, ${opt(a.pkg)}, ${opt(a.cls)}, ${opt(a.category)}, ${opt(a.data)}, ${opt(a.mimeType)}, ${extras});`,
+        ];
+      }),
+      Match.tag("SetSilentMode", (a) => [`silentMode(${js(a.mode)});`]),
+      Match.tag("GoHome", (a) => [`goHome(${a.screen});`]),
+      Match.tag("GetLocation", (a) => [
+        `getLocation(${js(a.source)}, ${a.keepTracking}, ${a.timeoutSecs});`,
+      ]),
+    )
+    .pipe(
+      Match.tag("SetCarMode", (a) => [`carMode(${a.on});`]),
+      Match.tag("SetNightMode", (a) => [`nightMode(${a.on});`]),
+      Match.tag("SetStayOn", (a) => [`stayOn(${js(a.mode)});`]),
+      Match.tag("SetAutoRotate", (a) => [`displayAutoRotate(${a.on});`]),
+      Match.tag("SetAutoBrightness", (a) => [`displayAutoBright(${a.on});`]),
+      Match.tag("SetDisplayTimeout", (a) => [
+        `displayTimeout(${a.hours}, ${a.minutes}, ${a.seconds});`,
+      ]),
+      Match.tag("JavaScript", (a) => emitJsCode(a.code)),
+      Match.tag("If", (a) => {
+        const lines = [`if (${conditionExpr(a.condition)}) {`];
+        for (const inner of a.then) {
           lines.push(...indentLines(emitAction(inner), 2));
         }
-      }
-      lines.push("}");
-      return lines;
-    }),
-    Match.exhaustive
-  );
+        if (a.orElse.length > 0) {
+          lines.push("} else {");
+          for (const inner of a.orElse) {
+            lines.push(...indentLines(emitAction(inner), 2));
+          }
+        }
+        lines.push("}");
+        return lines;
+      }),
+      Match.exhaustive,
+    );
 
 // =============================================================================
 // Task / Profile / Project compilation
@@ -392,7 +412,9 @@ const header = (title: string, description?: string): Array<string> => [
 
 /** Compile a task to a standalone JavaScript source string */
 export const compileTaskToJs = (task: Task): string => {
-  const body = task.actions.flatMap((action) => indentLines(emitAction(action), 4));
+  const body = task.actions.flatMap((action) =>
+    indentLines(emitAction(action), 4),
+  );
   return [
     ...header(`Task: ${task.name}`, task.description),
     '"use strict";',
@@ -416,35 +438,36 @@ export const describeTrigger = (trigger: Trigger): string =>
         `${String(time.hour).padStart(2, "0")}:${String(time.minute).padStart(2, "0")}`;
       const parts = [`Time from ${fmt(t.from)}`];
       if (t.to !== undefined) parts.push(`to ${fmt(t.to)}`);
-      if (t.repeatMinutes !== undefined) parts.push(`every ${t.repeatMinutes}m`);
+      if (t.repeatMinutes !== undefined)
+        parts.push(`every ${t.repeatMinutes}m`);
       if (t.days.length > 0) parts.push(`on ${t.days.join(", ")}`);
       return parts.join(" ");
     }),
     Match.tag(
       "LocationTrigger",
       (t) =>
-        `Location within ${t.radiusMeters}m of ${t.latitude}, ${t.longitude}`
+        `Location within ${t.radiusMeters}m of ${t.latitude}, ${t.longitude}`,
     ),
     Match.tag(
       "WifiConnectedTrigger",
-      (t) => `State > Net > Wifi Connected (SSID: ${t.ssid})`
+      (t) => `State > Net > Wifi Connected (SSID: ${t.ssid})`,
     ),
     Match.tag(
       "BluetoothConnectedTrigger",
-      (t) => `State > Net > BT Connected (Name: ${t.name})`
+      (t) => `State > Net > BT Connected (Name: ${t.name})`,
     ),
     Match.tag(
       "AppOpenedTrigger",
-      (t) => `Application: ${t.invert ? "NOT " : ""}${t.app}`
+      (t) => `Application: ${t.invert ? "NOT " : ""}${t.app}`,
     ),
     Match.tag(
       "ClipboardChangedTrigger",
       (t) =>
-        `Event > System > Clipboard Changed (Ignore Set By Tasker: ${t.ignoreSetByTasker ? "on" : "off"})`
+        `Event > System > Clipboard Changed (Ignore Set By Tasker: ${t.ignoreSetByTasker ? "on" : "off"})`,
     ),
     Match.tag(
       "BatteryLevelTrigger",
-      (t) => `State > Power > Battery Level from ${t.from}% to ${t.to}%`
+      (t) => `State > Power > Battery Level from ${t.from}% to ${t.to}%`,
     ),
     Match.tag("HeadsetPluggedTrigger", (t) => {
       const kind =
@@ -457,7 +480,7 @@ export const describeTrigger = (trigger: Trigger): string =>
     }),
     Match.tag(
       "PowerTrigger",
-      (t) => `State > Power > Power (Source: ${t.source})`
+      (t) => `State > Power > Power (Source: ${t.source})`,
     ),
     Match.tag("CalendarEntryTrigger", (t) => {
       const filters = [
@@ -474,19 +497,19 @@ export const describeTrigger = (trigger: Trigger): string =>
     Match.tag(
       "VariableTrigger",
       (t) =>
-        `State > Variables > Variable Value: %${varNameOf(t.condition.variable)} ${t.condition.op}${"value" in t.condition ? ` ${t.condition.value}` : ""}`
+        `State > Variables > Variable Value: %${varNameOf(t.condition.variable)} ${t.condition.op}${"value" in t.condition ? ` ${t.condition.value}` : ""}`,
     ),
     Match.tag(
       "EventTrigger",
       (t) =>
-        `Event: ${t.event}${t.parameter !== undefined ? ` (${t.parameter})` : ""}`
+        `Event: ${t.event}${t.parameter !== undefined ? ` (${t.parameter})` : ""}`,
     ),
     Match.tag(
       "StateTrigger",
       (t) =>
-        `State: ${t.state}${t.parameter !== undefined ? ` (${t.parameter})` : ""}`
+        `State: ${t.state}${t.parameter !== undefined ? ` (${t.parameter})` : ""}`,
     ),
-    Match.exhaustive
+    Match.exhaustive,
   );
 
 /** Compile a profile: one JS file per enter/exit task */
@@ -516,7 +539,9 @@ const profileReadmeSection = (profile: Profile): string => {
     "",
     ...(profile.description !== undefined ? [profile.description, ""] : []),
     ...(hasXmlWiring(profile)
-      ? [`Wired in \`${TASKER_PROJECT_XML_FILENAME}\` (nothing to set up). Triggers:`]
+      ? [
+          `Wired in \`${TASKER_PROJECT_XML_FILENAME}\` (nothing to set up). Triggers:`,
+        ]
       : ["Triggers to configure in the Tasker UI:"]),
     "",
     ...profile.triggers.map((trigger) => `- ${describeTrigger(trigger)}`),
@@ -609,7 +634,7 @@ export const compileDispatcherJs = (project: Project): string => {
   });
   const taskEntries = [
     ...project.tasks.map(
-      (task) => `    ${js(task.name)}: ${js(`${slugify(task.name)}.js`)},`
+      (task) => `    ${js(task.name)}: ${js(`${slugify(task.name)}.js`)},`,
     ),
     `    ${js(MENU_TASK_NAME)}: ${js(MENU_SCRIPT_FILENAME)},`,
   ];
@@ -618,7 +643,7 @@ export const compileDispatcherJs = (project: Project): string => {
   return [
     ...header(
       `Dispatcher: ${commentSafe(project.name)}`,
-      "Single entry point that runs the mapped file for the calling profile or %par1."
+      "Single entry point that runs the mapped file for the calling profile or %par1.",
     ),
     '"use strict";',
     "(function () {",
@@ -641,7 +666,7 @@ export const compileDispatcherJs = (project: Project): string => {
     `      flash("tasker-effect: scaffolding v${SCAFFOLD_VERSION} required (installed: v" + installed + ") - ${REIMPORT_HINT}");`,
     "    }",
     "    // Same for the profile wiring: the imported XML stamps its hash into",
-    "    // %TE_WIRING; a mismatch means profile triggers changed since import.",
+    "    // the TE_WIRING global; a mismatch means profile triggers changed since import.",
     `    if (global("TE_WIRING") !== ${js(wiring)}) {`,
     `      flash("tasker-effect: profile triggers changed - ${REIMPORT_HINT}");`,
     "    }",
@@ -664,12 +689,12 @@ export const compileDispatcherJs = (project: Project): string => {
     "        return;",
     "      }",
     "    } else {",
-    '      // %caller1 is "profile=enter:<name>" / "profile=exit:<name>" when a',
+    '      // The caller1 local is "profile=enter:<name>" / "profile=exit:<name>" when a',
     "      // profile state change launched this task.",
     '      var caller = local("caller1");',
     '      var match = /^profile=(enter|exit):([\\s\\S]+)$/.exec(caller === undefined ? "" : caller);',
     "      if (match === null) {",
-    '        flash("tasker-effect dispatch: no %par1 given and caller is not a profile (%caller1=" + caller + ")");',
+    '        flash("tasker-effect dispatch: no %par1 given and caller is not a profile (caller1=" + caller + ")");',
     "        return;",
     "      }",
     "      var entry = PROFILES[match[2]];",
@@ -753,7 +778,7 @@ const jsDirPreamble = (jsDir: string): Array<string> => [
 export const syncBootstrapJs = (
   repo: RepoRef,
   jsDir: string = DEFAULT_DEVICE_JS_DIR,
-  wiringHash?: string
+  wiringHash?: string,
 ): string => {
   const url = `https://github.com/${repo.owner}/${repo.repo}/releases/download/${ROLLING_RELEASE_TAG}/${SYNC_SCRIPT_FILENAME}`;
   return [
@@ -777,7 +802,9 @@ export const syncBootstrapJs = (
     // sync, so the synced dispatcher can detect an outdated import.
     `setGlobal("TE_SCAFFOLD_VERSION", ${js(String(SCAFFOLD_VERSION))});`,
     // Same for the imported profile wiring (see profileWiringHash).
-    ...(wiringHash === undefined ? [] : [`setGlobal("TE_WIRING", ${js(wiringHash)});`]),
+    ...(wiringHash === undefined
+      ? []
+      : [`setGlobal("TE_WIRING", ${js(wiringHash)});`]),
     // Queued before the eval: the sync script completes asynchronously (and
     // calls exit() itself), so there is no "after sync" statement to hook.
     // TE Config tolerates the race by waiting for secrets.json on first run.
@@ -945,7 +972,7 @@ const intArg = (index: number, value: number): string =>
 const xmlAction = (
   index: number,
   code: number,
-  body: ReadonlyArray<string>
+  body: ReadonlyArray<string>,
 ): Array<string> => [
   `\t\t<Action sr="act${index}" ve="7">`,
   `\t\t\t<code>${code}</code>`,
@@ -957,7 +984,7 @@ const xmlAction = (
 const scriptletAction = (
   index: number,
   code: string,
-  options: { readonly autoExit: boolean; readonly timeoutSecs: number }
+  options: { readonly autoExit: boolean; readonly timeoutSecs: number },
 ): Array<string> =>
   xmlAction(index, 129, [
     strArg(0, code),
@@ -976,13 +1003,15 @@ const xmlTask = (
   id: number,
   name: string,
   actions: ReadonlyArray<string>,
-  options: { readonly collision?: number } = {}
+  options: { readonly collision?: number } = {},
 ): Array<string> => [
   `\t<Task sr="task${id}">`,
   "\t\t<cdate>1</cdate>",
   `\t\t<id>${id}</id>`,
   `\t\t<nme>${escapeXml(name)}</nme>`,
-  ...(options.collision === undefined ? [] : [`\t\t<rty>${options.collision}</rty>`]),
+  ...(options.collision === undefined
+    ? []
+    : [`\t\t<rty>${options.collision}</rty>`]),
   ...actions,
   "\t</Task>",
 ];
@@ -1036,11 +1065,15 @@ const duplicatesOf = (names: ReadonlyArray<string>): Array<string> =>
  */
 const checkXmlNames = (
   taskNames: ReadonlyArray<string>,
-  profileNames: ReadonlyArray<string>
+  profileNames: ReadonlyArray<string>,
 ): void => {
   const problems = [
-    ...duplicatesOf(taskNames).map((name) => `task name "${name}" is used twice`),
-    ...duplicatesOf(profileNames).map((name) => `profile name "${name}" is used twice`),
+    ...duplicatesOf(taskNames).map(
+      (name) => `task name "${name}" is used twice`,
+    ),
+    ...duplicatesOf(profileNames).map(
+      (name) => `profile name "${name}" is used twice`,
+    ),
   ];
   if (problems.length > 0) {
     throw new CompileError({
@@ -1104,7 +1137,7 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
   const user = userProfilesXml(profiles, jsDir);
   checkXmlNames(
     [...SCAFFOLD_TASK_NAMES, ...user.stubTasks.map((task) => task.name)],
-    [SYNC_PROFILE_NAME, ...user.profileNames]
+    [SYNC_PROFILE_NAME, ...user.profileNames],
   );
 
   const isSetCondition = (variable: string): Array<string> => [
@@ -1160,10 +1193,14 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
     // TE Sync: self-bootstrapping sync (Auto Exit off — the evaluated sync
     // script finishes asynchronously and calls exit() itself).
     ...xmlTask(SYNC_TASK_ID, SYNC_TASK_NAME, [
-      ...scriptletAction(0, syncBootstrapJs(options.repo, jsDir, profileWiringHash(profiles)), {
-        autoExit: false,
-        timeoutSecs: 600,
-      }),
+      ...scriptletAction(
+        0,
+        syncBootstrapJs(options.repo, jsDir, profileWiringHash(profiles)),
+        {
+          autoExit: false,
+          timeoutSecs: 600,
+        },
+      ),
     ]),
     // TE Config: prompt for declared-but-unset secrets. The scan/label logic
     // lives in synced te-config-*.js files; the XML holds only eval stubs.
@@ -1206,7 +1243,7 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
       ...xmlAction(0, 479, [
         '\t\t\t<Bundle sr="arg0">',
         '\t\t\t\t<Vals sr="val">',
-        "\t\t\t\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES>&lt;StringArray sr=\"\"/&gt;</net.dinglisch.android.tasker.RELEVANT_VARIABLES>",
+        '\t\t\t\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES>&lt;StringArray sr=""/&gt;</net.dinglisch.android.tasker.RELEVANT_VARIABLES>',
         "\t\t\t\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>[Ljava.lang.String;</net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>",
         "\t\t\t\t</Vals>",
         "\t\t\t</Bundle>",
@@ -1279,10 +1316,7 @@ const clipboardChangedContext = (t: ClipboardChangedTrigger): XmlContext => ({
   ],
 });
 
-const appContext = (
-  t: AppOpenedTrigger,
-  packageName: string
-): XmlContext => ({
+const appContext = (t: AppOpenedTrigger, packageName: string): XmlContext => ({
   isEvent: false,
   lines: (sr) => [
     `\t\t<App sr="${sr}" ve="2">`,
@@ -1297,9 +1331,9 @@ const xmlContextOf = (trigger: Trigger): XmlContext | undefined =>
   Match.value(trigger).pipe(
     Match.tag("ClipboardChangedTrigger", clipboardChangedContext),
     Match.tag("AppOpenedTrigger", (t) =>
-      t.packageName === undefined ? undefined : appContext(t, t.packageName)
+      t.packageName === undefined ? undefined : appContext(t, t.packageName),
     ),
-    Match.orElse(() => undefined)
+    Match.orElse(() => undefined),
   );
 
 /**
@@ -1307,7 +1341,7 @@ const xmlContextOf = (trigger: Trigger): XmlContext | undefined =>
  * when any trigger lacks a known XML form or there is more than one event.
  */
 const xmlContextsOf = (
-  profile: Profile
+  profile: Profile,
 ): ReadonlyArray<XmlContext> | undefined => {
   const contexts = profile.triggers.map(xmlContextOf);
   if (contexts.some((context) => context === undefined)) return undefined;
@@ -1358,9 +1392,9 @@ export const profileWiringHash = (profiles: ReadonlyArray<Profile>): string =>
           profile.name,
           profile.exit === undefined ? "enter" : "enter+exit",
           ...contexts.flatMap((context) => context.lines("con")),
-        ].join("\n")
+        ].join("\n"),
       )
-      .join("\n\n")
+      .join("\n\n"),
   );
 
 /** First id used for user profiles (scaffold ids stay below it) */
@@ -1378,8 +1412,10 @@ const userProfileIds = (index: number) => {
  * profile could then link to an unrelated task with the same id), while
  * named tasks are remapped correctly even when their XML ids collide.
  */
-export const profileTaskName = (profile: Profile, phase: "enter" | "exit"): string =>
-  `TE ${profile.name} (${phase})`;
+export const profileTaskName = (
+  profile: Profile,
+  phase: "enter" | "exit",
+): string => `TE ${profile.name} (${phase})`;
 
 /** JavaScriptlet of the profile tasks */
 const profileStubJs = (jsDir: string, wiringHash: string): string =>
@@ -1398,7 +1434,7 @@ interface StubTask {
 /** The user profiles' XML: <Profile> elements and their named stub tasks */
 const userProfilesXml = (
   profiles: ReadonlyArray<Profile>,
-  jsDir: string
+  jsDir: string,
 ): {
   readonly ids: Array<number>;
   readonly profileNames: Array<string>;
@@ -1415,7 +1451,9 @@ const userProfilesXml = (
     const hasExit = profile.exit !== undefined;
     const stubTasks: Array<StubTask> = [
       { id: ids.enter, name: profileTaskName(profile, "enter") },
-      ...(hasExit ? [{ id: ids.exit, name: profileTaskName(profile, "exit") }] : []),
+      ...(hasExit
+        ? [{ id: ids.exit, name: profileTaskName(profile, "exit") }]
+        : []),
     ];
     return {
       id: ids.id,
@@ -1438,8 +1476,8 @@ const userProfilesXml = (
           task.id,
           task.name,
           [...scriptletAction(0, stub, { autoExit: true, timeoutSecs: 600 })],
-          { collision: RUN_BOTH_TOGETHER }
-        )
+          { collision: RUN_BOTH_TOGETHER },
+        ),
       ),
     };
   });
@@ -1460,10 +1498,12 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
   `   \`${DISPATCH_TASK_NAME}\`, the self-bootstrapping \`${SYNC_TASK_NAME}\` task with its periodic`,
   `   profile, the \`${CONFIG_TASK_NAME}\` secrets prompter, the generic \`${SHOW_SCENE_TASK_NAME}\``,
   `   task used by \`Action.showScene\`, the \`${MENU_TASK_NAME}\` task and every profile`,
-  "   below whose triggers have a known XML form. Enable the `" + SYNC_PROFILE_NAME + "`",
+  "   below whose triggers have a known XML form. Enable the `" +
+    SYNC_PROFILE_NAME +
+    "`",
   "   profile (or run the task once) and it downloads everything else by",
   "   itself — no files need to be copied manually.",
-  "2. For each profile below marked \"Triggers to configure\", set up its",
+  '2. For each profile below marked "Triggers to configure", set up its',
   `   trigger(s) in the Tasker UI with \`${DISPATCH_TASK_NAME}\` as enter and exit task. The`,
   "   dispatcher detects the calling profile from `%caller1`",
   "   (`profile=enter:<name>` / `profile=exit:<name>`) and runs the matching file.",
@@ -1475,7 +1515,9 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
       ]
     : []),
   "",
-  "The dispatcher reads files from `" + DEFAULT_DEVICE_JS_DIR + "`; override with",
+  "The dispatcher reads files from `" +
+    DEFAULT_DEVICE_JS_DIR +
+    "`; override with",
   "the Tasker global `%TE_JS_DIR` (then also edit the path in the imported",
   "task).",
   "",
@@ -1500,7 +1542,7 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
 const walkSecrets = (
   node: unknown,
   visit: (secret: Secret) => void,
-  seen: Set<object>
+  seen: Set<object>,
 ): void => {
   if (node instanceof Secret) {
     visit(node);
@@ -1543,7 +1585,7 @@ export const collectProjectSecrets = (project: Project): Array<Secret> => {
           });
         }
       },
-      new Set()
+      new Set(),
     );
   };
   for (const profile of project.profiles) {
@@ -1561,7 +1603,7 @@ export const collectProjectSecrets = (project: Project): Array<Secret> => {
   // mutates its input.
   return Arr.sort(
     byName.values(),
-    Order.mapInput(Order.string, (s: Secret) => s.name)
+    Order.mapInput(Order.string, (s: Secret) => s.name),
   );
 };
 
@@ -1573,7 +1615,7 @@ export const collectProjectSecrets = (project: Project): Array<Secret> => {
  * contract, not drift protection.
  */
 export const SecretManifest = Schema.Array(
-  Schema.Struct({ name: Schema.String, description: Schema.String })
+  Schema.Struct({ name: Schema.String, description: Schema.String }),
 );
 
 /**
@@ -1586,7 +1628,7 @@ export const compileSecretsJson = (project: Project): string =>
   `${JSON.stringify(
     Schema.encodeSync(SecretManifest)(collectProjectSecrets(project)),
     null,
-    2
+    2,
   )}\n`;
 
 // =============================================================================
@@ -1621,10 +1663,15 @@ const collectTaskRefs = (actions: ReadonlyArray<Action>): Array<string> => {
 const checkTaskReferences = (project: Project): void => {
   const targets = project.tasks.map((task) => task.name);
   const targetList =
-    targets.length > 0 ? targets.map((name) => `"${name}"`).join(", ") : "(none)";
+    targets.length > 0
+      ? targets.map((name) => `"${name}"`).join(", ")
+      : "(none)";
   const problems: Array<string> = [];
 
-  const findDuplicates = (label: string, names: ReadonlyArray<string>): void => {
+  const findDuplicates = (
+    label: string,
+    names: ReadonlyArray<string>,
+  ): void => {
     const seen = new Set<string>();
     for (const name of names) {
       if (seen.has(name)) problems.push(`Duplicate ${label} name "${name}"`);
@@ -1632,7 +1679,10 @@ const checkTaskReferences = (project: Project): void => {
     }
   };
   findDuplicates("task", targets);
-  findDuplicates("profile", project.profiles.map((profile) => profile.name));
+  findDuplicates(
+    "profile",
+    project.profiles.map((profile) => profile.name),
+  );
 
   // The dispatcher resolves PROFILES before TASKS (compileDispatcherJs), so
   // a name shared between both is ambiguous: performTask(name) would
@@ -1641,7 +1691,7 @@ const checkTaskReferences = (project: Project): void => {
   for (const task of project.tasks) {
     if (profileNames.has(task.name)) {
       problems.push(
-        `"${task.name}" is both a profile and a task; the dispatcher resolves %par1 against profiles first`
+        `"${task.name}" is both a profile and a task; the dispatcher resolves %par1 against profiles first`,
       );
     }
   }
@@ -1654,9 +1704,15 @@ const checkTaskReferences = (project: Project): void => {
     }
   };
   for (const profile of project.profiles) {
-    check(`Profile "${profile.name}" enter task "${profile.enter.name}"`, profile.enter);
+    check(
+      `Profile "${profile.name}" enter task "${profile.enter.name}"`,
+      profile.enter,
+    );
     if (profile.exit !== undefined) {
-      check(`Profile "${profile.name}" exit task "${profile.exit.name}"`, profile.exit);
+      check(
+        `Profile "${profile.name}" exit task "${profile.exit.name}"`,
+        profile.exit,
+      );
     }
   }
   for (const task of project.tasks) {
@@ -1697,12 +1753,16 @@ const checkFilenames = (project: Project): void => {
   const problems: Array<string> = [];
   const claim = (filename: string, owner: string): void => {
     if (RESERVED_FILENAMES.has(filename)) {
-      problems.push(`${owner} slugifies to the reserved filename "${filename}"`);
+      problems.push(
+        `${owner} slugifies to the reserved filename "${filename}"`,
+      );
       return;
     }
     const existing = claimed.get(filename);
     if (existing !== undefined) {
-      problems.push(`${owner} and ${existing} both slugify to filename "${filename}"`);
+      problems.push(
+        `${owner} and ${existing} both slugify to filename "${filename}"`,
+      );
       return;
     }
     claimed.set(filename, owner);
@@ -1718,14 +1778,17 @@ const checkFilenames = (project: Project): void => {
     claim(`${slugify(task.name)}.js`, `Task "${task.name}"`);
   }
   if (problems.length > 0) {
-    throw new CompileError({ message: problems.join("; "), source: project.name });
+    throw new CompileError({
+      message: problems.join("; "),
+      source: project.name,
+    });
   }
 };
 
 /** Compile a whole project to JS files plus a setup README */
 export const compileProjectFiles = (
   project: Project,
-  options: CompileProjectOptions
+  options: CompileProjectOptions,
 ): Array<CompiledFile> => {
   checkTaskReferences(project);
   checkFilenames(project);
@@ -1766,7 +1829,7 @@ export const compileProjectFiles = (
       content: menuSceneJson(SCENE_JS_DIR_PLACEHOLDER),
       kind: "web-asset",
     },
-    { filename: MENU_HTML_FILENAME, content: menuHtml, kind: "web-asset" }
+    { filename: MENU_HTML_FILENAME, content: menuHtml, kind: "web-asset" },
   );
   files.push({
     filename: SECRETS_FILENAME,
@@ -1775,7 +1838,10 @@ export const compileProjectFiles = (
   });
   files.push({
     filename: TASKER_PROJECT_XML_FILENAME,
-    content: taskerProjectXml({ repo: options.repo, profiles: project.profiles }),
+    content: taskerProjectXml({
+      repo: options.repo,
+      profiles: project.profiles,
+    }),
     kind: "tasker-xml",
   });
 
@@ -1800,7 +1866,7 @@ export const compileProjectFiles = (
           "",
           ...project.tasks.map(
             (task) =>
-              `- ${task.name}: \`${slugify(task.name)}.js\`${task.description !== undefined ? ` — ${task.description}` : ""}`
+              `- ${task.name}: \`${slugify(task.name)}.js\`${task.description !== undefined ? ` — ${task.description}` : ""}`,
           ),
           "",
         ]
@@ -1855,9 +1921,9 @@ export class TaskerCompiler extends Effect.Service<TaskerCompiler>()(
         Effect.sync(() => compileProfileFiles(profile)),
       compileProject: (
         project: Project,
-        options: CompileProjectOptions
+        options: CompileProjectOptions,
       ): Effect.Effect<Array<CompiledFile>, CompileError> =>
         tryCompile(() => compileProjectFiles(project, options)),
     }),
-  }
+  },
 ) {}

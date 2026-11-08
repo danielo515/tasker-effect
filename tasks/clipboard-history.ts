@@ -29,7 +29,7 @@ export const HISTORY_SCENE_FILE = "clipboard-history.scene.json";
 // Plain ES5: this runs inside Tasker's JavaScript engine.
 const recordClipJs = [
   `var MAX = ${MAX_ENTRIES};`,
-  "// %cl_text is the Clipboard Changed event's own output; %CLIP is a fallback.",
+  "// cl_text is the Clipboard Changed event's own output; the CLIP global is a fallback.",
   'var clip = local("cl_text");',
   'if (clip === undefined || clip === null || clip === "") clip = global("CLIP");',
   'if (clip !== undefined && clip !== null && String(clip).replace(/\\s/g, "") !== "") {',
@@ -71,6 +71,7 @@ export const clipboardHistory = new Profile({
 /** Open the clipboard history dialog (bind it to a gesture or shortcut) */
 export const showClipboardHistory = new Task({
   name: "Show Clipboard History",
-  description: "Shows the clipboard history dialog; tap an entry to copy it again",
+  description:
+    "Shows the clipboard history dialog; tap an entry to copy it again",
   actions: [Action.showScene(HISTORY_SCENE_FILE)],
 });
