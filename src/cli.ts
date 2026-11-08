@@ -375,7 +375,7 @@ export const compileEntry = Effect.fn("cli.compileEntry")(function* (options: {
     });
   }
 
-  // Only Project compiles need the repo (for the sync bootstrap in the
+  // Only Project compiles need the repo (for the TE Sync download URL in the
   // project XML); detect it lazily so Profile/Task-only entries never
   // require git or --repo. Effect.cached both memoizes the result across
   // multiple Project exports and single-flights a concurrent detection.
@@ -452,7 +452,7 @@ const repoOption = Options.text("repo").pipe(
   Options.withSchema(RepoRefFromString),
   Options.withDescription(
     "GitHub repository (<owner>/<name>) embedded in the generated project " +
-      "XML's sync bootstrap. Default: detected from `git remote get-url " +
+      "XML's TE Sync download URL. Default: detected from `git remote get-url " +
       "origin`. Only needed for Projects."
   ),
   Options.optional

@@ -75,7 +75,7 @@ export interface RepoRef {
 /** Options for project compilation */
 export interface CompileProjectOptions {
   /**
-   * The GitHub repository whose rolling release the on-device bootstrap
+   * The GitHub repository whose rolling release the on-device TE Sync task
    * downloads from. Detected from `git remote get-url origin` by the CLI, or
    * passed explicitly with `--repo owner/name`.
    */
@@ -571,7 +571,7 @@ export const TASKER_PROJECT_XML_FILENAME = "tasker-effect.prj.xml";
 /** Name of the shared dispatch task created by the import XML */
 export const DISPATCH_TASK_NAME = "TE Dispatch";
 
-/** Name of the self-bootstrapping sync task created by the import XML */
+/** Name of the sync task (download + unzip) created by the import XML */
 export const SYNC_TASK_NAME = "TE Sync";
 
 /** Name of the secrets-prompting task created by the import XML */
@@ -601,7 +601,7 @@ export const CONFIG_LABEL_FILENAME = "te-config-label.js";
  * stamp against its own baked-in version and flashes a re-import warning
  * (without blocking dispatch) when the imported XML is older.
  */
-export const SCAFFOLD_VERSION = 4;
+export const SCAFFOLD_VERSION = 5;
 
 /**
  * How to update the imported XML: Tasker refuses to import a project whose
@@ -740,14 +740,22 @@ const escapeXml = (value: string): string =>
 // member profile/task ids in comma-separated <pids>/<tids>. Action codes
 // used here: 131 JavaScript (file), 129 JavaScriptlet (inline), 37 If /
 // 38 End If (condition op 12 = "Is Set"), 39 For / 40 End For (items split
-// on commas), 360 Input Dialog (result lands in %input). A Time context
+// on commas), 360 Input Dialog (result lands in %input), 339 HTTP Request,
+// 422 UnZip (condition op 8 = maths "=", as in a real export checking
+// %http_response_code; an action-level condition is a <ConditionList sr="if">
+// after the action's arguments). A Time context
 // repeating every N hours is <rep>1</rep><repval>N</repval> with -1
 // from/to fields.
 
 /** Rolling GitHub release tag that CI keeps pointed at the newest build */
 export const ROLLING_RELEASE_TAG = "tasker-js-latest";
 
-/** Filename of the bundled on-device sync script */
+/**
+ * Filename of the bundled sync script (ProfileSync over the release assets).
+ * The imported `TE Sync` task no longer runs it (it unzips
+ * {@link RELEASE_ZIP_FILENAME} natively); it stays a reserved name and a
+ * release asset for manual/legacy use.
+ */
 export const SYNC_SCRIPT_FILENAME = "sync-profiles.js";
 
 /** How often the TE Sync profile fires, in hours */
@@ -764,54 +772,55 @@ const jsDirPreamble = (jsDir: string): Array<string> => [
   'if (dir.charAt(dir.length - 1) !== "/") dir = dir + "/";',
 ];
 
+/** Rolling-release asset holding every synced file, flat at the zip root */
+export const RELEASE_ZIP_FILENAME = "tasker-js.zip";
+
 /**
- * Bootstrap snippet inside the `TE Sync` task: run the synced
- * sync-profiles.js if present, otherwise self-install it from the rolling
- * GitHub release with a synchronous XHR first. Stamps the imported XML's
- * {@link SCAFFOLD_VERSION} into %TE_SCAFFOLD_VERSION (and, when given, the
- * profile wiring hash into %TE_WIRING) and always queues
- * `TE Config` so newly declared secrets get prompted for after every sync.
- *
- * A GitHub token in the Tasker global %TE_GH_TOKEN is sent as an
- * Authorization header when set (not needed for public repos).
+ * Task local (set by `TE Sync`'s first action) holding the device path the
+ * release zip is downloaded to. A full path rather than the directory alone:
+ * Tasker would parse `%te_dirtasker` as one variable name.
  */
-export const syncBootstrapJs = (
-  repo: RepoRef,
+const SYNC_ZIP_LOCAL = "te_zip";
+
+/** URL of the rolling release's {@link RELEASE_ZIP_FILENAME} asset */
+export const releaseZipUrl = (repo: RepoRef): string =>
+  `https://github.com/${repo.owner}/${repo.repo}/releases/download/${ROLLING_RELEASE_TAG}/${RELEASE_ZIP_FILENAME}`;
+
+/**
+ * First action of the `TE Sync` task: resolve the device JS dir, expose the
+ * zip download path as the task local %te_zip for the native HTTP Request
+ * and UnZip actions that follow, and stamp the imported XML's
+ * {@link SCAFFOLD_VERSION} into %TE_SCAFFOLD_VERSION (and, when given, the
+ * profile wiring hash into %TE_WIRING) so the synced dispatcher can detect
+ * an outdated import.
+ */
+export const syncPrepareJs = (
   jsDir: string = DEFAULT_DEVICE_JS_DIR,
   wiringHash?: string,
-): string => {
-  const url = `https://github.com/${repo.owner}/${repo.repo}/releases/download/${ROLLING_RELEASE_TAG}/${SYNC_SCRIPT_FILENAME}`;
-  return [
+): string =>
+  [
     ...jsDirPreamble(jsDir),
-    `var path = dir + ${js(SYNC_SCRIPT_FILENAME)};`,
-    "var source = readFile(path);",
-    'if (source === undefined || source === "") {',
-    "  var xhr = new XMLHttpRequest();",
-    `  xhr.open("GET", ${js(url)}, false);`,
-    '  var token = global("TE_GH_TOKEN");',
-    '  if (token !== undefined && token !== "") xhr.setRequestHeader("Authorization", "Bearer " + token);',
-    "  xhr.send(null);",
-    '  if (xhr.status !== 200 || xhr.responseText === "") {',
-    `    flash("tasker-effect bootstrap: downloading ${SYNC_SCRIPT_FILENAME} failed (HTTP " + xhr.status + ")");`,
-    "    exit();",
-    "  }",
-    "  source = xhr.responseText;",
-    "  writeFile(path, source, false);",
-    "}",
-    // Stamp the *imported* XML's scaffolding version, refreshed on every
-    // sync, so the synced dispatcher can detect an outdated import.
+    `setLocal(${js(SYNC_ZIP_LOCAL)}, dir + ${js(RELEASE_ZIP_FILENAME)});`,
     `setGlobal("TE_SCAFFOLD_VERSION", ${js(String(SCAFFOLD_VERSION))});`,
-    // Same for the imported profile wiring (see profileWiringHash).
     ...(wiringHash === undefined
       ? []
       : [`setGlobal("TE_WIRING", ${js(wiringHash)});`]),
-    // Queued before the eval: the sync script completes asynchronously (and
-    // calls exit() itself), so there is no "after sync" statement to hook.
-    // TE Config tolerates the race by waiting for secrets.json on first run.
-    `performTask(${js(CONFIG_TASK_NAME)}, 5);`,
-    "eval(source);",
   ].join("\n");
-};
+
+/**
+ * Last action of the `TE Sync` task: report the outcome of the download
+ * (%http_response_code, set by the HTTP Request action) and queue
+ * `TE Config` so newly declared secrets get prompted for after every sync.
+ */
+export const syncFinishJs: string = [
+  'var code = local("http_response_code");',
+  'if (code === "200") {',
+  `  flash("tasker-effect: synced ${RELEASE_ZIP_FILENAME}");`,
+  "} else {",
+  `  flash("tasker-effect: downloading ${RELEASE_ZIP_FILENAME} failed (HTTP " + code + ")");`,
+  "}",
+  `performTask(${js(CONFIG_TASK_NAME)}, 5);`,
+].join("\n");
 
 /**
  * Header for the synced `TE Config` logic files: they are not standalone
@@ -1046,6 +1055,90 @@ const performDispatchAction = (index: number, par1: string): Array<string> =>
     intArg(9, 0),
   ]);
 
+/** Condition operators (`<op>`) used in the XML */
+const CONDITION_MATHS_EQUALS = 8;
+const CONDITION_IS_SET = 12;
+
+/**
+ * A single-condition `<ConditionList>`: the body of an If action (37), or,
+ * appended after an action's arguments, that action's own condition.
+ */
+const conditionList = (lhs: string, op: number, rhs: string): Array<string> => [
+  '\t\t\t<ConditionList sr="if">',
+  '\t\t\t\t<Condition sr="c0" ve="3">',
+  `\t\t\t\t\t<lhs>${escapeXml(lhs)}</lhs>`,
+  `\t\t\t\t\t<op>${op}</op>`,
+  `\t\t\t\t\t<rhs>${escapeXml(rhs)}</rhs>`,
+  "\t\t\t\t</Condition>",
+  "\t\t\t</ConditionList>",
+];
+
+/**
+ * RELEVANT_VARIABLES bundle of the HTTP Request action, copied verbatim from
+ * a real export (test/fixtures/tasker-exports/http-download-unzip.tsk.xml).
+ */
+const HTTP_REQUEST_RELEVANT_VARIABLES = [
+  "&lt;StringArray sr=\"\"&gt;&lt;_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES0&gt;%http_cookies",
+  "Cookies",
+  "The cookies the server sent in the response in the Cookie:COOKIE_VALUE format. You can use this directly in the 'Headers' field of the HTTP Request action&lt;/_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES0&gt;&lt;_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES1&gt;%http_file_output",
+  "File Output",
+  "Will always contain the file's full path even if you specified a directory as the File to save.&lt;/_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES1&gt;&lt;_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES2&gt;%http_response_code",
+  "Response Code",
+  "The HTTP Code the server responded&lt;/_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES2&gt;&lt;_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES3&gt;%http_headers()",
+  "Response Headers",
+  "The HTTP Headers the server sent in the response. Each header is in the 'key:value' format&lt;/_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES3&gt;&lt;_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES4&gt;%http_response_length",
+  "Response Length",
+  "The size of the response in bytes&lt;/_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES4&gt;&lt;/StringArray&gt;",
+].join("\n");
+
+/**
+ * HTTP Request (339): GET `url`, saving the response body to `filePath`,
+ * following redirects (GitHub release downloads redirect to
+ * objects.githubusercontent.com), 60s timeout. `<se>false</se>` (continue
+ * task after error) lets the task report a failed download. Layout copied
+ * from a real export, args in Tasker's lexical order.
+ */
+const httpDownloadAction = (
+  index: number,
+  url: string,
+  filePath: string,
+): Array<string> =>
+  xmlAction(index, 339, [
+    "\t\t\t<se>false</se>",
+    '\t\t\t<Bundle sr="arg0">',
+    '\t\t\t\t<Vals sr="val">',
+    `\t\t\t\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES>${HTTP_REQUEST_RELEVANT_VARIABLES}</net.dinglisch.android.tasker.RELEVANT_VARIABLES>`,
+    "\t\t\t\t\t<net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>[Ljava.lang.String;</net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>",
+    "\t\t\t\t</Vals>",
+    "\t\t\t</Bundle>",
+    intArg(1, 0), // method GET
+    intArg(10, 1), // follow redirects
+    intArg(11, 0), // use cookies
+    intArg(12, 1), // structure output
+    strArg(2, url),
+    strArg(3, ""), // headers
+    strArg(4, ""), // query parameters
+    strArg(5, ""), // body
+    strArg(6, ""), // file to send
+    strArg(7, filePath), // file to save with output
+    intArg(8, 60), // timeout (s)
+    intArg(9, 0), // trust any certificate
+  ]);
+
+/**
+ * UnZip (422) of `zipPath` into the zip's own directory, deleting the zip
+ * afterwards, only when the preceding HTTP Request answered 200.
+ */
+const unzipAfterDownloadAction = (
+  index: number,
+  zipPath: string,
+): Array<string> =>
+  xmlAction(index, 422, [
+    strArg(0, zipPath),
+    intArg(1, 1), // delete zip
+    ...conditionList("%http_response_code", CONDITION_MATHS_EQUALS, "200"),
+  ]);
+
 /** Names of the scaffold tasks in the project XML */
 const SCAFFOLD_TASK_NAMES: ReadonlyArray<string> = [
   DISPATCH_TASK_NAME,
@@ -1084,7 +1177,7 @@ const checkXmlNames = (
 
 /** Options for the generated project XML */
 export interface TaskerProjectXmlOptions {
-  /** Repository whose rolling release the bootstrap downloads from */
+  /** Repository whose rolling release TE Sync downloads from */
   readonly repo: RepoRef;
   /** Path of the dispatcher file on the device */
   readonly dispatcherPath?: string;
@@ -1103,9 +1196,11 @@ export interface TaskerProjectXmlOptions {
  *
  * - Task `TE Dispatch`: file-based JavaScript action (131) running the
  *   dispatcher.
- * - Task `TE Sync`: inline JavaScriptlet (129) that runs the synced
- *   sync-profiles.js, self-installing it from the rolling GitHub release on
- *   first run, then queues `TE Config`.
+ * - Task `TE Sync`: a JavaScriptlet (129) resolving the JS dir and stamping
+ *   the scaffolding version/wiring hash, HTTP Request (339) downloading the
+ *   rolling release's tasker-js.zip into the JS dir, UnZip (422, only on
+ *   HTTP 200) extracting it in place, and a JavaScriptlet reporting the
+ *   outcome and queueing `TE Config`.
  * - Task `TE Config`: prompts (Input Dialog, 360) for every secret declared
  *   in secrets.json whose Tasker global is still unset. Its scan/label logic
  *   lives in the synced te-config-*.js files; the XML holds only stubs that
@@ -1139,16 +1234,6 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
     [...SCAFFOLD_TASK_NAMES, ...user.stubTasks.map((task) => task.name)],
     [SYNC_PROFILE_NAME, ...user.profileNames],
   );
-
-  const isSetCondition = (variable: string): Array<string> => [
-    '\t\t\t<ConditionList sr="if">',
-    '\t\t\t\t<Condition sr="c0" ve="3">',
-    `\t\t\t\t\t<lhs>${escapeXml(variable)}</lhs>`,
-    "\t\t\t\t\t<op>12</op>",
-    "\t\t\t\t\t<rhs></rhs>",
-    "\t\t\t\t</Condition>",
-    "\t\t\t</ConditionList>",
-  ];
 
   return [
     '<TaskerData sr="" dvi="1" tv="6.3.13">',
@@ -1190,17 +1275,22 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
         intArg(3, 600),
       ]),
     ]),
-    // TE Sync: self-bootstrapping sync (Auto Exit off — the evaluated sync
-    // script finishes asynchronously and calls exit() itself).
+    // TE Sync: download the release zip and unzip it natively into the JS
+    // dir. The files never pass through a Tasker string, so no %variable
+    // expansion can corrupt them (Tasker's JS writeFile() expands them).
     ...xmlTask(SYNC_TASK_ID, SYNC_TASK_NAME, [
       ...scriptletAction(
         0,
-        syncBootstrapJs(options.repo, jsDir, profileWiringHash(profiles)),
-        {
-          autoExit: false,
-          timeoutSecs: 600,
-        },
+        syncPrepareJs(jsDir, profileWiringHash(profiles)),
+        { autoExit: true, timeoutSecs: 45 },
       ),
+      ...httpDownloadAction(
+        1,
+        releaseZipUrl(options.repo),
+        `%${SYNC_ZIP_LOCAL}`,
+      ),
+      ...unzipAfterDownloadAction(2, `%${SYNC_ZIP_LOCAL}`),
+      ...scriptletAction(3, syncFinishJs, { autoExit: true, timeoutSecs: 45 }),
     ]),
     // TE Config: prompt for declared-but-unset secrets. The scan/label logic
     // lives in synced te-config-*.js files; the XML holds only eval stubs.
@@ -1209,7 +1299,7 @@ export const taskerProjectXml = (options: TaskerProjectXmlOptions): string => {
         autoExit: false,
         timeoutSecs: 600,
       }),
-      ...xmlAction(1, 37, isSetCondition("%te_missing")),
+      ...xmlAction(1, 37, conditionList("%te_missing", CONDITION_IS_SET, "")),
       ...xmlAction(2, 39, [
         strArg(0, "%te_secret"),
         strArg(1, "%te_missing"),
@@ -1495,7 +1585,7 @@ const dispatcherReadmeSection = (project: Project): Array<string> => [
   "",
   `1. Import \`${TASKER_PROJECT_XML_FILENAME}\` once in Tasker (long-press the home`,
   "   icon at the bottom left → Import Project). This creates the shared task",
-  `   \`${DISPATCH_TASK_NAME}\`, the self-bootstrapping \`${SYNC_TASK_NAME}\` task with its periodic`,
+  `   \`${DISPATCH_TASK_NAME}\`, the \`${SYNC_TASK_NAME}\` task with its periodic`,
   `   profile, the \`${CONFIG_TASK_NAME}\` secrets prompter, the generic \`${SHOW_SCENE_TASK_NAME}\``,
   `   task used by \`Action.showScene\`, the \`${MENU_TASK_NAME}\` task and every profile`,
   "   below whose triggers have a known XML form. Enable the `" +

@@ -11,7 +11,7 @@ import {
   compileProjectFiles,
   profileTaskName,
   profileWiringHash,
-  syncBootstrapJs,
+  syncPrepareJs,
   taskerProjectXml,
 } from "../src/compiler.js";
 import { MENU_TASK_NAME } from "../src/menu.js";
@@ -213,10 +213,10 @@ describe("profileWiringHash", () => {
   it("is stamped by TE Sync and checked (warn-only) by the dispatcher", () => {
     const project = new Project({ name: "P", profiles: [clipboardProfile] });
     const hash = profileWiringHash(project.profiles);
-    expect(syncBootstrapJs(TEST_REPO, undefined, hash)).toContain(
+    expect(syncPrepareJs(undefined, hash)).toContain(
       `setGlobal("TE_WIRING", "${hash}");`,
     );
-    expect(syncBootstrapJs(TEST_REPO)).not.toContain("TE_WIRING");
+    expect(syncPrepareJs()).not.toContain("TE_WIRING");
     const xml = taskerProjectXml({
       repo: TEST_REPO,
       profiles: project.profiles,
@@ -248,6 +248,40 @@ describe("TE Menu task", () => {
         expect(strip(task)).toBe(strip(real));
         expect(task).toContain(
           `<Str sr="arg0" ve="3">${DISPATCH_TASK_NAME}</Str>`,
+        );
+      }).pipe(Effect.provide(NodeContext.layer)),
+  );
+});
+
+describe("TE Sync task", () => {
+  it.effect(
+    "matches the HTTP Request + UnZip layout of a real download-and-unzip export",
+    () =>
+      Effect.gen(function* () {
+        const xml = taskerProjectXml({ repo: TEST_REPO });
+        const task = byId(xml, "Task", 2);
+        const real = yield* fixture("http-download-unzip.tsk.xml");
+        const actions = elements(task, "Action");
+        const realActions = elements(real, "Action");
+        // Compare the layout, ignoring whitespace, action numbers and the
+        // values we set differently (URL and paths).
+        const layout = (action: string) =>
+          action
+            .replace(/\s+/g, "")
+            .replace(/sr="act\d+"/, "")
+            .replace(/(<Strsr="arg[027]"ve="3">)[^<]*(<\/Str>)/g, "$1$2");
+        expect(layout(actions[1]!)).toBe(layout(realActions[0]!));
+        // Real: If %http_response_code = 200 (a separate action), then UnZip.
+        // Ours: the same condition attached to the UnZip action itself,
+        // placed after the arguments like the real action-level condition
+        // on the Stop action (realActions[3]).
+        const condition = elements(realActions[1]!, "ConditionList")[0]!;
+        expect(layout(actions[2]!)).toBe(
+          layout(realActions[2]!.replace("</Action>", `${condition}</Action>`)),
+        );
+        const stop = realActions[3]!;
+        expect(stop.indexOf("<ConditionList")).toBeGreaterThan(
+          stop.indexOf('sr="arg1"'),
         );
       }).pipe(Effect.provide(NodeContext.layer)),
   );
