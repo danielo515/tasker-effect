@@ -126,7 +126,10 @@ describe("profile wiring in the project XML", () => {
       );
       expect(task).toContain('<Int sr="arg2" val="1"/>');
       expect(task).toContain('<Int sr="arg3" val="600"/>');
+      // Run Both Together, so quick repeated triggers are not dropped.
+      expect(task).toContain("<rty>2</rty>");
     }
+    expect(byId(xml, "Task", 1)).not.toContain("<rty>");
     expect(byId(xml, "Task", 12)).toBeUndefined();
     expect(profileTaskName(profile, "exit")).toBe("TE P (exit)");
   });

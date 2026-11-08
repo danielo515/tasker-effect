@@ -966,15 +966,23 @@ const scriptletAction = (
     intArg(3, options.timeoutSecs),
   ]);
 
+/**
+ * Tasker collision handling (`<rty>`): absent/0 = Abort New Task,
+ * 1 = Abort Existing Task, 2 = Run Both Together.
+ */
+const RUN_BOTH_TOGETHER = 2;
+
 const xmlTask = (
   id: number,
   name: string,
-  actions: ReadonlyArray<string>
+  actions: ReadonlyArray<string>,
+  options: { readonly collision?: number } = {}
 ): Array<string> => [
   `\t<Task sr="task${id}">`,
   "\t\t<cdate>1</cdate>",
   `\t\t<id>${id}</id>`,
   `\t\t<nme>${escapeXml(name)}</nme>`,
+  ...(options.collision === undefined ? [] : [`\t\t<rty>${options.collision}</rty>`]),
   ...actions,
   "\t</Task>",
 ];
@@ -1424,9 +1432,14 @@ const userProfilesXml = (
         "\t</Profile>",
       ],
       tasks: stubTasks.flatMap((task) =>
-        xmlTask(task.id, task.name, [
-          ...scriptletAction(0, stub, { autoExit: true, timeoutSecs: 600 }),
-        ])
+        // Run Both Together: with the default (Abort New) a second trigger
+        // while the task still runs is dropped, e.g. two quick copies.
+        xmlTask(
+          task.id,
+          task.name,
+          [...scriptletAction(0, stub, { autoExit: true, timeoutSecs: 600 })],
+          { collision: RUN_BOTH_TOGETHER }
+        )
       ),
     };
   });
